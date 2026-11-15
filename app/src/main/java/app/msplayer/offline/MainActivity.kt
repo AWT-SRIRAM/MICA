@@ -51,6 +51,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -3730,6 +3731,29 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
         panX = 0f
         panY = 0f
     }
+    val upscaleMode by service.upscaleMode.collectAsState()
+    DisposableEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            runCatching {
+                val modes = activity.display?.supportedModes ?: emptyArray()
+                val highRefresh = modes.filter { it.refreshRate >= 119f }.maxByOrNull { it.refreshRate }
+                if (highRefresh != null) {
+                    val lp = activity.window.attributes
+                    lp.preferredDisplayModeId = highRefresh.modeId
+                    activity.window.attributes = lp
+                }
+            }
+        }
+        onDispose {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                runCatching {
+                    val lp = activity.window.attributes
+                    lp.preferredDisplayModeId = 0
+                    activity.window.attributes = lp
+                }
+            }
+        }
+    }
     LaunchedEffect(state.item?.uri, state.videoWidth, state.videoHeight, activity.inPip) { activity.videoOrientation(state) }
     LaunchedEffect(state.item?.uri, state.videoWidth, state.videoHeight, state.playing, activity.showPlayer, activity.pipSourceRect) {
         activity.updatePipParams()
@@ -3807,6 +3831,25 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                     translationX = panX
                     translationY = panY
                     clip = false
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                        if (upscaleMode != PlaybackService.UpscaleMode.OFF) {
+                            val cm = android.graphics.ColorMatrix()
+                            val scale = upscaleMode.contrast
+                            val translate = (1f - scale) * 128f + (upscaleMode.brightness - 1f) * 255f
+                            cm.set(floatArrayOf(
+                                scale, 0f, 0f, 0f, translate,
+                                0f, scale, 0f, 0f, translate,
+                                0f, 0f, scale, 0f, translate,
+                                0f, 0f, 0f, 1f, 0f
+                            ))
+                            val sat = android.graphics.ColorMatrix()
+                            sat.setSaturation(upscaleMode.saturation)
+                            cm.postConcat(sat)
+                            renderEffect = android.graphics.RenderEffect.createColorFilterEffect(android.graphics.ColorMatrixColorFilter(cm)).asComposeRenderEffect()
+                        } else {
+                            renderEffect = null
+                        }
+                    }
                 }
                 .onGloballyPositioned { coords ->
                     val b = coords.boundsInWindow()
@@ -4127,6 +4170,35 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 modifier = Modifier.iosLiquidPress(lockSrc, scaleDown = 0.88f),
                             ) {
                                 Icon(Icons.Default.LockOpen, "Lock controls", tint = Color.White)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            val upscaleSrc = remember { MutableInteractionSource() }
+                            val currentUpscale by service.upscaleMode.collectAsState()
+                            IconButton(
+                                onClick = {
+                                    val next = service.cycleUpscaleMode()
+                                    hint(PlayerFeedback.Message(next.label))
+                                    touch()
+                                },
+                                interactionSource = upscaleSrc,
+                                modifier = Modifier.iosLiquidPress(upscaleSrc, scaleDown = 0.88f),
+                            ) {
+                                Box(contentAlignment = Alignment.Center) {
+                                    if (currentUpscale != PlaybackService.UpscaleMode.OFF) {
+                                        Box(
+                                            Modifier
+                                                .size(28.dp)
+                                                .clip(CircleShape)
+                                                .background(Cyan.copy(alpha = 0.22f))
+                                        )
+                                    }
+                                    Icon(
+                                        Icons.Default.AutoAwesome,
+                                        contentDescription = currentUpscale.label,
+                                        tint = if (currentUpscale != PlaybackService.UpscaleMode.OFF) Cyan else Color.White,
+                                        modifier = Modifier.size(24.dp),
+                                    )
+                                }
                             }
                             Spacer(Modifier.weight(1f))
                             IconButton(

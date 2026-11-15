@@ -34,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -109,6 +110,7 @@ sealed interface PlayerFeedback {
     data class Speed(val rate: Float, val changedAt: Long = 0L) : PlayerFeedback
     data class SubtitlePosition(val percent: Int) : PlayerFeedback
     data class SubtitleScale(val percent: Int) : PlayerFeedback
+    data class Message(val text: String) : PlayerFeedback
 }
 
 @Composable
@@ -308,6 +310,20 @@ fun PlayerFeedbackOverlay(value: PlayerFeedback, modifier: Modifier = Modifier) 
                 Icon(Icons.Default.FormatSize, null, tint = Accent, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.width(10.dp))
                 Text("Subtitle Size: ${value.percent}%", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+        is PlayerFeedback.Message -> {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Row(
+                    Modifier
+                        .frostedGlassChrome(glassEnabled, RoundedCornerShape(18.dp), fallbackColor = Color.Black.copy(alpha = .78f))
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Default.AutoAwesome, null, tint = Cyan, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(value.text, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                }
             }
         }
     }
@@ -1436,6 +1452,12 @@ fun MediaInformationContent(
     val valueColor = if (inPlayer) Color.White else LocalAppPalette.current.textPrimary
     val sectionColor = if (inPlayer) Cyan else LocalAppPalette.current.accent
     val dividerColor = if (inPlayer) Color.White.copy(alpha = 0.10f) else LocalAppPalette.current.divider
+    val context = LocalContext.current
+    val currentFps = remember(context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching { context.display?.mode?.refreshRate?.let { kotlin.math.round(it).toInt() } }.getOrNull() ?: 60
+        } else 60
+    }
 
     @Composable
     fun InfoSection(title: String, rows: List<Pair<String, String>>) {
@@ -1507,6 +1529,15 @@ fun MediaInformationContent(
                     val rawFps = stream.frameRate.replace(',', '.').replace("fps", "", ignoreCase = true).trim()
                     val cleanFps = rawFps.toDoubleOrNull()?.let { "${kotlin.math.round(it).toInt()} fps" } ?: stream.frameRate
                     add("Frame rate" to cleanFps)
+                    if (inPlayer && currentFps > 0) {
+                        val cadence = when {
+                            currentFps >= 140 -> "Smooth 6:6 Cadence"
+                            currentFps >= 115 -> "Smooth 5:5 Cadence"
+                            currentFps >= 85 -> "Smooth 4:4 Cadence"
+                            else -> "Standard Cadence"
+                        }
+                        add("Output motion rate" to "$currentFps Hz ($cadence)")
+                    }
                 }
                 if (stream.sampleRateHz > 0) add("Sample rate" to "${stream.sampleRateHz} Hz")
                 if (stream.channels > 0) add("Channels" to "${stream.channels} ch")

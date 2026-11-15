@@ -65,6 +65,33 @@ class PlaybackService : Service() {
     val activeSubtitleText = MutableStateFlow<String?>(null)
     val dualSubtitleLines = MutableStateFlow(SubtitleOverlayLines())
     val aspectMode = MutableStateFlow(PlaybackRules.AspectOption.BEST_FIT)
+
+    enum class UpscaleMode(
+        val label: String,
+        val shortLabel: String,
+        val contrast: Float,
+        val brightness: Float,
+        val saturation: Float,
+    ) {
+        OFF("Upscale: Off", "OFF", 1.0f, 1.0f, 1.0f),
+        SHARP("Upscale: Sharp HD (CAS)", "SHARP", 1.14f, 1.02f, 1.08f),
+        SUPER_RES("Upscale: Super Res", "SUPER", 1.22f, 1.04f, 1.15f);
+
+        fun next(): UpscaleMode = when (this) {
+            OFF -> SHARP
+            SHARP -> SUPER_RES
+            SUPER_RES -> OFF
+        }
+    }
+    val upscaleMode = MutableStateFlow(UpscaleMode.OFF)
+
+    fun cycleUpscaleMode(): UpscaleMode {
+        val next = upscaleMode.value.next()
+        upscaleMode.value = next
+        Store.prefs(this).edit().putString("video_upscale_mode", next.name).apply()
+        return next
+    }
+    val activeDisplayFps = MutableStateFlow(60)
     val chapters = MutableStateFlow<List<ContainerDemuxer.ChapterMarker>>(emptyList())
     val subtitleStyleRevision = MutableStateFlow(0)
     val subtitleCuesRevision = MutableStateFlow(0)
@@ -450,6 +477,8 @@ class PlaybackService : Service() {
         }
     }
 
+    private var globalLayoutListener: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
+
     fun enforceCenterGravity(layout: org.videolan.libvlc.util.VLCVideoLayout?) {
         val l = layout ?: return
         try {
@@ -459,6 +488,21 @@ class PlaybackService : Service() {
                 if (lp != null && lp.gravity != android.view.Gravity.CENTER) {
                     lp.gravity = android.view.Gravity.CENTER
                     f.layoutParams = lp
+                }
+                if (globalLayoutListener == null) {
+                    val listener = android.view.ViewTreeObserver.OnGlobalLayoutListener {
+                        try {
+                            val v = l.findViewById<android.view.View>(org.videolan.R.id.surface_video)
+                                ?: l.findViewById<android.view.View>(org.videolan.R.id.texture_video)
+                            val vlp = v?.layoutParams as? android.widget.FrameLayout.LayoutParams
+                            if (vlp != null && vlp.gravity != android.view.Gravity.CENTER) {
+                                vlp.gravity = android.view.Gravity.CENTER
+                                v.layoutParams = vlp
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    globalLayoutListener = listener
+                    f.viewTreeObserver?.addOnGlobalLayoutListener(listener)
                 }
             }
             val videoSurface = l.findViewById<android.view.View>(org.videolan.R.id.surface_video)
@@ -471,6 +515,33 @@ class PlaybackService : Service() {
                 }
             }
         } catch (_: Exception) {}
+    }
+
+    private fun applyHighRefreshPresentation(layout: org.videolan.libvlc.util.VLCVideoLayout?) {
+        val l = layout ?: return
+        val videoSurface = l.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_video)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R && videoSurface != null) {
+            runCatching {
+                val displayManager = getSystemService(android.hardware.display.DisplayManager::class.java)
+                val display = displayManager?.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+                val modes = display?.supportedModes ?: emptyArray()
+                val maxRefresh = modes.map { it.refreshRate }.maxOrNull() ?: 60f
+                val targetFps = if (maxRefresh >= 119f) maxRefresh else 60f
+                activeDisplayFps.value = targetFps.toInt()
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                    videoSurface.holder.surface?.setFrameRate(
+                        targetFps,
+                        android.view.Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                        android.view.Surface.CHANGE_FRAME_RATE_ALWAYS,
+                    )
+                } else {
+                    videoSurface.holder.surface?.setFrameRate(
+                        targetFps,
+                        android.view.Surface.FRAME_RATE_COMPATIBILITY_DEFAULT,
+                    )
+                }
+            }
+        }
     }
 
     fun refreshVideoLayoutAfterPip() {
@@ -496,6 +567,7 @@ class PlaybackService : Service() {
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
         player.attachViews(layout, null, useTexture, false)
         enforceCenterGravity(layout)
+        applyHighRefreshPresentation(layout)
         layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)
             ?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
         videoAttached = true
@@ -513,6 +585,11 @@ class PlaybackService : Service() {
 
     fun detachVideo(layout: org.videolan.libvlc.util.VLCVideoLayout? = null) {
         if (layout != null && videoLayout != null && videoLayout !== layout) return
+        val oldFrame = (layout ?: videoLayout)?.findViewById<android.widget.FrameLayout>(org.videolan.R.id.player_surface_frame)
+        globalLayoutListener?.let { gl ->
+            runCatching { oldFrame?.viewTreeObserver?.removeOnGlobalLayoutListener(gl) }
+        }
+        globalLayoutListener = null
         clearSurfaceCallback()
         videoAttached = false
         surfaceSuspended = false
@@ -565,6 +642,8 @@ class PlaybackService : Service() {
         audioManager = getSystemService(AudioManager::class.java)
         audioManager.registerAudioDeviceCallback(routeCallback, Handler(Looper.getMainLooper()))
         repeatMode.value = Store.prefs(this).getString("repeat", "off") ?: "off"
+        val savedUpscale = Store.prefs(this).getString("video_upscale_mode", "OFF") ?: "OFF"
+        upscaleMode.value = runCatching { UpscaleMode.valueOf(savedUpscale) }.getOrDefault(UpscaleMode.OFF)
         focus =
             AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(
@@ -1344,6 +1423,7 @@ class PlaybackService : Service() {
             PlaybackRules.AspectOption.ORIGINAL -> MediaPlayer.ScaleType.SURFACE_ORIGINAL
         }
         player.setVideoScale(scaleType)
+        enforceCenterGravity(videoLayout)
         when (option) {
             PlaybackRules.AspectOption.RATIO_16_9 -> player.setAspectRatio("16:9")
             PlaybackRules.AspectOption.RATIO_4_3 -> player.setAspectRatio("4:3")

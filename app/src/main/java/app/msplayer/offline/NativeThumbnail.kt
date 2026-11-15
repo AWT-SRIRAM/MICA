@@ -40,7 +40,7 @@ object NativeThumbnail {
                 return@withContext null
             }
             android.util.Log.i("MSPLAYER_NATIVE", "NativeThumbnail.read starting for ${item.title}")
-            val reader = ImageReader.newInstance(320, 180, PixelFormat.RGBX_8888, 2)
+            val reader = ImageReader.newInstance(640, 360, PixelFormat.RGBX_8888, 2)
             val thread = HandlerThread("thumbnail-frame").apply { start() }
             val result = CompletableDeferred<Bitmap?>()
             var descriptor: android.os.ParcelFileDescriptor? = null
@@ -124,7 +124,7 @@ object NativeThumbnail {
                 media.addOption(":no-audio")
                 media.addOption(":no-spu")
                 player.vlcVout.setVideoSurface(reader.surface, null)
-                player.vlcVout.setWindowSize(320, 180)
+                player.vlcVout.setWindowSize(640, 360)
                 player.vlcVout.attachViews()
                 player.media = media
                 media.release()

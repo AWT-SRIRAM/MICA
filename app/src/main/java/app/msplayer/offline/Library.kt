@@ -373,16 +373,20 @@ object Library {
     private val thumbLocks = Array(32) { Mutex() }
     val thumbnailRevision = MutableStateFlow(0)
     private val failedThumbs = LruCache<String, Boolean>(512)
-    fun retryThumbnails() { thumbs.evictAll(); failedThumbs.evictAll(); thumbnailRevision.value++ }
-    fun retryFailedThumbnails() { failedThumbs.evictAll() }
+    private val folderThumbs = LruCache<String, Bitmap>(64)
+    fun retryThumbnails() { thumbs.evictAll(); failedThumbs.evictAll(); folderThumbs.evictAll(); thumbnailRevision.value++ }
+    fun retryFailedThumbnails() { failedThumbs.evictAll(); folderThumbs.evictAll() }
 
     suspend fun folderThumbnail(context: Context, folder: MediaFolder): Bitmap? {
+        val folderKey = "${folder.name}|${folder.items.size}"
+        folderThumbs.get(folderKey)?.let { return it }
         val candidates = folder.items.filter { !it.audio }.sortedByDescending { it.added.takeIf { a -> a > 0 } ?: it.modified }
-        android.util.Log.i("MSPLAYER_THUMB", "folderThumbnail for ${folder.name}: candidates=${candidates.size}")
-        for (item in candidates.take(6)) {
+        for (item in candidates.take(3)) {
             val thumb = thumbnail(context, item)
-            android.util.Log.i("MSPLAYER_THUMB", "folderThumbnail ${folder.name} checked ${item.title}: success=${thumb != null}")
-            if (thumb != null) return thumb
+            if (thumb != null) {
+                folderThumbs.put(folderKey, thumb)
+                return thumb
+            }
         }
         return null
     }
@@ -847,23 +851,35 @@ object Library {
     fun isDark(bitmap: Bitmap): Boolean {
         var total = 0L
         var bright = 0
+        // Sample the inner 60% of the frame (x: 20%..80%, y: 25%..75%)
+        // This avoids black letterbox bars in cinema widescreen movies (2.39:1)
+        val w = bitmap.width
+        val h = bitmap.height
+        val minX = (w * 0.20f).toInt().coerceIn(0, w - 1)
+        val maxX = (w * 0.80f).toInt().coerceIn(minX, w - 1)
+        val minY = (h * 0.25f).toInt().coerceIn(0, h - 1)
+        val maxY = (h * 0.75f).toInt().coerceIn(minY, h - 1)
+        val spanX = maxOf(1, maxX - minX)
+        val spanY = maxOf(1, maxY - minY)
         for (x in 0..7) for (y in 0..7) {
-            val pixel = bitmap.getPixel(x * (bitmap.width - 1) / 7, y * (bitmap.height - 1) / 7)
+            val sampleX = minX + (x * spanX) / 7
+            val sampleY = minY + (y * spanY) / 7
+            val pixel = bitmap.getPixel(sampleX, sampleY)
             val level = maxOf(android.graphics.Color.red(pixel), android.graphics.Color.green(pixel), android.graphics.Color.blue(pixel))
             total += level
-            if (level > 30) bright++
+            if (level > 24) bright++
         }
-        return total < 64 * 12 || bright < 3
+        return total < 64 * 10 || bright < 3
     }
 
     suspend fun thumbnail(context: Context, item: MediaItem): Bitmap? {
         if (item.audio || PlaybackRules.isStreamUrl(item.uri)) return null
-        val key = "v5|${item.uri}|${item.size}|${item.modified}|${item.added}"
+        val key = "v6|${item.uri}|${item.size}|${item.modified}|${item.added}"
         return thumbLocks[(key.hashCode() and Int.MAX_VALUE) % thumbLocks.size].withLock {
             thumbs.get(key)?.let { return@withLock it }
             thumbSlots.withPermit {
                 var bitmap = withContext(Dispatchers.IO) {
-                    val directory = java.io.File(context.cacheDir, "video-thumbnails-v5").apply { mkdirs() }
+                    val directory = java.io.File(context.cacheDir, "video-thumbnails-v6").apply { mkdirs() }
                     val fileKey = "th_" + (key.hashCode().toLong() and 0xFFFFFFFFL).toString(16) + "_" + (item.uri.hashCode().toLong() and 0xFFFFFFFFL).toString(16)
                     val disk = java.io.File(directory, "$fileKey.jpg")
                     val foundDisk = if (disk.isFile && disk.length() > 0) android.graphics.BitmapFactory.decodeFile(disk.path) else null
@@ -877,7 +893,7 @@ object Library {
                         try {
                             val parsed = Uri.parse(item.uri)
                             val mediaStoreThumb = runCatching {
-                                context.contentResolver.loadThumbnail(parsed, android.util.Size(320, 180), signal)
+                                context.contentResolver.loadThumbnail(parsed, android.util.Size(640, 360), signal)
                             }.getOrNull()
                             if (mediaStoreThumb != null) {
                                 candidateThumb = mediaStoreThumb
@@ -911,20 +927,7 @@ object Library {
                         }
                     }
 
-                    val ext = PlaybackRules.mediaExtension(item.title).lowercase(Locale.ROOT)
-                    val isMatroska = ext in listOf("mkv", "webm", "m4v")
 
-                    if (isMatroska && (found == null || isDark(found))) {
-                        android.util.Log.i("MSPLAYER_THUMB", "Calling NativeThumbnail.read for Matroska item: ${item.title}")
-                        val vlcFrame = kotlinx.coroutines.withTimeoutOrNull(4500L) {
-                            runCatching { NativeThumbnail.read(context, item) }.getOrNull()
-                        }
-                        if (vlcFrame != null && !isDark(vlcFrame)) {
-                            found = vlcFrame
-                        } else if (found == null && vlcFrame != null) {
-                            found = vlcFrame
-                        }
-                    }
 
                     if (found == null || isDark(found)) {
                         val fallback = kotlinx.coroutines.withTimeoutOrNull(2000L) {
@@ -965,8 +968,8 @@ object Library {
                                     ?: 0L
                                 val sourceW = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()?.coerceAtLeast(1) ?: 240
                                 val sourceH = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()?.coerceAtLeast(1) ?: 135
-                                val outW = if (sourceW >= sourceH) 320 else (320f * sourceW / sourceH).toInt().coerceAtLeast(1)
-                                val outH = if (sourceH >= sourceW) 320 else (320f * sourceH / sourceW).toInt().coerceAtLeast(1)
+                                val outW = if (sourceW >= sourceH) 640 else (640f * sourceW / sourceH).toInt().coerceAtLeast(1)
+                                val outH = if (sourceH >= sourceW) 360 else (360f * sourceH / sourceW).toInt().coerceAtLeast(1)
 
                                 fun extractFrame(timeMs: Long): Bitmap? {
                                     val timeUs = if (timeMs >= 0) timeMs * 1000L else -1L
@@ -1028,12 +1031,12 @@ object Library {
                 if (bitmap != null) {
                     thumbs.put(key, bitmap)
                     withContext(Dispatchers.IO) {
-                        val directory = java.io.File(context.cacheDir, "video-thumbnails-v5").apply { mkdirs() }
+                        val directory = java.io.File(context.cacheDir, "video-thumbnails-v6").apply { mkdirs() }
                         val fileKey = "th_" + (key.hashCode().toLong() and 0xFFFFFFFFL).toString(16) + "_" + (item.uri.hashCode().toLong() and 0xFFFFFFFFL).toString(16)
                         val target = java.io.File(directory, "$fileKey.jpg")
                         runCatching {
                             val temp = java.io.File(directory, "$fileKey.tmp")
-                            temp.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                            temp.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
                             if (!temp.renameTo(target)) temp.delete()
                         }
                     }
