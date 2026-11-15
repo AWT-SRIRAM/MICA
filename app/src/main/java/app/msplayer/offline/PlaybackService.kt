@@ -450,15 +450,43 @@ class PlaybackService : Service() {
         }
     }
 
+    fun enforceCenterGravity(layout: org.videolan.libvlc.util.VLCVideoLayout?) {
+        val l = layout ?: return
+        try {
+            val frame = l.findViewById<android.widget.FrameLayout>(org.videolan.R.id.player_surface_frame)
+            frame?.let { f ->
+                val lp = f.layoutParams as? android.widget.FrameLayout.LayoutParams
+                if (lp != null && lp.gravity != android.view.Gravity.CENTER) {
+                    lp.gravity = android.view.Gravity.CENTER
+                    f.layoutParams = lp
+                }
+            }
+            val videoSurface = l.findViewById<android.view.View>(org.videolan.R.id.surface_video)
+                ?: l.findViewById<android.view.View>(org.videolan.R.id.texture_video)
+            videoSurface?.let { v ->
+                val lp = v.layoutParams as? android.widget.FrameLayout.LayoutParams
+                if (lp != null && lp.gravity != android.view.Gravity.CENTER) {
+                    lp.gravity = android.view.Gravity.CENTER
+                    v.layoutParams = lp
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
     fun refreshVideoLayoutAfterPip() {
         val layout = videoLayout ?: return
         if (released || surfaceSuspended) return
-        layout.post {
+        val doRefresh = Runnable {
             if (!released && !surfaceSuspended) {
+                enforceCenterGravity(layout)
                 setAspectMode(aspectMode.value, persistFolder = false)
                 updateSubtitlePlacement(controlsVisible)
+                layout.requestLayout()
             }
         }
+        layout.post(doRefresh)
+        layout.postDelayed(doRefresh, 120L)
+        layout.postDelayed(doRefresh, 280L)
     }
 
     fun attachVideo(layout: org.videolan.libvlc.util.VLCVideoLayout) {
@@ -467,10 +495,14 @@ class PlaybackService : Service() {
         surfaceSuspended = false
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
         player.attachViews(layout, null, useTexture, false)
+        enforceCenterGravity(layout)
         layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)
             ?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
         videoAttached = true
-        layout.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
+        layout.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            enforceCenterGravity(layout)
+            updateSubtitlePlacement(controlsVisible)
+        }
         setAspectMode(aspectMode.value, persistFolder = false)
         updateSubtitlePlacement(controlsVisible)
         if (pendingPlayback) {
@@ -2367,6 +2399,7 @@ class PlaybackService : Service() {
                 if (state.value.playing) "Playing · MS PLAYER" else "Paused · MS PLAYER"
             )
             .setContentIntent(open)
+            .setDeleteIntent(action("stop"))
             .setOnlyAlertOnce(true)
             .setSound(null)
             .setOngoing(state.value.playing)
@@ -2382,7 +2415,7 @@ class PlaybackService : Service() {
             .setStyle(
                 android.app.Notification.MediaStyle()
                     .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2)
+                    .setShowActionsInCompactView(1, 2, 3)
             )
             .build()
     }

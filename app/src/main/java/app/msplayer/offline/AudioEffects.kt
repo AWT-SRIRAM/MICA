@@ -14,19 +14,19 @@ data class AudioEffectSettings(
     val tenBandMode: Boolean = false,
 ) {
     private fun basePresetGains(): List<Float> = when (preset) {
-        "Clarity" -> listOf(-2.5f, -1.5f, -0.5f, 0.5f, 1.5f, 2.5f, 3.5f, 4f, 3f, 1.5f)
+        "Clear Voice", "Earbuds Vocal" -> listOf(-3f, -2.5f, -1f, 0.5f, 2.5f, 4.5f, 5.5f, 4.5f, 2.5f, 0.5f)
+        "Clarity" -> listOf(-2f, -1f, 0f, 1f, 2f, 3.5f, 4.5f, 4.5f, 3f, 1.5f)
         "Bass Boost" -> listOf(5f, 4f, 3f, 1f, 0f, -1f, -1f, 0f, 0f, 0f)
         "Treble Boost" -> listOf(0f, 0f, -1f, -1f, 0f, 1f, 2f, 3f, 4f, 4f)
-        "Movie" -> listOf(3f, 2f, 0f, -1f, 1f, 3f, 2f, 1f, 2f, 2f)
+        "Movie" -> listOf(1f, 0.5f, -0.5f, 0.5f, 2f, 4f, 3.5f, 2.5f, 2f, 1.5f)
         "Music" -> listOf(3f, 2f, 0f, -1f, -1f, 0f, 1f, 2f, 3f, 2f)
         "Classical" -> listOf(4f, 3f, 2f, 1f, -1f, -1f, 0f, 2f, 3f, 4f)
         "Dance" -> listOf(5f, 4f, 1f, 0f, 0f, -2f, 2f, 3f, 4f, 3f)
         "Rock" -> listOf(4f, 3f, 2f, 1f, -1f, -1f, 1f, 3f, 4f, 4f)
         "Headphones" -> listOf(4.8f, 11.2f, 5.6f, -3.2f, -2.4f, 1.6f, 4.8f, 9.6f, 12.8f, 14.4f)
-        "Earbuds Vocal" -> listOf(-3f, -2f, -1f, 1.5f, 3.5f, 4.5f, 3.5f, 2f, 1f, 0f)
         "Deep Bass" -> listOf(6f, 5f, 3.5f, 1.5f, 0f, -1f, 0f, 1f, 1f, 1f)
         "Cinematic Spatial" -> listOf(2f, 1f, 0f, -1f, 0f, 1.5f, 2f, 3f, 4.5f, 4.5f)
-        "Night Mode" -> listOf(-2f, -1f, 0f, 2f, 3f, 3.5f, 2f, 0f, -2f, -4f)
+        "Night Mode" -> listOf(-3f, -2f, 0f, 2.5f, 4f, 4.5f, 3f, 1f, -1f, -3f)
         "Custom" -> List(10) { bands.getOrElse(it) { 0f }.coerceIn(-12f, 12f) }
         else -> List(10) { 0f } // "Original", "Normal", "Flat"
     }
@@ -116,9 +116,9 @@ data class AudioEffectSettings(
 
     companion object {
         val presets = listOf(
-            "Original", "Clarity", "Headphones", "Earbuds Vocal", "Deep Bass",
-            "Cinematic Spatial", "Night Mode", "Bass Boost", "Treble Boost",
-            "Movie", "Music", "Normal", "Classical", "Dance", "Flat", "Rock"
+            "Clear Voice", "Clarity", "Bass Boost",
+            "Movie", "Music", "Headphones",
+            "Deep Bass", "Night Mode", "Original",
         )
         val reverbPresets = listOf(
             "None", "Small Room", "Medium Room", "Large Room", "Medium Hall", "Large Hall", "Plate"

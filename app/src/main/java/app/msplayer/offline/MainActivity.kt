@@ -1006,6 +1006,7 @@ private fun LibraryHome(
     var deleteTarget by remember { mutableStateOf<MediaItem?>(null) }
     var deleteSelectedDialog by remember { mutableStateOf(false) }
     var manualRefreshing by remember { mutableStateOf(false) }
+    var lastFolderNavTime by remember { mutableLongStateOf(0L) }
     LaunchedEffect(activity.scanning) {
         if (!activity.scanning && manualRefreshing) {
             manualRefreshing = false
@@ -1081,7 +1082,10 @@ private fun LibraryHome(
             else -> filtered.sortedBy { it.title.lowercase() }
         }
     fun play(item: MediaItem) {
-        activity.startMedia(items, item)
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - lastFolderNavTime >= 350L) {
+            activity.startMedia(items, item)
+        }
     }
     fun overflow(item: MediaItem, action: String) {
         when (action) {
@@ -1687,7 +1691,13 @@ private fun LibraryHome(
                                                     .combinedClickable(
                                                         interactionSource = folderSrc,
                                                         indication = ripple(),
-                                                        onClick = { onFolderChange(entry.name) },
+                                                        onClick = {
+                                                            val now = android.os.SystemClock.uptimeMillis()
+                                                            if (now - lastFolderNavTime >= 350L) {
+                                                                lastFolderNavTime = now
+                                                                onFolderChange(entry.name)
+                                                            }
+                                                        },
                                                         onLongClick = { folderAction = entry.name },
                                                     )
                                                     .padding(
@@ -1842,7 +1852,7 @@ private fun LibraryHome(
                 }
             }
         }
-        val showResumeFab = state.item?.audio != true && tab != "Settings" &&
+        val showResumeFab = (folder != null || activePlaylist != null) && state.item?.audio != true && tab != "Settings" &&
             !(tab == "Playlists" && activePlaylist == null) &&
             (activity.videos.isNotEmpty() || state.item != null)
         if (showResumeFab) {
@@ -1963,6 +1973,9 @@ private fun LibraryHome(
                 }
                 IconButton(onClick = { service.next() }) {
                     Icon(Icons.Default.SkipNext, "Next track", tint = palette.textPrimary)
+                }
+                IconButton(onClick = { service.stopPlayback() }) {
+                    Icon(Icons.Default.Close, "Dismiss and stop music", tint = palette.textSecondary)
                 }
             }
         }
@@ -3712,6 +3725,11 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
         panX = 0f
         panY = 0f
     }
+    LaunchedEffect(activity.inPip) {
+        zoom = 1f
+        panX = 0f
+        panY = 0f
+    }
     LaunchedEffect(state.item?.uri, state.videoWidth, state.videoHeight, activity.inPip) { activity.videoOrientation(state) }
     LaunchedEffect(state.item?.uri, state.videoWidth, state.videoHeight, state.playing, activity.showPlayer, activity.pipSourceRect) {
         activity.updatePipParams()
@@ -3770,7 +3788,17 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
         CompositionLocalProvider(LocalContentColor provides Color.White) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
-            factory = { context -> VLCVideoLayout(context).also { attachedLayout = it; service.attachVideo(it) } },
+            factory = { context ->
+                VLCVideoLayout(context).also { layout ->
+                    attachedLayout = layout
+                    service.attachVideo(layout)
+                    layout.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+                        if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
+                            service.refreshVideoLayoutAfterPip()
+                        }
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
@@ -4149,6 +4177,8 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 onClick = {
                                     val nextAspect = aspectOption.next()
                                     zoom = 1f
+                                    panX = 0f
+                                    panY = 0f
                                     service.setAspectMode(nextAspect)
                                     touch()
                                     hint(PlayerFeedback.AspectRatio(nextAspect.label))

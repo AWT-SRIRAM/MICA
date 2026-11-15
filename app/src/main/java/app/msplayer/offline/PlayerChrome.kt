@@ -629,7 +629,7 @@ fun AudioEffectsControls(service: PlaybackService) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(
                                 when (name) {
-                                    "Clarity", "Earbuds Vocal" -> Icons.Default.Mic
+                                    "Clear Voice", "Earbuds Vocal", "Clarity" -> Icons.Default.Mic
                                     "Bass Boost", "Deep Bass" -> Icons.Default.Speaker
                                     "Treble Boost", "Cinematic Spatial" -> Icons.Default.SurroundSound
                                     "Headphones" -> Icons.Default.Headphones
@@ -1503,7 +1503,11 @@ fun MediaInformationContent(
                 if (stream.codec.isNotBlank()) add("Codec" to stream.codec)
                 if (stream.profile.isNotBlank()) add("Profile" to stream.profile)
                 if (stream.width > 0 && stream.height > 0) add("Resolution" to "${stream.width} × ${stream.height}")
-                if (stream.frameRate.isNotBlank()) add("Frame rate" to stream.frameRate)
+                if (stream.frameRate.isNotBlank()) {
+                    val rawFps = stream.frameRate.replace(',', '.').replace("fps", "", ignoreCase = true).trim()
+                    val cleanFps = rawFps.toDoubleOrNull()?.let { "${kotlin.math.round(it).toInt()} fps" } ?: stream.frameRate
+                    add("Frame rate" to cleanFps)
+                }
                 if (stream.sampleRateHz > 0) add("Sample rate" to "${stream.sampleRateHz} Hz")
                 if (stream.channels > 0) add("Channels" to "${stream.channels} ch")
                 if (stream.language.isNotBlank()) add("Language" to stream.language)

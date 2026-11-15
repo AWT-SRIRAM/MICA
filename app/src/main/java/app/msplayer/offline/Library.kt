@@ -1279,7 +1279,8 @@ object Library {
                 detail != null && detail.fps > 0.0 -> detail.fps
                 else -> 0.0
             }
-            val fpsStr = if (fpsVal > 0.0) String.format(Locale.ROOT, "%.3f", fpsVal).trimEnd('0').trimEnd('.') else ""
+            val fpsInt = kotlin.math.round(fpsVal).toInt()
+            val fpsStr = if (fpsInt > 0) "$fpsInt fps" else ""
             streamList += MediaStreamDetail(
                 index = streamIndex++,
                 type = "Video",

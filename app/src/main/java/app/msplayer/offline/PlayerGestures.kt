@@ -107,11 +107,6 @@ fun Modifier.videoGestures(
                         gestureZoom = (gestureZoom * zoomFactor).coerceIn(.5f, 4f)
                         if (abs(gestureZoom - zoomNow) >= .01f) {
                             zoomCallback(gestureZoom)
-                            val fillMode = aspectNow == PlaybackRules.AspectOption.CROP.label || aspectNow == PlaybackRules.AspectOption.STRETCH.label
-                            service.player.currentVideoTrack?.let { t ->
-                                val sar = if (t.sarNum > 0 && t.sarDen > 0) t.sarNum.toFloat() / t.sarDen else 1f
-                                service.player.setScale(PlaybackRules.videoScale(t.width * sar, t.height.toFloat(), size.width.toFloat(), size.height.toFloat(), gestureZoom, fillMode))
-                            }
                             feedbackNow(PlayerFeedback.Zoom((gestureZoom * 100).toInt()))
                         }
                         if (pan != Offset.Zero) {
