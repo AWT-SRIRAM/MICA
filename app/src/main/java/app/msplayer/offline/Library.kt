@@ -158,8 +158,10 @@ object Store {
                         .setJournalMode(androidx.room.RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
                         .addCallback(object : androidx.room.RoomDatabase.Callback() {
                             override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
-                                db.execSQL("PRAGMA synchronous = NORMAL")
-                                db.execSQL("PRAGMA temp_store = MEMORY")
+                                runCatching { db.execSQL("PRAGMA synchronous = NORMAL") }
+                                runCatching { db.execSQL("PRAGMA temp_store = MEMORY") }
+                                runCatching { db.query("PRAGMA cache_size = -8000").close() }
+                                runCatching { db.query("PRAGMA mmap_size = 30000000").close() }
                             }
                         })
                         .build()
@@ -372,6 +374,7 @@ object Library {
     val thumbnailRevision = MutableStateFlow(0)
     private val failedThumbs = LruCache<String, Boolean>(512)
     fun retryThumbnails() { thumbs.evictAll(); failedThumbs.evictAll(); thumbnailRevision.value++ }
+    fun retryFailedThumbnails() { failedThumbs.evictAll() }
 
     suspend fun folderThumbnail(context: Context, folder: MediaFolder): Bitmap? {
         val candidates = folder.items.filter { !it.audio }.sortedByDescending { it.added.takeIf { a -> a > 0 } ?: it.modified }
@@ -644,24 +647,24 @@ object Library {
                                 val dataPath = if (dataCol >= 0) cursor.getString(dataCol) ?: "" else ""
                                 val isPending = if (isPendingCol >= 0) cursor.getLong(isPendingCol) == 1L else false
                                 val directFile = if (dataPath.isNotBlank()) java.io.File(dataPath) else null
+                                val id = if (idCol >= 0) cursor.getLong(idCol) else 0L
                                 val itemUri = if (isPending && directFile?.canRead() == true) {
                                     Uri.fromFile(directFile).toString()
                                 } else {
-                                    val id = if (idCol >= 0) cursor.getLong(idCol) else 0L
                                     ContentUris.withAppendedId(base, id).toString()
                                 }
-                                val folder =
-                                    if (relPathCol >= 0)
-                                        (cursor.getString(relPathCol) ?: "").trimEnd('/').ifBlank { "Storage" }
-                                    else
-                                        dataPath
-                                            .substringBeforeLast('/')
-                                            .substringAfterLast('/')
-                                            .ifBlank { "Storage" }
+                                val rawName = if (nameCol >= 0) cursor.getString(nameCol) else null
+                                val title = rawName?.takeIf { it.isNotBlank() }
+                                    ?: dataPath.substringAfterLast('/').takeIf { it.isNotBlank() }
+                                    ?: "Video_$id"
+                                val rawRel = if (relPathCol >= 0) cursor.getString(relPathCol)?.trim('/') else null
+                                val folder = rawRel?.takeIf { it.isNotBlank() }
+                                    ?: dataPath.substringBeforeLast('/').substringAfterLast('/').takeIf { it.isNotBlank() }
+                                    ?: "Storage"
                                 updated +=
                                     MediaItem(
                                         itemUri,
-                                        if (nameCol >= 0) cursor.getString(nameCol) ?: "" else "",
+                                        title,
                                         folder,
                                         if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
                                         if (durCol >= 0) cursor.getLong(durCol) else 0L,
@@ -745,22 +748,21 @@ object Library {
                                 val dataPath = if (dataCol >= 0) cursor.getString(dataCol) ?: "" else ""
                                 val isPending = if (isPendingCol >= 0) cursor.getLong(isPendingCol) == 1L else false
                                 val directFile = if (dataPath.isNotBlank()) java.io.File(dataPath) else null
+                                val id = if (idCol >= 0) cursor.getLong(idCol) else 0L
                                 val itemUri = if (isPending && directFile?.canRead() == true) {
                                     Uri.fromFile(directFile).toString()
                                 } else {
-                                    val id = if (idCol >= 0) cursor.getLong(idCol) else 0L
                                     ContentUris.withAppendedId(base, id).toString()
                                 }
-                                val title = if (nameCol >= 0) cursor.getString(nameCol) ?: "" else ""
+                                val rawName = if (nameCol >= 0) cursor.getString(nameCol) else null
+                                val title = rawName?.takeIf { it.isNotBlank() }
+                                    ?: dataPath.substringAfterLast('/').takeIf { it.isNotBlank() }
+                                    ?: "Video_$id"
                                 val size = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
-                                val folder =
-                                    if (relPathCol >= 0)
-                                        (cursor.getString(relPathCol) ?: "").trimEnd('/').ifBlank { "Storage" }
-                                    else
-                                        dataPath
-                                            .substringBeforeLast('/')
-                                            .substringAfterLast('/')
-                                            .ifBlank { "Storage" }
+                                val rawRel = if (relPathCol >= 0) cursor.getString(relPathCol)?.trim('/') else null
+                                val folder = rawRel?.takeIf { it.isNotBlank() }
+                                    ?: dataPath.substringBeforeLast('/').substringAfterLast('/').takeIf { it.isNotBlank() }
+                                    ?: "Storage"
                                 if (dataPath.isNotBlank()) knownKeys += dataPath
                                 knownKeys += "${folder.lowercase(Locale.ROOT)}|${title.lowercase(Locale.ROOT)}|${size}"
                                 items +=
@@ -856,7 +858,7 @@ object Library {
 
     suspend fun thumbnail(context: Context, item: MediaItem): Bitmap? {
         if (item.audio || PlaybackRules.isStreamUrl(item.uri)) return null
-        val key = "v5|${item.uri}|${item.size}|${item.modified}|${item.added}|${thumbnailRevision.value}"
+        val key = "v5|${item.uri}|${item.size}|${item.modified}|${item.added}"
         return thumbLocks[(key.hashCode() and Int.MAX_VALUE) % thumbLocks.size].withLock {
             thumbs.get(key)?.let { return@withLock it }
             thumbSlots.withPermit {

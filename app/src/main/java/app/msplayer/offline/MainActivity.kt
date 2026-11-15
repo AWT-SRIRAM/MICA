@@ -757,9 +757,7 @@ class MainActivity : ComponentActivity() {
                 try {
                     if (forceScan) {
                         Library.invalidateScanCache()
-                        Library.retryThumbnails()
-                        Library.triggerSystemMediaScan(this@MainActivity)
-                        delay(280)
+                        Library.retryFailedThumbnails()
                     }
                     val v = Library.scan(this@MainActivity, false, forceFull = forceScan)
                     val a = Library.scan(this@MainActivity, true, forceFull = forceScan)
@@ -1700,30 +1698,6 @@ private fun LibraryHome(
                                             ) {
                                                 Box(Modifier.width(56.dp).height(44.dp)) {
                                                     FolderThumbnail(entry, Modifier.fillMaxSize())
-                                                    val newCount =
-                                                        entry.items.count { row ->
-                                                            history.none { it.uri == row.uri }
-                                                        }
-                                                    if (newCount > 0)
-                                                        Box(
-                                                            Modifier.align(Alignment.TopEnd)
-                                                                .offset(x = 6.dp, y = (-5).dp)
-                                                                .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
-                                                                .clip(RoundedCornerShape(9.dp))
-                                                                .background(Color(0xFFFF3B72))
-                                                                .padding(horizontal = if (newCount >= 10) 4.5.dp else 2.dp, vertical = 1.dp),
-                                                            contentAlignment = Alignment.Center,
-                                                        ) {
-                                                            Text(
-                                                                if (newCount > 99) "99+" else "$newCount",
-                                                                fontSize = if (newCount > 99) 8.5.sp else 9.5.sp,
-                                                                fontWeight = FontWeight.Bold,
-                                                                color = Color.White,
-                                                                textAlign = TextAlign.Center,
-                                                                maxLines = 1,
-                                                                softWrap = false,
-                                                            )
-                                                        }
                                                 }
                                                 Column(Modifier.padding(start = 14.dp).weight(1f)) {
                                                     Text(
@@ -3922,17 +3896,15 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                 enter = fadeIn(tween(150)),
                 exit = fadeOut(tween(180)),
             ) {
-                Column(
-                    Modifier.fillMaxSize()
-                        .safeDrawingPadding()
-                ) {
+                Column(Modifier.fillMaxSize()) {
                     Column(
                         Modifier.fillMaxWidth()
                             .animateEnterExit(
                                 enter = slideInVertically(MotionSpec.PanelOffsetSpring) { -it / 2 },
                                 exit = slideOutVertically(tween(160)) { -it / 2 },
                             )
-                            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .85f), Color.Black.copy(alpha = .4f), Color.Transparent)))
+                            .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .80f), Color.Black.copy(alpha = .35f), Color.Transparent)))
+                            .safeDrawingPadding()
                             .padding(bottom = 6.dp)
                     ) {
                         Row(
@@ -4097,7 +4069,8 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 enter = slideInVertically(MotionSpec.PanelOffsetSpring) { it / 2 },
                                 exit = slideOutVertically(tween(160)) { it / 2 },
                             )
-                            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .5f), Color.Black.copy(alpha = .9f))))
+                            .background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .45f), Color.Black.copy(alpha = .85f))))
+                            .safeDrawingPadding()
                             .padding(top = 0.dp)
                     ) {
                         PlayerTimeline(
