@@ -65,6 +65,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
 import androidx.compose.ui.viewinterop.AndroidView
@@ -1706,17 +1707,21 @@ private fun LibraryHome(
                                                     if (newCount > 0)
                                                         Box(
                                                             Modifier.align(Alignment.TopEnd)
-                                                                .offset(x = 3.dp, y = (-3).dp)
-                                                                .size(18.dp)
-                                                                .background(Color(0xFFFF3B72), CircleShape),
+                                                                .offset(x = 6.dp, y = (-5).dp)
+                                                                .defaultMinSize(minWidth = 18.dp, minHeight = 18.dp)
+                                                                .clip(RoundedCornerShape(9.dp))
+                                                                .background(Color(0xFFFF3B72))
+                                                                .padding(horizontal = if (newCount >= 10) 4.5.dp else 2.dp, vertical = 1.dp),
                                                             contentAlignment = Alignment.Center,
                                                         ) {
                                                             Text(
                                                                 if (newCount > 99) "99+" else "$newCount",
-                                                                fontSize = 10.sp,
-                                                                fontWeight = FontWeight.SemiBold,
-                                                                lineHeight = 12.sp,
+                                                                fontSize = if (newCount > 99) 8.5.sp else 9.5.sp,
+                                                                fontWeight = FontWeight.Bold,
                                                                 color = Color.White,
+                                                                textAlign = TextAlign.Center,
+                                                                maxLines = 1,
+                                                                softWrap = false,
                                                             )
                                                         }
                                                 }
@@ -3147,6 +3152,8 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
     }
     if (pendingGithubRedirect) {
         AlertDialog(
+            modifier = Modifier.fillMaxWidth(0.92f),
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             onDismissRequest = { pendingGithubRedirect = false },
             title = {
                 Text(
@@ -3166,12 +3173,15 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                     Text(
                         MSPLAYER_GITHUB_URL,
                         color = palette.accent,
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(palette.cardFallback, RoundedCornerShape(6.dp))
-                            .padding(8.dp),
+                            .background(palette.cardFallback, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
                     )
                 }
             },
@@ -3614,6 +3624,8 @@ private fun OpenSourceLicensesDialog(
     )
     if (pendingGithubRedirect) {
         AlertDialog(
+            modifier = Modifier.fillMaxWidth(0.92f),
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             onDismissRequest = { pendingGithubRedirect = false },
             title = {
                 Text(
@@ -3633,12 +3645,15 @@ private fun OpenSourceLicensesDialog(
                     Text(
                         MSPLAYER_GITHUB_URL,
                         color = palette.accent,
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(palette.cardFallback, RoundedCornerShape(6.dp))
-                            .padding(8.dp),
+                            .background(palette.cardFallback, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
                     )
                 }
             },

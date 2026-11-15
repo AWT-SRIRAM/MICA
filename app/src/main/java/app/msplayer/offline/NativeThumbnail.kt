@@ -46,6 +46,8 @@ object NativeThumbnail {
             var descriptor: android.os.ParcelFileDescriptor? = null
             var player: MediaPlayer? = null
             var lastFrame: Bitmap? = null
+            var darkCount = 0
+            var soughtPastIntro = false
             val suspendForPlayback = launch {
                 Library.videoPlaybackActive.first { it }
                 if (!result.isCompleted) result.complete(null)
@@ -70,6 +72,30 @@ object NativeThumbnail {
                                 } else {
                                     lastFrame?.recycle()
                                     lastFrame = frame
+                                    darkCount++
+                                    if (darkCount >= 2 && !soughtPastIntro) {
+                                        soughtPastIntro = true
+                                        val dur = if (item.duration > 0) item.duration else (player?.length ?: 0L)
+                                        val targetMs = if (dur > 60_000L) {
+                                            minOf(25_000L, dur / 10)
+                                        } else if (dur > 20_000L) {
+                                            minOf(8_000L, dur / 4)
+                                        } else if (dur == 0L) {
+                                            15_000L
+                                        } else 0L
+                                        if (targetMs > 0L) {
+                                            android.util.Log.i("MSPLAYER_NATIVE", "Skipping dark intro for ${item.title}, seeking to ${targetMs}ms")
+                                            player?.setTime(targetMs)
+                                            player?.setRate(4.0f)
+                                        }
+                                    } else if (darkCount >= 8 && soughtPastIntro) {
+                                        val dur = if (item.duration > 0) item.duration else (player?.length ?: 0L)
+                                        if ((dur > 60_000L || dur == 0L) && darkCount == 8) {
+                                            val targetMs2 = if (dur > 60_000L) minOf(60_000L, dur / 5) else 45_000L
+                                            android.util.Log.i("MSPLAYER_NATIVE", "Still dark, seeking deeper to ${targetMs2}ms for ${item.title}")
+                                            player?.setTime(targetMs2)
+                                        }
+                                    }
                                 }
                             }
                         }
