@@ -874,12 +874,12 @@ object Library {
 
     suspend fun thumbnail(context: Context, item: MediaItem): Bitmap? {
         if (item.audio || PlaybackRules.isStreamUrl(item.uri)) return null
-        val key = "v6|${item.uri}|${item.size}|${item.modified}|${item.added}"
+        val key = "v7|${item.uri}|${item.size}|${item.modified}|${item.added}"
         return thumbLocks[(key.hashCode() and Int.MAX_VALUE) % thumbLocks.size].withLock {
             thumbs.get(key)?.let { return@withLock it }
             thumbSlots.withPermit {
                 var bitmap = withContext(Dispatchers.IO) {
-                    val directory = java.io.File(context.cacheDir, "video-thumbnails-v6").apply { mkdirs() }
+                    val directory = java.io.File(context.cacheDir, "video-thumbnails-v7").apply { mkdirs() }
                     val fileKey = "th_" + (key.hashCode().toLong() and 0xFFFFFFFFL).toString(16) + "_" + (item.uri.hashCode().toLong() and 0xFFFFFFFFL).toString(16)
                     val disk = java.io.File(directory, "$fileKey.jpg")
                     val foundDisk = if (disk.isFile && disk.length() > 0) android.graphics.BitmapFactory.decodeFile(disk.path) else null
@@ -897,7 +897,7 @@ object Library {
                             }.getOrNull()
                             if (mediaStoreThumb != null) {
                                 candidateThumb = mediaStoreThumb
-                                if (!isDark(mediaStoreThumb)) {
+                                if (!isDark(mediaStoreThumb) && mediaStoreThumb.width >= 480 && mediaStoreThumb.height >= 270) {
                                     found = mediaStoreThumb
                                 }
                             }
@@ -919,7 +919,7 @@ object Library {
                                 )
                                 if (msThumb != null) {
                                     if (candidateThumb == null) candidateThumb = msThumb
-                                    if (!isDark(msThumb)) {
+                                    if (!isDark(msThumb) && msThumb.width >= 480 && msThumb.height >= 270) {
                                         found = msThumb
                                     }
                                 }
@@ -990,14 +990,32 @@ object Library {
                                     return bmp
                                 }
 
-                                val firstTime = if (duration > 0) minOf(2000L, duration / 10) else 1000L
-                                var frame = extractFrame(firstTime)
-                                if (frame != null && !isDark(frame)) {
-                                    frame
-                                } else {
-                                    val defaultFrame = extractFrame(-1L)
-                                    defaultFrame ?: frame
+                                val sampleTimes = buildList {
+                                    if (duration > 120_000L) {
+                                        add(45_000L) // 45 seconds in: past studio logos, into the episode
+                                        add(duration / 10) // 10% in
+                                        add(duration / 6)
+                                        add(15_000L)
+                                    } else if (duration > 15_000L) {
+                                        add(8_000L)
+                                        add(duration / 4)
+                                    }
+                                    add(2_000L)
+                                    add(1_000L)
                                 }
+                                var bestFrame: Bitmap? = null
+                                for (t in sampleTimes) {
+                                    val f = extractFrame(t)
+                                    if (f != null) {
+                                        if (!isDark(f)) {
+                                            bestFrame = f
+                                            break
+                                        } else if (bestFrame == null) {
+                                            bestFrame = f
+                                        }
+                                    }
+                                }
+                                bestFrame ?: extractFrame(-1L)
                             } catch (e: kotlinx.coroutines.CancellationException) {
                                 throw e
                             } catch (_: Exception) {
@@ -1031,7 +1049,7 @@ object Library {
                 if (bitmap != null) {
                     thumbs.put(key, bitmap)
                     withContext(Dispatchers.IO) {
-                        val directory = java.io.File(context.cacheDir, "video-thumbnails-v6").apply { mkdirs() }
+                        val directory = java.io.File(context.cacheDir, "video-thumbnails-v7").apply { mkdirs() }
                         val fileKey = "th_" + (key.hashCode().toLong() and 0xFFFFFFFFL).toString(16) + "_" + (item.uri.hashCode().toLong() and 0xFFFFFFFFL).toString(16)
                         val target = java.io.File(directory, "$fileKey.jpg")
                         runCatching {

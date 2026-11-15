@@ -372,6 +372,21 @@ class MainActivity : ComponentActivity() {
         finishAndRemoveTask()
     }
 
+    fun restoreSystemOrientation() {
+        val autoRotate = runCatching {
+            android.provider.Settings.System.getInt(
+                contentResolver,
+                android.provider.Settings.System.ACCELEROMETER_ROTATION,
+                0
+            ) == 1
+        }.getOrDefault(false)
+        requestedOrientation = if (autoRotate) {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER
+        } else {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
+    }
+
     fun videoOrientation(state: PlayerState) {
         if (manualOrientationFor == state.item?.uri || state.item?.audio != false || inPip) return
         when (PlaybackRules.videoOrientation(state.videoWidth, state.videoHeight)) {
@@ -718,7 +733,7 @@ class MainActivity : ComponentActivity() {
         Library.videoPlaybackActive.value = false
         showPlayer = false
         immersive(false)
-        requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        restoreSystemOrientation()
         window.attributes = window.attributes.apply { screenBrightness = -1f }
     }
 
@@ -2647,7 +2662,7 @@ fun Thumbnail(item: MediaItem, modifier: Modifier, showDuration: Boolean = true)
     var loading by remember(item.uri, revision) { mutableStateOf(true) }
     LaunchedEffect(item.uri, item.size, item.modified, item.added, revision) {
         loading = true
-        bitmap = withTimeoutOrNull(8000L) { Library.thumbnail(context, item) }
+        bitmap = withTimeoutOrNull(20000L) { Library.thumbnail(context, item) }
         loading = false
     }
     Box(
@@ -3736,10 +3751,11 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             runCatching {
                 val modes = activity.display?.supportedModes ?: emptyArray()
-                val highRefresh = modes.filter { it.refreshRate >= 119f }.maxByOrNull { it.refreshRate }
-                if (highRefresh != null) {
+                val targetMode = modes.firstOrNull { kotlin.math.abs(it.refreshRate - 60f) < 1f }
+                    ?: modes.minByOrNull { it.refreshRate }
+                if (targetMode != null) {
                     val lp = activity.window.attributes
-                    lp.preferredDisplayModeId = highRefresh.modeId
+                    lp.preferredDisplayModeId = targetMode.modeId
                     activity.window.attributes = lp
                 }
             }
@@ -3806,6 +3822,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
             service.endTemporarySpeed()
             service.detachVideo(attachedLayout)
             activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activity.restoreSystemOrientation()
         }
     }
     MaterialTheme(colorScheme = playerDarkScheme) {

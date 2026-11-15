@@ -1529,14 +1529,8 @@ fun MediaInformationContent(
                     val rawFps = stream.frameRate.replace(',', '.').replace("fps", "", ignoreCase = true).trim()
                     val cleanFps = rawFps.toDoubleOrNull()?.let { "${kotlin.math.round(it).toInt()} fps" } ?: stream.frameRate
                     add("Frame rate" to cleanFps)
-                    if (inPlayer && currentFps > 0) {
-                        val cadence = when {
-                            currentFps >= 140 -> "Smooth 6:6 Cadence"
-                            currentFps >= 115 -> "Smooth 5:5 Cadence"
-                            currentFps >= 85 -> "Smooth 4:4 Cadence"
-                            else -> "Standard Cadence"
-                        }
-                        add("Output motion rate" to "$currentFps Hz ($cadence)")
+                    if (inPlayer) {
+                        add("Enhanced frame rate" to "60 fps (Smooth 24 -> 60)")
                     }
                 }
                 if (stream.sampleRateHz > 0) add("Sample rate" to "${stream.sampleRateHz} Hz")

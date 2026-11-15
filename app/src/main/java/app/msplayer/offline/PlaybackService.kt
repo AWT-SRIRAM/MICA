@@ -74,12 +74,14 @@ class PlaybackService : Service() {
         val saturation: Float,
     ) {
         OFF("Upscale: Off", "OFF", 1.0f, 1.0f, 1.0f),
-        SHARP("Upscale: Sharp HD (CAS)", "SHARP", 1.14f, 1.02f, 1.08f),
-        SUPER_RES("Upscale: Super Res", "SUPER", 1.22f, 1.04f, 1.15f);
+        SHARP("Upscale: Sharp HD (60 FPS)", "SHARP", 1.14f, 1.02f, 1.08f),
+        MOTION_SMOOTH("Upscale: Motion Smooth (60 FPS)", "SMOOTH", 1.06f, 1.01f, 1.04f),
+        SUPER_RES("Upscale: Super Res (60 FPS)", "SUPER", 1.22f, 1.04f, 1.15f);
 
         fun next(): UpscaleMode = when (this) {
             OFF -> SHARP
-            SHARP -> SUPER_RES
+            SHARP -> MOTION_SMOOTH
+            MOTION_SMOOTH -> SUPER_RES
             SUPER_RES -> OFF
         }
     }
@@ -522,12 +524,8 @@ class PlaybackService : Service() {
         val videoSurface = l.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_video)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R && videoSurface != null) {
             runCatching {
-                val displayManager = getSystemService(android.hardware.display.DisplayManager::class.java)
-                val display = displayManager?.getDisplay(android.view.Display.DEFAULT_DISPLAY)
-                val modes = display?.supportedModes ?: emptyArray()
-                val maxRefresh = modes.map { it.refreshRate }.maxOrNull() ?: 60f
-                val targetFps = if (maxRefresh >= 119f) maxRefresh else 60f
-                activeDisplayFps.value = targetFps.toInt()
+                val targetFps = 60.0f
+                activeDisplayFps.value = 60
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                     videoSurface.holder.surface?.setFrameRate(
                         targetFps,
@@ -549,6 +547,10 @@ class PlaybackService : Service() {
         if (released || surfaceSuspended) return
         val doRefresh = Runnable {
             if (!released && !surfaceSuspended) {
+                if (layout.width > 0 && layout.height > 0) {
+                    runCatching { player.vlcVout.setWindowSize(layout.width, layout.height) }
+                }
+                runCatching { player.updateVideoSurfaces() }
                 enforceCenterGravity(layout)
                 setAspectMode(aspectMode.value, persistFolder = false)
                 updateSubtitlePlacement(controlsVisible)
@@ -558,6 +560,7 @@ class PlaybackService : Service() {
         layout.post(doRefresh)
         layout.postDelayed(doRefresh, 120L)
         layout.postDelayed(doRefresh, 280L)
+        layout.postDelayed(doRefresh, 500L)
     }
 
     fun attachVideo(layout: org.videolan.libvlc.util.VLCVideoLayout) {
@@ -571,7 +574,13 @@ class PlaybackService : Service() {
         layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)
             ?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
         videoAttached = true
-        layout.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        layout.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
+                if (right - left > 0 && bottom - top > 0) {
+                    runCatching { player.vlcVout.setWindowSize(right - left, bottom - top) }
+                    runCatching { player.updateVideoSurfaces() }
+                }
+            }
             enforceCenterGravity(layout)
             updateSubtitlePlacement(controlsVisible)
         }
