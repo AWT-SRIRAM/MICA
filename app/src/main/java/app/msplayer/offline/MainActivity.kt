@@ -3842,32 +3842,6 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
             },
             modifier = Modifier
                 .fillMaxSize()
-                .graphicsLayer {
-                    scaleX = zoom
-                    scaleY = zoom
-                    translationX = panX
-                    translationY = panY
-                    clip = false
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                        if (upscaleMode != PlaybackService.UpscaleMode.OFF) {
-                            val cm = android.graphics.ColorMatrix()
-                            val scale = upscaleMode.contrast
-                            val translate = (1f - scale) * 128f + (upscaleMode.brightness - 1f) * 255f
-                            cm.set(floatArrayOf(
-                                scale, 0f, 0f, 0f, translate,
-                                0f, scale, 0f, 0f, translate,
-                                0f, 0f, scale, 0f, translate,
-                                0f, 0f, 0f, 1f, 0f
-                            ))
-                            val sat = android.graphics.ColorMatrix()
-                            sat.setSaturation(upscaleMode.saturation)
-                            cm.postConcat(sat)
-                            renderEffect = android.graphics.RenderEffect.createColorFilterEffect(android.graphics.ColorMatrixColorFilter(cm)).asComposeRenderEffect()
-                        } else {
-                            renderEffect = null
-                        }
-                    }
-                }
                 .onGloballyPositioned { coords ->
                     val b = coords.boundsInWindow()
                     if (b.width > 0f && b.height > 0f) {
