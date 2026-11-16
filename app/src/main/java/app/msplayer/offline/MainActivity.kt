@@ -898,7 +898,6 @@ fun App(activity: MainActivity) {
     val service = activity.service
     val metadata = remember(service) { (service?.state ?: activity.emptyState).map { it.copy(position = 0) }.distinctUntilChanged() }
     val state by metadata.collectAsState(initial = service?.state?.value ?: PlayerState())
-    LaunchedEffect(state.closed) { if (state.closed) activity.closeApp() }
 
     var tab by rememberSaveable { mutableStateOf("Folders") }
     var folder by rememberSaveable { mutableStateOf<String?>(null) }
@@ -3725,6 +3724,10 @@ private fun OpenSourceLicensesDialog(
 @Composable
 fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: PlayerState) {
     if (state.item?.audio == true) { MusicPlayerScreen(activity, service, state); return }
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    LaunchedEffect(configuration.orientation, configuration.screenWidthDp, configuration.screenHeightDp) {
+        service.refreshVideoLayoutAfterPip()
+    }
     val glassEnabled by rememberGlassEnabled()
     var controls by activity::playerControlsVisible
     var locked by remember { mutableStateOf(false) }

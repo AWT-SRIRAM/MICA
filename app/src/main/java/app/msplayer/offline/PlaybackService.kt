@@ -135,7 +135,7 @@ class PlaybackService : Service() {
         player.release()
         vlc.release()
         vlc = createVlc(settings)
-        player = MediaPlayer(vlc)
+        player = MediaPlayer(vlc).apply { setUseOrientationFromBounds(true) }
         audioEffects.apply(player, settings)
         applyVolume()
         bindPlayerEvents()
@@ -455,21 +455,38 @@ class PlaybackService : Service() {
     fun enforceCenterGravity(layout: org.videolan.libvlc.util.VLCVideoLayout?) {
         val l = layout ?: return
         try {
+            l.foregroundGravity = android.view.Gravity.CENTER
             val frame = l.findViewById<android.widget.FrameLayout>(org.videolan.R.id.player_surface_frame)
             frame?.let { f ->
                 val lp = f.layoutParams as? android.widget.FrameLayout.LayoutParams
-                if (lp != null && lp.gravity != android.view.Gravity.CENTER) {
-                    lp.gravity = android.view.Gravity.CENTER
-                    f.layoutParams = lp
+                if (lp != null) {
+                    if (lp.gravity != android.view.Gravity.CENTER) {
+                        lp.gravity = android.view.Gravity.CENTER
+                        f.layoutParams = lp
+                    }
+                } else {
+                    f.layoutParams = android.widget.FrameLayout.LayoutParams(
+                        f.layoutParams?.width ?: android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        f.layoutParams?.height ?: android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.Gravity.CENTER,
+                    )
                 }
             }
             val videoSurface = l.findViewById<android.view.View>(org.videolan.R.id.surface_video)
                 ?: l.findViewById<android.view.View>(org.videolan.R.id.texture_video)
             videoSurface?.let { v ->
                 val lp = v.layoutParams as? android.widget.FrameLayout.LayoutParams
-                if (lp != null && lp.gravity != android.view.Gravity.CENTER) {
-                    lp.gravity = android.view.Gravity.CENTER
-                    v.layoutParams = lp
+                if (lp != null) {
+                    if (lp.gravity != android.view.Gravity.CENTER) {
+                        lp.gravity = android.view.Gravity.CENTER
+                        v.layoutParams = lp
+                    }
+                } else {
+                    v.layoutParams = android.widget.FrameLayout.LayoutParams(
+                        v.layoutParams?.width ?: android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        v.layoutParams?.height ?: android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.Gravity.CENTER,
+                    )
                 }
             }
         } catch (_: Exception) {}
@@ -503,6 +520,7 @@ class PlaybackService : Service() {
         if (released || surfaceSuspended) return
         val doRefresh = Runnable {
             if (!released && !surfaceSuspended) {
+                player.setUseOrientationFromBounds(true)
                 if (layout.width > 0 && layout.height > 0) {
                     runCatching { player.vlcVout.setWindowSize(layout.width, layout.height) }
                 }
@@ -514,15 +532,17 @@ class PlaybackService : Service() {
             }
         }
         layout.post(doRefresh)
-        layout.postDelayed(doRefresh, 120L)
-        layout.postDelayed(doRefresh, 280L)
-        layout.postDelayed(doRefresh, 500L)
+        layout.postDelayed(doRefresh, 60L)
+        layout.postDelayed(doRefresh, 150L)
+        layout.postDelayed(doRefresh, 300L)
+        layout.postDelayed(doRefresh, 600L)
     }
 
     fun attachVideo(layout: org.videolan.libvlc.util.VLCVideoLayout) {
         if (released) return
         videoLayout = layout
         surfaceSuspended = false
+        player.setUseOrientationFromBounds(true)
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
         player.attachViews(layout, null, useTexture, false)
         enforceCenterGravity(layout)
@@ -550,6 +570,7 @@ class PlaybackService : Service() {
         layout.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
                 if (right - left > 0 && bottom - top > 0) {
+                    player.setUseOrientationFromBounds(true)
                     runCatching { player.vlcVout.setWindowSize(right - left, bottom - top) }
                     runCatching { player.updateVideoSurfaces() }
                 }
@@ -559,6 +580,7 @@ class PlaybackService : Service() {
         }
         setAspectMode(aspectMode.value, persistFolder = false)
         updateSubtitlePlacement(controlsVisible)
+        refreshVideoLayoutAfterPip()
         if (pendingPlayback) {
             pendingPlayback = false
             if (requestFocus()) player.play()
@@ -615,7 +637,7 @@ class PlaybackService : Service() {
         val initialEffects = AudioEffectSettings.load(this)
         effectSettings.value = initialEffects
         vlc = createVlc(initialEffects)
-        player = MediaPlayer(vlc)
+        player = MediaPlayer(vlc).apply { setUseOrientationFromBounds(true) }
         audioManager = getSystemService(AudioManager::class.java)
         audioManager.registerAudioDeviceCallback(routeCallback, Handler(Looper.getMainLooper()))
         repeatMode.value = Store.prefs(this).getString("repeat", "off") ?: "off"
@@ -801,10 +823,32 @@ class PlaybackService : Service() {
                     if (event.voutCount > 0 && !surfaceSuspended) {
                         videoLayout?.post {
                             if (!released && !surfaceSuspended) {
+                                player.setUseOrientationFromBounds(true)
+                                videoLayout?.let { vl ->
+                                    if (vl.width > 0 && vl.height > 0) {
+                                        runCatching { player.vlcVout.setWindowSize(vl.width, vl.height) }
+                                    }
+                                }
+                                runCatching { player.updateVideoSurfaces() }
+                                enforceCenterGravity(videoLayout)
                                 setAspectMode(aspectMode.value, persistFolder = false)
                                 updateSubtitlePlacement(controlsVisible)
                             }
                         }
+                        videoLayout?.postDelayed({
+                            if (!released && !surfaceSuspended) {
+                                player.setUseOrientationFromBounds(true)
+                                videoLayout?.let { vl ->
+                                    if (vl.width > 0 && vl.height > 0) {
+                                        runCatching { player.vlcVout.setWindowSize(vl.width, vl.height) }
+                                    }
+                                }
+                                runCatching { player.updateVideoSurfaces() }
+                                enforceCenterGravity(videoLayout)
+                                setAspectMode(aspectMode.value, persistFolder = false)
+                                updateSubtitlePlacement(controlsVisible)
+                            }
+                        }, 150L)
                     }
                 MediaPlayer.Event.Buffering ->
                     if (!requestedPause) state.value = state.value.copy(buffering = event.buffering < 100f)
@@ -2335,7 +2379,7 @@ class PlaybackService : Service() {
         val initialEffects = AudioEffectSettings.load(this)
         effectSettings.value = initialEffects
         vlc = createVlc(initialEffects)
-        player = MediaPlayer(vlc)
+        player = MediaPlayer(vlc).apply { setUseOrientationFromBounds(true) }
         audioEffects.apply(player, effectSettings.value)
         applyVolume()
         bindPlayerEvents()
@@ -2375,7 +2419,7 @@ class PlaybackService : Service() {
         if (released) return
         saveFinalPosition()
         releasePlayback()
-        state.value = PlayerState(closed = true)
+        state.value = PlayerState(closed = false)
         timeline.value = PlaybackTimeline()
         stopSelf()
     }
