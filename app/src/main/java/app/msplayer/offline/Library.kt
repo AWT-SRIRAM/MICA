@@ -508,6 +508,12 @@ object Library {
             android.os.Environment.DIRECTORY_MUSIC,
         ).mapNotNull { dir ->
             runCatching { android.os.Environment.getExternalStoragePublicDirectory(dir) }.getOrNull()
+        }.toMutableList().apply {
+            val base = android.os.Environment.getExternalStorageDirectory()
+            listOf("Telegram", "Telegram/Telegram Video", "Movies/Telegram", "Download/Telegram").forEach { sub ->
+                val d = java.io.File(base, sub)
+                if (d.exists() && d.isDirectory) add(d)
+            }
         }.filter { it.exists() && it.isDirectory }
 
         val paths = ArrayList<String>(48)
@@ -873,7 +879,8 @@ object Library {
     }
 
     suspend fun thumbnail(context: Context, item: MediaItem): Bitmap? {
-        if (item.audio || PlaybackRules.isStreamUrl(item.uri)) return null
+        if (PlaybackRules.isStreamUrl(item.uri)) return null
+        if (item.audio) return audioThumbnail(context, item)
         val key = "v7|${item.uri}|${item.size}|${item.modified}|${item.added}"
         return thumbLocks[(key.hashCode() and Int.MAX_VALUE) % thumbLocks.size].withLock {
             thumbs.get(key)?.let { return@withLock it }
@@ -1062,6 +1069,100 @@ object Library {
                 android.util.Log.i("MSPLAYER_THUMB", "thumbnail for ${item.title}: result=${bitmap != null}")
                 bitmap
             }
+        }
+    }
+
+    suspend fun audioThumbnail(context: Context, item: MediaItem): Bitmap? {
+        if (!item.audio || PlaybackRules.isStreamUrl(item.uri)) return null
+        val key = "a1|${item.uri}|${item.size}|${item.modified}"
+        return thumbLocks[(key.hashCode() and Int.MAX_VALUE) % thumbLocks.size].withLock {
+            thumbs.get(key)?.let { return@withLock it }
+            thumbSlots.withPermit {
+                val bitmap = withContext(Dispatchers.IO) {
+                    val directory = java.io.File(context.cacheDir, "audio-thumbnails-v1").apply { mkdirs() }
+                    val fileKey = "ath_" + (key.hashCode().toLong() and 0xFFFFFFFFL).toString(16) + "_" + (item.uri.hashCode().toLong() and 0xFFFFFFFFL).toString(16)
+                    val disk = java.io.File(directory, "$fileKey.jpg")
+                    if (disk.isFile && disk.length() > 0) {
+                        val foundDisk = android.graphics.BitmapFactory.decodeFile(disk.path)
+                        if (foundDisk != null) return@withContext foundDisk
+                    }
+
+                    var found: Bitmap? = null
+                    val parsed = Uri.parse(item.uri)
+
+                    // 1. Android 10+ Native MediaStore Thumbnail
+                    if (android.os.Build.VERSION.SDK_INT >= 29) {
+                        val signal = android.os.CancellationSignal()
+                        try {
+                            val thumb = runCatching {
+                                context.contentResolver.loadThumbnail(parsed, android.util.Size(256, 256), signal)
+                            }.getOrNull()
+                            if (thumb != null && thumb.width > 0 && thumb.height > 0) {
+                                found = thumb
+                            }
+                        } catch (_: Exception) {}
+                    }
+
+                    // 2. Direct embedded picture via MediaMetadataRetriever
+                    if (found == null) {
+                        val retriever = MediaMetadataRetriever()
+                        try {
+                            val directFile = if (parsed.scheme == "file") java.io.File(parsed.path ?: "")
+                                else findPhysicalMediaFile(item) ?: resolvePathFile(context, parsed, item)
+                            var sourceSet = false
+                            if (directFile != null && directFile.canRead()) {
+                                runCatching {
+                                    retriever.setDataSource(directFile.absolutePath)
+                                    sourceSet = true
+                                }
+                            }
+                            if (!sourceSet && parsed.scheme == "content") {
+                                context.contentResolver.openFileDescriptor(parsed, "r")?.use { pfd ->
+                                    runCatching {
+                                        retriever.setDataSource(pfd.fileDescriptor)
+                                        sourceSet = true
+                                    }
+                                }
+                            }
+                            if (sourceSet) {
+                                val artBytes = retriever.embeddedPicture
+                                if (artBytes != null && artBytes.isNotEmpty() && artBytes.size <= 8 * 1024 * 1024) {
+                                    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                    android.graphics.BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size, bounds)
+                                    val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+                                    val sample = (maxDim / 256).coerceAtLeast(1)
+                                    val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                                    found = android.graphics.BitmapFactory.decodeByteArray(artBytes, 0, artBytes.size, options)
+                                }
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            runCatching { retriever.release() }
+                        }
+                    }
+
+                    // 3. Save to disk cache if found
+                    if (found != null) {
+                        runCatching {
+                            java.io.FileOutputStream(disk).use { out ->
+                                found.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, out)
+                            }
+                        }
+                    }
+                    found
+                }
+                if (bitmap != null) {
+                    thumbs.put(key, bitmap)
+                }
+                bitmap
+            }
+        }
+    }
+
+    fun invalidateItem(uri: String) {
+        val snapshot = thumbs.snapshot()
+        for ((k, _) in snapshot) {
+            if (k.contains(uri)) thumbs.remove(k)
         }
     }
 

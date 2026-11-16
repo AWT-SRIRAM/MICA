@@ -1529,9 +1529,6 @@ fun MediaInformationContent(
                     val rawFps = stream.frameRate.replace(',', '.').replace("fps", "", ignoreCase = true).trim()
                     val cleanFps = rawFps.toDoubleOrNull()?.let { "${kotlin.math.round(it).toInt()} fps" } ?: stream.frameRate
                     add("Frame rate" to cleanFps)
-                    if (inPlayer) {
-                        add("Enhanced frame rate" to "60 fps (Smooth 24 -> 60)")
-                    }
                 }
                 if (stream.sampleRateHz > 0) add("Sample rate" to "${stream.sampleRateHz} Hz")
                 if (stream.channels > 0) add("Channels" to "${stream.channels} ch")

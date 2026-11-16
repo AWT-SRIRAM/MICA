@@ -65,34 +65,7 @@ class PlaybackService : Service() {
     val activeSubtitleText = MutableStateFlow<String?>(null)
     val dualSubtitleLines = MutableStateFlow(SubtitleOverlayLines())
     val aspectMode = MutableStateFlow(PlaybackRules.AspectOption.BEST_FIT)
-
-    enum class UpscaleMode(
-        val label: String,
-        val shortLabel: String,
-        val contrast: Float,
-        val brightness: Float,
-        val saturation: Float,
-    ) {
-        OFF("Upscale: Off", "OFF", 1.0f, 1.0f, 1.0f),
-        SHARP("Upscale: Sharp HD (60 FPS)", "SHARP", 1.14f, 1.02f, 1.08f),
-        MOTION_SMOOTH("Upscale: Motion Smooth (60 FPS)", "SMOOTH", 1.06f, 1.01f, 1.04f),
-        SUPER_RES("Upscale: Super Res (60 FPS)", "SUPER", 1.22f, 1.04f, 1.15f);
-
-        fun next(): UpscaleMode = when (this) {
-            OFF -> SHARP
-            SHARP -> MOTION_SMOOTH
-            MOTION_SMOOTH -> SUPER_RES
-            SUPER_RES -> OFF
-        }
-    }
-    val upscaleMode = MutableStateFlow(UpscaleMode.OFF)
-
-    fun cycleUpscaleMode(): UpscaleMode {
-        val next = upscaleMode.value.next()
-        upscaleMode.value = next
-        Store.prefs(this).edit().putString("video_upscale_mode", next.name).apply()
-        return next
-    }
+    var userPausedAudio: Boolean = false
     val activeDisplayFps = MutableStateFlow(60)
     val chapters = MutableStateFlow<List<ContainerDemuxer.ChapterMarker>>(emptyList())
     val subtitleStyleRevision = MutableStateFlow(0)
@@ -479,8 +452,6 @@ class PlaybackService : Service() {
         }
     }
 
-    private var globalLayoutListener: android.view.ViewTreeObserver.OnGlobalLayoutListener? = null
-
     fun enforceCenterGravity(layout: org.videolan.libvlc.util.VLCVideoLayout?) {
         val l = layout ?: return
         try {
@@ -490,21 +461,6 @@ class PlaybackService : Service() {
                 if (lp != null && lp.gravity != android.view.Gravity.CENTER) {
                     lp.gravity = android.view.Gravity.CENTER
                     f.layoutParams = lp
-                }
-                if (globalLayoutListener == null) {
-                    val listener = android.view.ViewTreeObserver.OnGlobalLayoutListener {
-                        try {
-                            val v = l.findViewById<android.view.View>(org.videolan.R.id.surface_video)
-                                ?: l.findViewById<android.view.View>(org.videolan.R.id.texture_video)
-                            val vlp = v?.layoutParams as? android.widget.FrameLayout.LayoutParams
-                            if (vlp != null && vlp.gravity != android.view.Gravity.CENTER) {
-                                vlp.gravity = android.view.Gravity.CENTER
-                                v.layoutParams = vlp
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    globalLayoutListener = listener
-                    f.viewTreeObserver?.addOnGlobalLayoutListener(listener)
                 }
             }
             val videoSurface = l.findViewById<android.view.View>(org.videolan.R.id.surface_video)
@@ -571,6 +527,23 @@ class PlaybackService : Service() {
         player.attachViews(layout, null, useTexture, false)
         enforceCenterGravity(layout)
         applyHighRefreshPresentation(layout)
+        val surfaceVideo = layout.findViewById<android.view.View>(org.videolan.R.id.surface_video)
+            ?: layout.findViewById<android.view.View>(org.videolan.R.id.texture_video)
+        surfaceVideo?.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+            val vlp = v.layoutParams as? android.widget.FrameLayout.LayoutParams
+            if (vlp != null && vlp.gravity != android.view.Gravity.CENTER) {
+                vlp.gravity = android.view.Gravity.CENTER
+                v.layoutParams = vlp
+            }
+        }
+        val frame = layout.findViewById<android.widget.FrameLayout>(org.videolan.R.id.player_surface_frame)
+        frame?.addOnLayoutChangeListener { f, _, _, _, _, _, _, _, _ ->
+            val flp = f.layoutParams as? android.widget.FrameLayout.LayoutParams
+            if (flp != null && flp.gravity != android.view.Gravity.CENTER) {
+                flp.gravity = android.view.Gravity.CENTER
+                f.layoutParams = flp
+            }
+        }
         layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)
             ?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
         videoAttached = true
@@ -594,11 +567,6 @@ class PlaybackService : Service() {
 
     fun detachVideo(layout: org.videolan.libvlc.util.VLCVideoLayout? = null) {
         if (layout != null && videoLayout != null && videoLayout !== layout) return
-        val oldFrame = (layout ?: videoLayout)?.findViewById<android.widget.FrameLayout>(org.videolan.R.id.player_surface_frame)
-        globalLayoutListener?.let { gl ->
-            runCatching { oldFrame?.viewTreeObserver?.removeOnGlobalLayoutListener(gl) }
-        }
-        globalLayoutListener = null
         clearSurfaceCallback()
         videoAttached = false
         surfaceSuspended = false
@@ -651,8 +619,7 @@ class PlaybackService : Service() {
         audioManager = getSystemService(AudioManager::class.java)
         audioManager.registerAudioDeviceCallback(routeCallback, Handler(Looper.getMainLooper()))
         repeatMode.value = Store.prefs(this).getString("repeat", "off") ?: "off"
-        val savedUpscale = Store.prefs(this).getString("video_upscale_mode", "OFF") ?: "OFF"
-        upscaleMode.value = runCatching { UpscaleMode.valueOf(savedUpscale) }.getOrDefault(UpscaleMode.OFF)
+        userPausedAudio = Store.prefs(this).getBoolean("user_paused_audio", false)
         focus =
             AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(
@@ -763,7 +730,7 @@ class PlaybackService : Service() {
         arrayListOf(
             "--no-video-title-show",
             "--audio-time-stretch",
-            "--file-caching=1500",
+            "--file-caching=300",
             "--network-caching=2000",
             "--codec=mediacodec_ndk,mediacodec_jni,all",
             "--avcodec-threads=0",
@@ -936,7 +903,7 @@ class PlaybackService : Service() {
         return START_NOT_STICKY
     }
 
-    fun open(items: List<MediaItem>, selected: MediaItem) {
+    fun open(items: List<MediaItem>, selected: MediaItem, autoPlay: Boolean = true) {
         endTemporarySpeed()
         resetBoost()
         savePosition()
@@ -947,10 +914,10 @@ class PlaybackService : Service() {
         index = queue.indexOfFirst { it.uri == selected.uri }.coerceAtLeast(0)
         retried = false
         decoderMode = Store.prefs(this).getString("decoder", "Auto") ?: "Auto"
-        openCurrent(null)
+        openCurrent(null, autoPlay = autoPlay)
     }
 
-    private fun openCurrent(position: Long?, restore: Boolean = true, keepSubtitleChoice: Boolean = false) {
+    private fun openCurrent(position: Long?, restore: Boolean = true, keepSubtitleChoice: Boolean = false, autoPlay: Boolean = true) {
         endTemporarySpeed()
         sleepFadeActive = false
         if (::player.isInitialized && !released) player.volume = effectiveVolume()
@@ -1161,36 +1128,37 @@ class PlaybackService : Service() {
                     // Parcel file descriptors preserve provider permissions and support local
                     // seekable content.
                     val uri = Uri.parse(item.uri)
-                    val media =
-                        if (uri.scheme == "content") {
-                            try {
-                                activeDescriptor =
-                                    contentResolver.openFileDescriptor(uri, "r")
-                                        ?: throw IllegalStateException("File unavailable")
-                                Media(vlc, activeDescriptor!!.fileDescriptor)
-                            } catch (sec: SecurityException) {
-                                // Fallback for .pending / restricted MediaStore URIs where Android MediaProvider throws:
-                                // "Only owner is able to interact with pending/trashed item"
-                                val directFile = resolveLocalFile(uri, item)
-                                    ?: Library.resolvePathFile(this@PlaybackService, uri, item)
-                                    ?: Library.findPhysicalMediaFile(item)
-                                if (directFile != null && directFile.canRead()) {
-                                    Media(vlc, directFile.absolutePath)
-                                } else {
-                                    if (android.os.Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()) {
-                                        requiresAllFilesPermission.value = true
-                                    }
-                                    throw sec
-                                }
+                    val directFile = resolveLocalFile(uri, item)
+                        ?: Library.resolvePathFile(this@PlaybackService, uri, item)
+                        ?: Library.findPhysicalMediaFile(item)
+                    val media = if (directFile != null && directFile.canRead()) {
+                        Media(vlc, directFile.absolutePath)
+                    } else if (uri.scheme == "content") {
+                        try {
+                            activeDescriptor =
+                                contentResolver.openFileDescriptor(uri, "r")
+                                    ?: throw IllegalStateException("File unavailable")
+                            Media(vlc, activeDescriptor!!.fileDescriptor)
+                        } catch (sec: SecurityException) {
+                            if (android.os.Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()) {
+                                requiresAllFilesPermission.value = true
                             }
-                        } else Media(vlc, uri)
+                            throw sec
+                        }
+                    } else Media(vlc, uri)
                     media.setHWDecoderEnabled(decoderMode != "Software", decoderMode == "Hardware")
                     if (PlaybackRules.isStreamUrl(item.uri)) {
-                        media.addOption(":network-caching=1500")
+                        media.addOption(":network-caching=2000")
                         media.addOption(":http-reconnect")
                         media.addOption(":http-forward-cookies")
-                        media.addOption(":http-user-agent=Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 MSPLAYER/0.6.2")
+                        media.addOption(":http-user-agent=Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 MSPLAYER/0.6.9")
                         Store.recordStream(this@PlaybackService, item.uri)
+                    } else {
+                        if (item.audio) {
+                            media.addOption(":file-caching=150")
+                        } else {
+                            media.addOption(":file-caching=300")
+                        }
                     }
                     val start =
                         position
@@ -1240,7 +1208,12 @@ class PlaybackService : Service() {
                         }
                     }
                     if (requestFocus()) {
-                        if (item.audio || videoAttached) player.play() else pendingPlayback = true
+                        if (autoPlay) {
+                            if (item.audio || videoAttached) player.play() else pendingPlayback = true
+                        } else {
+                            requestedPause = true
+                            state.value = state.value.copy(playing = false, buffering = false)
+                        }
                     } else
                         state.value =
                             state.value.copy(
@@ -1277,6 +1250,8 @@ class PlaybackService : Service() {
 
     fun play() {
         if (released) return
+        userPausedAudio = false
+        Store.prefs(this).edit().putBoolean("user_paused_audio", false).apply()
         sleepFadeActive = false
         player.volume = effectiveVolume()
         requestedPause = false
@@ -1294,6 +1269,10 @@ class PlaybackService : Service() {
     fun pause(abandon: Boolean = true) {
         endTemporarySpeed()
         if (released) return
+        if (state.value.item?.audio == true) {
+            userPausedAudio = true
+            Store.prefs(this).edit().putBoolean("user_paused_audio", true).apply()
+        }
         Library.videoPlaybackActive.value = videoAttached && state.value.item?.audio == false
         requestedPause = true
         pendingStyleRestore = pendingStyleRestore?.copy(playing = false)

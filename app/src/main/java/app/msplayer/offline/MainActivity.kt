@@ -274,15 +274,33 @@ class MainActivity : ComponentActivity() {
             DeleteOutcome.Deleted else DeleteOutcome.Failed
     }
 
+    fun removeMediaItems(uris: Set<String>) {
+        if (uris.isEmpty()) return
+        videos = videos.filter { it.uri !in uris }
+        audios = audios.filter { it.uri !in uris }
+        lifecycleScope.launch(Dispatchers.IO) {
+            LibraryCache.save(this@MainActivity, videos, audios)
+            for (u in uris) {
+                Library.invalidateItem(u)
+            }
+        }
+    }
+
     /** Deletes [item]; [onDeleted] runs only if the file was really removed. */
     fun deleteMedia(item: MediaItem, onDeleted: () -> Unit) {
         val uri = Uri.parse(item.uri)
         lifecycleScope.launch {
             when (val outcome = withContext(Dispatchers.IO) { tryDelete(uri) }) {
-                DeleteOutcome.Deleted -> onDeleted()
+                DeleteOutcome.Deleted -> {
+                    removeMediaItems(setOf(item.uri))
+                    onDeleted()
+                }
                 DeleteOutcome.Failed -> toast("Could not delete this file.")
                 is DeleteOutcome.NeedsConsent -> {
-                    pendingDelete = outcome.retryUri to onDeleted
+                    pendingDelete = outcome.retryUri to {
+                        removeMediaItems(setOf(item.uri))
+                        onDeleted()
+                    }
                     deleteRequest.launch(IntentSenderRequest.Builder(outcome.sender).build())
                 }
             }
@@ -301,9 +319,16 @@ class MainActivity : ComponentActivity() {
         val directUris = uris.filter { it.scheme == "file" || it.authority != MediaStore.AUTHORITY }
         lifecycleScope.launch {
             var directCount = 0
+            val directDeleted = mutableSetOf<String>()
             for (u in directUris) {
                 val res = withContext(Dispatchers.IO) { tryDelete(u) }
-                if (res == DeleteOutcome.Deleted) directCount++
+                if (res == DeleteOutcome.Deleted) {
+                    directCount++
+                    directDeleted.add(u.toString())
+                }
+            }
+            if (directDeleted.isNotEmpty()) {
+                removeMediaItems(directDeleted)
             }
             if (mediaStoreUris.isEmpty()) {
                 if (directCount > 0) onDeleted(directCount) else toast("Could not delete selected files.")
@@ -318,7 +343,10 @@ class MainActivity : ComponentActivity() {
                 if (sender == null) {
                     if (directCount > 0) onDeleted(directCount) else toast("Could not delete selected files.")
                 } else {
-                    pendingDelete = null to { onDeleted(directCount + mediaStoreUris.size) }
+                    pendingDelete = null to {
+                        removeMediaItems(mediaStoreUris.map { it.toString() }.toSet())
+                        onDeleted(directCount + mediaStoreUris.size)
+                    }
                     deleteRequest.launch(IntentSenderRequest.Builder(sender).build())
                 }
             } else {
@@ -330,10 +358,14 @@ class MainActivity : ComponentActivity() {
                     val next = remaining.removeFirst()
                     lifecycleScope.launch {
                         when (val outcome = withContext(Dispatchers.IO) { tryDelete(next) }) {
-                            DeleteOutcome.Deleted -> processSequential(remaining, deletedSoFar + 1)
+                            DeleteOutcome.Deleted -> {
+                                removeMediaItems(setOf(next.toString()))
+                                processSequential(remaining, deletedSoFar + 1)
+                            }
                             DeleteOutcome.Failed -> processSequential(remaining, deletedSoFar)
                             is DeleteOutcome.NeedsConsent -> {
                                 pendingDelete = outcome.retryUri to {
+                                    removeMediaItems(setOf(next.toString()))
                                     processSequential(remaining, deletedSoFar + 1)
                                 }
                                 deleteRequest.launch(IntentSenderRequest.Builder(outcome.sender).build())
@@ -1100,6 +1132,11 @@ private fun LibraryHome(
     fun play(item: MediaItem) {
         val now = android.os.SystemClock.uptimeMillis()
         if (now - lastFolderNavTime >= 350L) {
+            val current = service?.state?.value?.item
+            if (item.audio && current?.uri == item.uri) {
+                activity.showPlayer = true
+                return
+            }
             activity.startMedia(items, item)
         }
     }
@@ -3746,7 +3783,6 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
         panX = 0f
         panY = 0f
     }
-    val upscaleMode by service.upscaleMode.collectAsState()
     DisposableEffect(Unit) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             runCatching {
@@ -4161,35 +4197,6 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 modifier = Modifier.iosLiquidPress(lockSrc, scaleDown = 0.88f),
                             ) {
                                 Icon(Icons.Default.LockOpen, "Lock controls", tint = Color.White)
-                            }
-                            Spacer(Modifier.width(6.dp))
-                            val upscaleSrc = remember { MutableInteractionSource() }
-                            val currentUpscale by service.upscaleMode.collectAsState()
-                            IconButton(
-                                onClick = {
-                                    val next = service.cycleUpscaleMode()
-                                    hint(PlayerFeedback.Message(next.label))
-                                    touch()
-                                },
-                                interactionSource = upscaleSrc,
-                                modifier = Modifier.iosLiquidPress(upscaleSrc, scaleDown = 0.88f),
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    if (currentUpscale != PlaybackService.UpscaleMode.OFF) {
-                                        Box(
-                                            Modifier
-                                                .size(28.dp)
-                                                .clip(CircleShape)
-                                                .background(Cyan.copy(alpha = 0.22f))
-                                        )
-                                    }
-                                    Icon(
-                                        Icons.Default.AutoAwesome,
-                                        contentDescription = currentUpscale.label,
-                                        tint = if (currentUpscale != PlaybackService.UpscaleMode.OFF) Cyan else Color.White,
-                                        modifier = Modifier.size(24.dp),
-                                    )
-                                }
                             }
                             Spacer(Modifier.weight(1f))
                             IconButton(

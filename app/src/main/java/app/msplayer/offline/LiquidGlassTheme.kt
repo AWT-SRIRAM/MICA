@@ -305,6 +305,23 @@ fun liquidSpecularBrush(accentGlow: Float = 0.34f, accentColor: Color = Accent):
     )
 )
 
+fun liquidSelectedBorder(): Brush = Brush.linearGradient(
+    colors = listOf(
+        Cyan.copy(alpha = 0.95f),
+        GlassTheme.CrystalCobalt,
+        Color.White.copy(alpha = 0.85f),
+        Cyan.copy(alpha = 0.65f),
+    )
+)
+
+fun liquidSelectedSurface(): Brush = Brush.verticalGradient(
+    colors = listOf(
+        Color(0x780B355A),
+        Color(0x5608223B),
+        Color(0x6E0C2D4E),
+    )
+)
+
 /**
  * Apple iOS–style spring press response + subtle specular light bloom while held down.
  */
