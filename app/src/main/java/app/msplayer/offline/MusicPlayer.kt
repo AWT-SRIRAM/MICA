@@ -127,31 +127,62 @@ fun MusicPlayerScreen(
     }
     LaunchedEffect(item.uri) {
         withContext(Dispatchers.IO) {
-            val retriever=MediaMetadataRetriever()
-            try {
-                activity.contentResolver.openFileDescriptor(Uri.parse(item.uri),"r")?.use { fd ->
-                    retriever.setDataSource(fd.fileDescriptor)
-                    val t=retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
-                    val a=retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
-                    val cover=retriever.embeddedPicture?.takeIf { it.size<=8*1024*1024 }?.let { bytes ->
-                        val bounds=android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds=true }
-                        android.graphics.BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
-                        val options=android.graphics.BitmapFactory.Options().apply { inSampleSize=(maxOf(bounds.outWidth,bounds.outHeight)/720).coerceAtLeast(1) }
-                        android.graphics.BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
+            val isLocal = item.uri.startsWith("content://") || item.uri.startsWith("file://")
+            var cover: android.graphics.Bitmap? = null
+            var t: String? = null
+            var a: String? = null
+
+            if (isLocal) {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    activity.contentResolver.openFileDescriptor(Uri.parse(item.uri), "r")?.use { fd ->
+                        retriever.setDataSource(fd.fileDescriptor)
+                        t = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                        a = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                        cover = retriever.embeddedPicture?.takeIf { it.size <= 8 * 1024 * 1024 }?.let { bytes ->
+                            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                            val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = (maxOf(bounds.outWidth, bounds.outHeight) / 720).coerceAtLeast(1) }
+                            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                        }
                     }
-                    val extractedMood = extractAdaptiveMoodColors(cover)
-                    withContext(Dispatchers.Main) {
-                        title=t?.takeIf { it.isNotBlank() } ?: item.title
-                        artist=a?.takeIf { it.isNotBlank() } ?: "Unknown artist"
-                        artwork=cover
-                        mood=extractedMood
-                    }
+                } catch (e: CancellationException) { throw e } catch (_: Exception) { } finally { retriever.release() }
+            } else {
+                // Online stream (YouTube Music)
+                t = item.title
+                a = item.artist.ifBlank { "YouTube Music" }
+                val thumb = item.thumbUri
+                if (!thumb.isNullOrBlank()) {
+                    cover = runCatching {
+                        val conn = java.net.URL(thumb).openConnection() as java.net.HttpURLConnection
+                        conn.connectTimeout = 5000
+                        conn.readTimeout = 5000
+                        conn.inputStream.use { android.graphics.BitmapFactory.decodeStream(it) }
+                    }.getOrNull()
                 }
-            } catch(e:CancellationException) { throw e } catch(_:Exception) { } finally { retriever.release() }
-            val stored=Store.prefs(activity).getString("lyrics_uri_${item.uri.hashCode()}",null)
-            val words=stored?.let { location -> runCatching { activity.contentResolver.openInputStream(Uri.parse(location))?.use { String(it.readBounded(1024*1024),Charsets.UTF_8) } }.getOrNull() } ?: LocalLyrics.embedded(activity,item.uri)
-            val liked=Store.db(activity).dao().entries("Favorites").any { it.uri==item.uri }
-            withContext(Dispatchers.Main) { favourite=liked; if(words!=null) lyrics=LocalLyrics.parse(words) }
+            }
+
+            val extractedMood = extractAdaptiveMoodColors(cover)
+            withContext(Dispatchers.Main) {
+                title = t?.takeIf { it.isNotBlank() } ?: item.title
+                artist = a?.takeIf { it.isNotBlank() } ?: (item.artist.takeIf { it.isNotBlank() } ?: "Unknown artist")
+                artwork = cover
+                mood = extractedMood
+            }
+
+            val stored = Store.prefs(activity).getString("lyrics_uri_${item.uri.hashCode()}", null)
+            var words = stored?.let { location -> runCatching { activity.contentResolver.openInputStream(Uri.parse(location))?.use { String(it.readBounded(1024 * 1024), Charsets.UTF_8) } }.getOrNull() }
+                ?: if (isLocal) LocalLyrics.embedded(activity, item.uri) else null
+
+            if (words.isNullOrBlank() && (!isLocal || item.artist.isNotBlank())) {
+                words = YtMusicClient.fetchLyrics(item.title, item.artist)
+            }
+
+            val liked = Store.db(activity).dao().entries("Favorites").any { it.uri == item.uri }
+            withContext(Dispatchers.Main) {
+                favourite = liked
+                if (words != null) lyrics = LocalLyrics.parse(words)
+            }
         }
     }
     val lyricsPicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->

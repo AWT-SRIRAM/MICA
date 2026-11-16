@@ -38,6 +38,8 @@ data class MediaItem(
     val added: Long = 0,
     val audio: Boolean = false,
     val modified: Long = 0,
+    val artist: String = "",
+    val thumbUri: String? = null,
 )
 
 object LibraryCache {
@@ -65,6 +67,8 @@ object LibraryCache {
                         added = o.optLong("added", 0L),
                         audio = audio,
                         modified = o.optLong("modified", 0L),
+                        artist = o.optString("artist", ""),
+                        thumbUri = o.optString("thumbUri", "").takeIf { it.isNotBlank() },
                     )
                 )
             }
@@ -90,6 +94,8 @@ object LibraryCache {
                     o.put("height", it.height)
                     o.put("added", it.added)
                     o.put("modified", it.modified)
+                    if (it.artist.isNotBlank()) o.put("artist", it.artist)
+                    if (!it.thumbUri.isNullOrBlank()) o.put("thumbUri", it.thumbUri)
                     arr.put(o)
                 }
                 return arr

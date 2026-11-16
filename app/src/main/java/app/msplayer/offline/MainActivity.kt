@@ -1442,6 +1442,15 @@ private fun LibraryHome(
                             ) {
                                 Box(Modifier.fillMaxSize().offset { IntOffset(0, pullOffsetPx) }) {
                                 when {
+                            curTab == "Online" -> {
+                                OnlineMusicScreen(
+                                    activity = activity,
+                                    service = service,
+                                    palette = palette,
+                                    glassEnabled = glassEnabled,
+                                    bottomPadding = listBottomPad,
+                                )
+                            }
                             curTab == "Playlists" && curPlaylist == null -> {
                                 if (playlists.isEmpty())
                                     EmptyLibrary(
@@ -1915,7 +1924,7 @@ private fun LibraryHome(
                         listOf(
                                 Triple("Folders", Icons.Default.Folder, "Local"),
                                 Triple("Audio", Icons.Default.Headphones, "Audio"),
-                                Triple("Playlists", Icons.Default.QueueMusic, "Playlists"),
+                                Triple("Online", Icons.Default.Public, "Online"),
                                 Triple("Settings", Icons.Default.Settings, "Settings"),
                             )
                             .forEach { (name, icon, label) ->
@@ -1945,7 +1954,7 @@ private fun LibraryHome(
                 }
             }
         }
-        val showResumeFab = (folder != null || activePlaylist != null) && state.item?.audio != true && tab != "Settings" &&
+        val showResumeFab = (folder != null || activePlaylist != null) && state.item?.audio != true && tab != "Settings" && tab != "Online" &&
             !(tab == "Playlists" && activePlaylist == null) &&
             (activity.videos.isNotEmpty() || state.item != null)
         if (showResumeFab) {
@@ -2076,7 +2085,7 @@ private fun LibraryHome(
             val dockTabs = listOf(
                 Triple("Folders", Icons.Default.Folder, "Local"),
                 Triple("Audio", Icons.Default.Headphones, "Audio"),
-                Triple("Playlists", Icons.Default.QueueMusic, "Playlists"),
+                Triple("Online", Icons.Default.Public, "Online"),
                 Triple("Settings", Icons.Default.Settings, "Settings"),
             )
             val activeIdx = dockTabs.indexOfFirst { it.first == tab }.coerceAtLeast(0)
@@ -3915,7 +3924,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             factory = { context ->
-                VLCVideoLayout(context).also { layout ->
+                CenteredVLCVideoLayout(context).also { layout ->
                     attachedLayout = layout
                     service.attachVideo(layout)
                     layout.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
