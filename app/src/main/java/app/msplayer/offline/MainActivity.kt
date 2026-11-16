@@ -25,6 +25,7 @@ import androidx.activity.compose.*
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -1093,8 +1094,14 @@ private fun LibraryHome(
                 onSearchingChange(false)
                 onSearchChange("")
             }
-            folder != null -> onFolderChange(null)
-            else -> onActivePlaylistChange(null)
+            folder != null -> {
+                lastFolderNavTime = android.os.SystemClock.uptimeMillis()
+                onFolderChange(null)
+            }
+            else -> {
+                lastFolderNavTime = android.os.SystemClock.uptimeMillis()
+                onActivePlaylistChange(null)
+            }
         }
     }
     val hidden = Store.prefs(activity).getStringSet("hidden", emptySet()).orEmpty()
@@ -1128,15 +1135,15 @@ private fun LibraryHome(
             "Duration" -> filtered.sortedByDescending { it.duration }
             else -> filtered.sortedBy { it.title.lowercase() }
         }
-    fun play(item: MediaItem) {
+    fun play(item: MediaItem, playQueue: List<MediaItem> = items) {
         val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastFolderNavTime >= 350L) {
+        if (now - lastFolderNavTime >= 650L) {
             val current = service?.state?.value?.item
             if (item.audio && current?.uri == item.uri) {
                 activity.showPlayer = true
                 return
             }
-            activity.startMedia(items, item)
+            activity.startMedia(playQueue, item)
         }
     }
     fun overflow(item: MediaItem, action: String) {
@@ -1350,16 +1357,43 @@ private fun LibraryHome(
                                 (initialState.third != null && targetState.third == null)
                             when {
                                 drillingIn ->
-                                    (slideInHorizontally(MotionSpec.PanelOffsetSpring) { it / 3 } + fadeIn(tween(150))) togetherWith
-                                        (slideOutHorizontally(MotionSpec.PanelOffsetSpring) { -it / 6 } + fadeOut(tween(110)))
+                                    (slideInHorizontally(tween(320, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(240))) togetherWith
+                                        (slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { -it / 3 } + fadeOut(tween(200)))
                                 drillingOut ->
-                                    (slideInHorizontally(MotionSpec.PanelOffsetSpring) { -it / 4 } + fadeIn(tween(150))) togetherWith
-                                        (slideOutHorizontally(MotionSpec.PanelOffsetSpring) { it / 3 } + fadeOut(tween(110)))
-                                else -> fadeIn(tween(150)) togetherWith fadeOut(tween(120))
+                                    (slideInHorizontally(tween(320, easing = FastOutSlowInEasing)) { -it / 3 } + fadeIn(tween(240))) togetherWith
+                                        (slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(200)))
+                                else -> fadeIn(tween(200)) togetherWith fadeOut(tween(160))
                             }
                         },
                         label = "libraryContentTransition",
                     ) { (curTab, curFolder, curPlaylist) ->
+                        val curRaw = when (curTab) {
+                            "Audio" -> activity.audios
+                            "History" -> history.map { saved ->
+                                (activity.audios + activity.videos).firstOrNull { it.uri == saved.uri }
+                                    ?: MediaItem(
+                                        saved.uri,
+                                        saved.title,
+                                        folder = if (PlaybackRules.isStreamUrl(saved.uri)) "Network Streams" else "Opened files",
+                                        duration = saved.position,
+                                        audio = PlaybackRules.audioFile(null, saved.title) || PlaybackRules.audioFile(null, Uri.parse(saved.uri).lastPathSegment ?: ""),
+                                    )
+                            }
+                            "Playlists" -> playlistContent
+                            else ->
+                                activity.videos.filter {
+                                    it.folder !in hidden && (curFolder == null || it.folder == curFolder)
+                                }
+                        }
+                        val curFiltered = curRaw.filter {
+                            search.isBlank() || it.title.contains(search, true) || it.folder.contains(search, true)
+                        }
+                        val curItems = when (sort) {
+                            "Date" -> curFiltered.sortedByDescending { it.added }
+                            "Size" -> curFiltered.sortedByDescending { it.size }
+                            "Duration" -> curFiltered.sortedByDescending { it.duration }
+                            else -> curFiltered.sortedBy { it.title.lowercase() }
+                        }
                         if (curTab == "Settings") {
                             SettingsScreen(activity, onSettingsChanged = { onBumpRefresh() })
                         } else {
@@ -1438,7 +1472,8 @@ private fun LibraryHome(
                                     }
                             }
                             curTab == "Folders" && curFolder == null && !searching -> {
-                                val groups = items.groupBy { it.folder }.map { MediaFolder(it.key, it.value) }
+                                val allValidVideos = activity.videos.filter { it.folder !in hidden }
+                                val groups = allValidVideos.groupBy { it.folder }.map { MediaFolder(it.key, it.value) }
                                 val folders =
                                     when (sort) {
                                         "Size" -> groups.sortedByDescending { it.size }
@@ -1745,7 +1780,7 @@ private fun LibraryHome(
                                                         indication = ripple(),
                                                         onClick = {
                                                             val now = android.os.SystemClock.uptimeMillis()
-                                                            if (now - lastFolderNavTime >= 350L) {
+                                                            if (now - lastFolderNavTime >= 650L) {
                                                                 lastFolderNavTime = now
                                                                 onFolderChange(entry.name)
                                                             }
@@ -1799,7 +1834,7 @@ private fun LibraryHome(
                                     }
                                 }
                             }
-                            items.isEmpty() ->
+                            curItems.isEmpty() ->
                                 if (curTab == "Audio") AccessEmpty(activity)
                                 else
                                     EmptyLibrary(
@@ -1816,13 +1851,16 @@ private fun LibraryHome(
                                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     verticalArrangement = Arrangement.spacedBy(16.dp),
                                 ) {
-                                    items(items, key = { it.uri }) { item ->
+                                    items(curItems, key = { it.uri }) { item ->
                                         MediaTile(
                                             item,
                                             item.uri in selected,
                                             {
-                                                if (selected.isEmpty()) play(item)
-                                                else selected = selected.toggle(item.uri)
+                                                val now = android.os.SystemClock.uptimeMillis()
+                                                if (now - lastFolderNavTime >= 650L) {
+                                                    if (selected.isEmpty()) play(item, curItems)
+                                                    else selected = selected.toggle(item.uri)
+                                                }
                                             },
                                             { selected = selected.toggle(item.uri) },
                                             { overflow(item, it) },
@@ -1833,14 +1871,17 @@ private fun LibraryHome(
                                 }
                             else ->
                                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = listBottomPad)) {
-                                    items(items, key = { it.uri }) { item ->
+                                    items(curItems, key = { it.uri }) { item ->
                                         MediaRow(
                                             item,
                                             history.any { it.uri == item.uri },
                                             item.uri in selected,
                                             {
-                                                if (selected.isEmpty()) play(item)
-                                                else selected = selected.toggle(item.uri)
+                                                val now = android.os.SystemClock.uptimeMillis()
+                                                if (now - lastFolderNavTime >= 650L) {
+                                                    if (selected.isEmpty()) play(item, curItems)
+                                                    else selected = selected.toggle(item.uri)
+                                                }
                                             },
                                             { selected = selected.toggle(item.uri) },
                                             { overflow(item, it) },
@@ -2792,6 +2833,11 @@ fun MediaRow(
     val pressSrc = remember { MutableInteractionSource() }
     var info by remember(item.uri) { mutableStateOf<MediaInfo?>(null) }
     LaunchedEffect(item.uri, activity?.service) {
+        val titleLower = item.title.lowercase()
+        if (titleLower.endsWith(".tmp") || titleLower.endsWith(".crdownload") || titleLower.endsWith(".part") || titleLower.contains(".pending")) {
+            return@LaunchedEffect
+        }
+        kotlinx.coroutines.delay(350L)
         activity?.service?.let { info = Library.inspect(activity, it.vlc, item) }
     }
     val resolved =

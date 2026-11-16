@@ -395,6 +395,8 @@ object Library {
 
     suspend fun inspect(context: Context, vlc: LibVLC, item: MediaItem): MediaInfo? {
         if (PlaybackRules.isStreamUrl(item.uri)) return null
+        val titleLower = item.title.lowercase()
+        if (titleLower.endsWith(".tmp") || titleLower.endsWith(".crdownload") || titleLower.endsWith(".part") || titleLower.contains(".pending")) return null
         return probes.withPermit {
             awaitIdle()
             val key = "v4|${item.uri}|${item.size}|${item.modified}|${item.added}|${thumbnailRevision.value}"
@@ -880,6 +882,8 @@ object Library {
 
     suspend fun thumbnail(context: Context, item: MediaItem): Bitmap? {
         if (PlaybackRules.isStreamUrl(item.uri)) return null
+        val titleLower = item.title.lowercase()
+        if (titleLower.endsWith(".tmp") || titleLower.endsWith(".crdownload") || titleLower.endsWith(".part") || titleLower.contains(".pending")) return null
         if (item.audio) return audioThumbnail(context, item)
         val key = "v7|${item.uri}|${item.size}|${item.modified}|${item.added}"
         return thumbLocks[(key.hashCode() and Int.MAX_VALUE) % thumbLocks.size].withLock {
