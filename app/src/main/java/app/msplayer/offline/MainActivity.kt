@@ -195,6 +195,7 @@ class MainActivity : ComponentActivity() {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                 service = (binder as PlaybackService.LocalBinder).service
                 bound = true
+                service?.setAppInForeground(lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
                 pendingUri?.let { uri ->
                     pendingUri = null
                     lifecycleScope.launch {
@@ -623,6 +624,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        service?.setAppInForeground(true)
         enableHighRefreshRate()
         if (showPlayer) service?.resumeVideoSurface()
         val nowAllFiles = hasAllFilesAccess()
@@ -652,6 +654,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        if (!isChangingConfigurations) service?.setAppInForeground(false)
         val inPipNow = inPip || isInPictureInPictureMode
         if (!isChangingConfigurations && !inPipNow) service?.suspendVideoSurface()
         if (
@@ -3256,13 +3259,13 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             item(key = "notifications_island") {
                 val nm = remember { activity.getSystemService(android.app.NotificationManager::class.java) }
                 val notificationsOn = remember(notifTick, epoch) { nm.areNotificationsEnabled() }
-                val liveIslandSupported = Build.VERSION.SDK_INT >= 36
-                val liveIslandOn = remember(notifTick, epoch) {
-                    if (Build.VERSION.SDK_INT >= 36) nm.canPostPromotedNotifications() else false
+                val overlayGranted = remember(notifTick, epoch) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) android.provider.Settings.canDrawOverlays(activity) else true
                 }
+                val warnColor = if (palette.isLight) Color(0xFFB45309) else Color(0xFFFBBF24)
                 SettingsGlassCard(palette) {
                     Text(
-                        if (liveIslandSupported) "Notifications & Dynamic Island" else "Playback Notifications",
+                        "Notifications & Dynamic Island",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = palette.accent,
@@ -3273,11 +3276,11 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                            Text("Media notifications", color = palette.textPrimary, fontSize = 14.5.sp)
+                            Text("Media notification", color = palette.textPrimary, fontSize = 14.5.sp)
                             Text(
-                                if (notificationsOn) "Enabled — album art & track controls active"
-                                else "Disabled — turn on for lockscreen art & Live Island",
-                                color = if (notificationsOn) palette.accentSecondary else Color(0xFFF59E0B),
+                                if (notificationsOn) "Enabled — single clean Control Center card with album art"
+                                else "Disabled — turn on for Control Center art & controls",
+                                color = if (notificationsOn) palette.accentSecondary else warnColor,
                                 fontSize = 12.sp,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
@@ -3292,63 +3295,60 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                             Text(if (notificationsOn) "Manage" else "Enable", color = palette.accent)
                         }
                     }
-                    if (liveIslandSupported) {
-                        HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
+                    if (!overlayGranted) {
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text("Dynamic Island / Live Updates", color = palette.textPrimary, fontSize = 14.5.sp)
+                                Text("Liquid Glass Dynamic Island", color = palette.textPrimary, fontSize = 14.5.sp)
                                 Text(
-                                    if (liveIslandOn) "Enabled — Live Updates permission granted"
-                                    else "Allow Live Updates in system settings to show capsule",
-                                    color = if (liveIslandOn) palette.accentSecondary else Color(0xFFF59E0B),
+                                    "Allow display over apps for Spotify-style Dynamic Island with album art & seekbar",
+                                    color = warnColor,
                                     fontSize = 12.sp,
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
                             TextButton(onClick = {
-                                val promoIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS).apply {
-                                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
-                                }
-                                val fallbackIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
-                                }
-                                runCatching { activity.startActivity(promoIntent) }
-                                    .onFailure { runCatching { activity.startActivity(fallbackIntent) } }
+                                val overlayIntent = Intent(
+                                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${activity.packageName}"),
+                                )
+                                runCatching { activity.startActivity(overlayIntent) }
                             }) {
-                                Text(if (liveIslandOn) "Manage" else "Enable", color = palette.accent)
+                                Text("Enable", color = palette.accent)
                             }
                         }
-                        if (liveIslandOn) {
-                            HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
-                            var capsuleOn by remember(notifTick, epoch) {
-                                mutableStateOf(prefs.getBoolean("live_island_capsule", true))
-                            }
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                                    Text("Status-bar Live Capsule", color = palette.textPrimary, fontSize = 14.5.sp)
-                                    Text(
-                                        "Turn off for a single clean Control Center media card only",
-                                        color = palette.textSecondary,
-                                        fontSize = 11.5.sp,
-                                    )
-                                }
-                                Switch(
-                                    checked = capsuleOn,
-                                    onCheckedChange = { enabled ->
-                                        capsuleOn = enabled
-                                        prefs.edit().putBoolean("live_island_capsule", enabled).apply()
-                                        activity.service?.refreshNotification()
-                                    },
+                    } else {
+                        var islandOn by remember(notifTick, epoch) {
+                            mutableStateOf(prefs.getBoolean("dynamic_island_overlay", true))
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                Text("Liquid Glass Dynamic Island", color = palette.textPrimary, fontSize = 14.5.sp)
+                                Text(
+                                    if (islandOn) "Active — thumbnail pill & expandable Liquid Glass player"
+                                    else "Off — single Control Center card only",
+                                    color = if (islandOn) palette.accentSecondary else palette.textSecondary,
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
+                            Switch(
+                                checked = islandOn,
+                                onCheckedChange = { enabled ->
+                                    islandOn = enabled
+                                    prefs.edit().putBoolean("dynamic_island_overlay", enabled).apply()
+                                    activity.service?.refreshNotification()
+                                },
+                            )
                         }
                     }
                 }

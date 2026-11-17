@@ -540,6 +540,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
     private var artworkJob: Job? = null
     private var notifSyncJob: Job? = null
     private var lastLiveCapsuleAt = 0L
+    private var currentTrackLiked = false
+    private var likedTrackUri: String? = null
+    private var appInForeground = true
+    private lateinit var dynamicIsland: DynamicIslandController
     private var sessionStatus = -1
     private var sessionRate = -1f
     private var sessionSentAt = 0L
@@ -803,16 +807,35 @@ class PlaybackService : MediaBrowserServiceCompat() {
             enableVibration(false)
         }
         nm.createNotificationChannel(playbackChannel)
-        if (Build.VERSION.SDK_INT >= 36) {
-            val liveCapsuleChannel = NotificationChannel("live_island", "Now Playing Capsule", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-                setShowBadge(false)
-                setSound(null, null)
-                enableLights(false)
-                enableVibration(false)
-            }
-            nm.createNotificationChannel(liveCapsuleChannel)
+        // Ensure no legacy second notification lingers
+        nm.cancel(11)
+        if (Build.VERSION.SDK_INT >= 26) {
+            runCatching { nm.deleteNotificationChannel("live_island") }
         }
+        dynamicIsland = DynamicIslandController(
+            this,
+            object : DynamicIslandController.Callbacks {
+                override fun onPlayPause() = toggle()
+                override fun onNext() = next()
+                override fun onPrevious() = previous()
+                override fun onSeekTo(positionMs: Long) { seek(positionMs) }
+                override fun onToggleLike() = toggleCurrentTrackLike()
+                override fun onToggleShuffle() {
+                    toggleShuffle()
+                    updateSession(forceState = true)
+                    updateDynamicIsland()
+                }
+                override fun onOpenApp() {
+                    runCatching {
+                        startActivity(
+                            Intent(this@PlaybackService, MainActivity::class.java)
+                                .putExtra("show_player", true)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        )
+                    }
+                }
+            },
+        )
         val initialEffects = AudioEffectSettings.load(this)
         effectSettings.value = initialEffects
         vlc = createVlc(initialEffects)
@@ -864,6 +887,17 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 override fun onSkipToNext() = next()
 
                 override fun onSkipToPrevious() = previous()
+
+                override fun onCustomAction(action: String?, extras: Bundle?) {
+                    when (action) {
+                        "toggle_like" -> toggleCurrentTrackLike()
+                        "toggle_shuffle" -> {
+                            toggleShuffle()
+                            updateSession(forceState = true)
+                            updateDynamicIsland()
+                        }
+                    }
+                }
             }
         )
         session.isActive = true
@@ -931,9 +965,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
                             timeline.value = PlaybackTimeline(state.value.position, state.value.duration, state.value.seekable, seekTarget != null)
                             Library.videoPlaybackActive.value = videoAttached && state.value.item?.audio == false
                             updateSession()
-                            if (Build.VERSION.SDK_INT >= 36 && state.value.playing && state.value.item?.audio == true && now - lastLiveCapsuleAt >= 2000L) {
+                            if (!appInForeground && state.value.item?.audio == true && now - lastLiveCapsuleAt >= 500L) {
                                 lastLiveCapsuleAt = now
-                                updateLiveIslandCapsule()
+                                updateDynamicIsland()
                             }
                         }
                         if (now - lastDiagAt >= 1000L) {
@@ -1670,6 +1704,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         pendingStyleRestore = pendingStyleRestore?.copy(playing = true)
         Library.videoPlaybackActive.value = state.value.item?.audio == false
         if (state.value.item == null) return
+        if (::dynamicIsland.isInitialized) dynamicIsland.resetDismiss()
         if (finished) {
             openCurrent(0, false)
             return
@@ -2831,6 +2866,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.cancel(10)
         nm.cancel(11)
+        if (::dynamicIsland.isInitialized) dynamicIsland.hide()
     }
 
     private fun requestFocus(): Boolean {
@@ -2997,13 +3033,75 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
             )
         else startForeground(10, notification())
-        updateLiveIslandCapsule()
+        updateDynamicIsland()
+    }
+
+    fun setAppInForeground(inForeground: Boolean) {
+        appInForeground = inForeground
+        if (inForeground) {
+            if (::dynamicIsland.isInitialized) dynamicIsland.hide()
+        } else {
+            updateDynamicIsland()
+        }
     }
 
     fun refreshNotification() {
         if (released) return
         if (state.value.item != null) {
             updateNotification()
+        } else if (::dynamicIsland.isInitialized) {
+            dynamicIsland.hide()
+        }
+    }
+
+    private fun refreshLikedStatus(item: MediaItem) {
+        if (likedTrackUri == item.uri) return
+        likedTrackUri = item.uri
+        scope.launch(Dispatchers.IO) {
+            val liked = runCatching {
+                Store.db(this@PlaybackService).dao().entries("Favorites").any { it.uri == item.uri }
+            }.getOrDefault(false)
+            withContext(Dispatchers.Main) {
+                if (!released && state.value.item?.uri == item.uri && currentTrackLiked != liked) {
+                    currentTrackLiked = liked
+                    updateSession(forceState = true)
+                    updateDynamicIsland()
+                }
+            }
+        }
+    }
+
+    private fun toggleCurrentTrackLike() {
+        val item = state.value.item ?: return
+        val newLiked = !currentTrackLiked
+        currentTrackLiked = newLiked
+        likedTrackUri = item.uri
+        updateSession(forceState = true)
+        updateDynamicIsland()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val dao = Store.db(this@PlaybackService).dao()
+                if (newLiked) {
+                    dao.add(PlaylistEntry().apply {
+                        playlist = "Favorites"
+                        uri = item.uri
+                        title = item.title
+                        added = System.currentTimeMillis()
+                    })
+                    sessionArtworkBitmap?.let { bmp ->
+                        TrackArtworkStore.saveBitmap(
+                            this@PlaybackService,
+                            item.uri,
+                            item.title,
+                            item.artist,
+                            bmp,
+                            item.thumbUri ?: "",
+                        )
+                    }
+                } else {
+                    dao.remove("Favorites", item.uri)
+                }
+            }
         }
     }
 
@@ -3014,69 +3112,44 @@ class PlaybackService : MediaBrowserServiceCompat() {
             if (released || state.value.item == null) return@launch
             updateSession(forceMetadata = true, forceState = true)
             getSystemService(NotificationManager::class.java).notify(10, notification())
-            updateLiveIslandCapsule()
+            updateDynamicIsland()
         }
     }
 
-    private fun updateLiveIslandCapsule() {
-        if (Build.VERSION.SDK_INT < 36) return
-        val nm = getSystemService(NotificationManager::class.java)
-        val capsuleEnabled = Store.prefs(this).getBoolean("live_island_capsule", true)
+    private fun updateDynamicIsland() {
+        if (!::dynamicIsland.isInitialized) return
         val cur = state.value
         val curItem = cur.item
-        if (!capsuleEnabled || curItem == null || !curItem.audio || !cur.playing || !nm.canPostPromotedNotifications()) {
-            nm.cancel(11)
+        if (curItem == null || !curItem.audio) {
+            dynamicIsland.hide()
             return
         }
+        refreshLikedStatus(curItem)
         val title = curItem.title.takeIf { it.isNotBlank() } ?: "MS PLAYER"
         val artist = curItem.artist.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
             ?: "MS PLAYER"
-        val open = PendingIntent.getActivity(
-            this,
-            11,
-            Intent(this, MainActivity::class.java).putExtra("show_player", true),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        dynamicIsland.update(
+            DynamicIslandController.Snapshot(
+                title = title,
+                artist = artist,
+                playing = cur.playing,
+                positionMs = cur.position.coerceAtLeast(0L),
+                durationMs = cur.duration.coerceAtLeast(0L),
+                artwork = sessionArtworkBitmap,
+                accentColor = sessionArtworkColor,
+                liked = currentTrackLiked,
+                shuffle = shuffleEnabled.value,
+            ),
+            appInForeground = appInForeground,
         )
-        val shortTitle = title.replace(Regex("""\(.*?\)|\[.*?\]"""), "").trim().ifBlank { title }
-        val pillText = if (shortTitle.length > 14) shortTitle.take(13) + "…" else shortTitle
-        val dur = cur.duration.coerceAtLeast(0L)
-        val pos = cur.position.coerceIn(0L, dur.coerceAtLeast(1L))
-        val progressPct = if (dur > 0L) ((pos * 100L) / dur).toInt().coerceIn(0, 100) else 0
-
-        val progressStyle = android.app.Notification.ProgressStyle()
-            .setStyledByProgress(true)
-            .addProgressSegment(
-                android.app.Notification.ProgressStyle.Segment(100)
-                    .setColor(sessionArtworkColor)
-            )
-            .setProgress(progressPct)
-
-        val builder = android.app.Notification.Builder(this, "live_island")
-            .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle(title)
-            .setContentText(artist)
-            .setSubText("MS PLAYER")
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-            .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
-            .setColor(sessionArtworkColor)
-            .setContentIntent(open)
-            .addExtras(Bundle().apply { putBoolean("android.requestPromotedOngoing", true) })
-            .setShortCriticalText("♪ $pillText")
-            .setStyle(progressStyle)
-            .addAction(android.R.drawable.ic_media_previous, "Prev", action("previous"))
-            .addAction(android.R.drawable.ic_media_pause, "Pause", action("pause"))
-            .addAction(android.R.drawable.ic_media_next, "Next", action("next"))
-        sessionArtworkBitmap?.let { bmp -> builder.setLargeIcon(bmp) }
-        lastLiveCapsuleAt = SystemClock.elapsedRealtime()
-        runCatching { nm.notify(11, builder.build()) }
     }
 
     private fun updateNotification() {
         updateSession()
-        getSystemService(NotificationManager::class.java).notify(10, notification())
-        updateLiveIslandCapsule()
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(10, notification())
+        nm.cancel(11)
+        updateDynamicIsland()
     }
 
     private fun updateSession(forceMetadata: Boolean = false, forceState: Boolean = false) {
@@ -3149,6 +3222,16 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
                         PlaybackStateCompat.ACTION_STOP
                 )
+                .addCustomAction(
+                    "toggle_like",
+                    if (currentTrackLiked) "Unlike" else "Like",
+                    if (currentTrackLiked) android.R.drawable.btn_star_big_on else android.R.drawable.btn_star_big_off,
+                )
+                .addCustomAction(
+                    "toggle_shuffle",
+                    if (shuffleEnabled.value) "Shuffle On" else "Shuffle Off",
+                    android.R.drawable.ic_menu_sort_by_size,
+                )
                 .setState(
                     status,
                     value.position.coerceAtLeast(0L),
@@ -3170,6 +3253,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
             releasePlayback()
         }
         unregisterReceiver(noisy)
+        if (::dynamicIsland.isInitialized) dynamicIsland.hide()
         session.release()
         super.onDestroy()
     }
