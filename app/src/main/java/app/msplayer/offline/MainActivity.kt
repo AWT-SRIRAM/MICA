@@ -195,6 +195,7 @@ class MainActivity : ComponentActivity() {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                 service = (binder as PlaybackService.LocalBinder).service
                 bound = true
+                service?.setAppInForeground(lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
                 pendingUri?.let { uri ->
                     pendingUri = null
                     lifecycleScope.launch {
@@ -623,6 +624,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        service?.setAppInForeground(true)
         enableHighRefreshRate()
         if (showPlayer) service?.resumeVideoSurface()
         val nowAllFiles = hasAllFilesAccess()
@@ -652,6 +654,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        if (!isChangingConfigurations) service?.setAppInForeground(false)
         val inPipNow = inPip || isInPictureInPictureMode
         if (!isChangingConfigurations && !inPipNow) service?.suspendVideoSurface()
         if (
@@ -3256,10 +3259,13 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             item(key = "notifications_island") {
                 val nm = remember { activity.getSystemService(android.app.NotificationManager::class.java) }
                 val notificationsOn = remember(notifTick, epoch) { nm.areNotificationsEnabled() }
+                val overlayGranted = remember(notifTick, epoch) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) android.provider.Settings.canDrawOverlays(activity) else true
+                }
                 val warnColor = if (palette.isLight) Color(0xFFB45309) else Color(0xFFFBBF24)
                 SettingsGlassCard(palette) {
                     Text(
-                        "Media Notification",
+                        "Notifications & Dynamic Island",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = palette.accent,
@@ -3287,6 +3293,62 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                             runCatching { activity.startActivity(intent) }
                         }) {
                             Text(if (notificationsOn) "Manage" else "Enable", color = palette.accent)
+                        }
+                    }
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
+                    if (!overlayGranted) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("Liquid Glass Dynamic Island", color = palette.textPrimary, fontSize = 14.5.sp)
+                                Text(
+                                    "Allow display over apps for Dynamic Island without double notification",
+                                    color = warnColor,
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            TextButton(onClick = {
+                                val overlayIntent = Intent(
+                                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                    Uri.parse("package:${activity.packageName}"),
+                                )
+                                runCatching { activity.startActivity(overlayIntent) }
+                            }) {
+                                Text("Enable", color = palette.accent)
+                            }
+                        }
+                    } else {
+                        var islandOn by remember(notifTick, epoch) {
+                            mutableStateOf(prefs.getBoolean("dynamic_island_overlay", true))
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                Text("Liquid Glass Dynamic Island", color = palette.textPrimary, fontSize = 14.5.sp)
+                                Text(
+                                    if (islandOn) "Active — album thumbnail pill & expandable player (single notification)"
+                                    else "Off — Control Center card only",
+                                    color = if (islandOn) palette.accentSecondary else palette.textSecondary,
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Switch(
+                                checked = islandOn,
+                                onCheckedChange = { enabled ->
+                                    islandOn = enabled
+                                    prefs.edit().putBoolean("dynamic_island_overlay", enabled).apply()
+                                    activity.service?.refreshNotification()
+                                },
+                            )
                         }
                     }
                 }
