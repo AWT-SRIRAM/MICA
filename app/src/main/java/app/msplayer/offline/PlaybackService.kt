@@ -762,6 +762,7 @@ class PlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        val nm = getSystemService(NotificationManager::class.java)
         val playbackChannel = NotificationChannel("playback", "Media Playback", NotificationManager.IMPORTANCE_LOW).apply {
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
             setShowBadge(false)
@@ -769,7 +770,17 @@ class PlaybackService : Service() {
             enableLights(false)
             enableVibration(false)
         }
-        getSystemService(NotificationManager::class.java).createNotificationChannel(playbackChannel)
+        nm.createNotificationChannel(playbackChannel)
+        if (Build.VERSION.SDK_INT >= 36) {
+            val liveCapsuleChannel = NotificationChannel("live_island", "Now Playing Capsule", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                setShowBadge(false)
+                setSound(null, null)
+                enableLights(false)
+                enableVibration(false)
+            }
+            nm.createNotificationChannel(liveCapsuleChannel)
+        }
         val initialEffects = AudioEffectSettings.load(this)
         effectSettings.value = initialEffects
         vlc = createVlc(initialEffects)
@@ -2741,7 +2752,9 @@ class PlaybackService : Service() {
         abandonFocus()
         session.isActive = false
         stopForeground(STOP_FOREGROUND_REMOVE)
-        getSystemService(NotificationManager::class.java).cancel(10)
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.cancel(10)
+        nm.cancel(11)
     }
 
     private fun requestFocus(): Boolean {
@@ -2906,10 +2919,71 @@ class PlaybackService : Service() {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
             )
         else startForeground(10, notification())
+        updateLiveIslandCapsule()
+    }
+
+    fun refreshNotification() {
+        if (released) return
+        if (state.value.item != null) {
+            updateNotification()
+        }
+    }
+
+    private fun updateLiveIslandCapsule() {
+        if (Build.VERSION.SDK_INT < 36) return
+        val nm = getSystemService(NotificationManager::class.java)
+        val cur = state.value
+        val curItem = cur.item
+        if (curItem == null || !curItem.audio || !cur.playing || !nm.canPostPromotedNotifications()) {
+            nm.cancel(11)
+            return
+        }
+        val title = curItem.title.takeIf { it.isNotBlank() } ?: "MS PLAYER"
+        val artist = curItem.artist.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
+            ?: "MS PLAYER"
+        val open = PendingIntent.getActivity(
+            this,
+            11,
+            Intent(this, MainActivity::class.java).putExtra("show_player", true),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val shortTitle = title.replace(Regex("""\(.*?\)|\[.*?\]"""), "").trim().ifBlank { title }
+        val pillText = if (shortTitle.length > 14) shortTitle.take(13) + "…" else shortTitle
+        val dur = cur.duration.coerceAtLeast(0L)
+        val pos = cur.position.coerceIn(0L, dur.coerceAtLeast(1L))
+        val progressPct = if (dur > 0L) ((pos * 100L) / dur).toInt().coerceIn(0, 100) else 0
+
+        val progressStyle = android.app.Notification.ProgressStyle()
+            .setStyledByProgress(true)
+            .addProgressSegment(
+                android.app.Notification.ProgressStyle.Segment(100)
+                    .setColor(sessionArtworkColor)
+            )
+            .setProgress(progressPct)
+
+        val builder = android.app.Notification.Builder(this, "live_island")
+            .setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(artist)
+            .setSubText("MS PLAYER")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
+            .setColor(sessionArtworkColor)
+            .setContentIntent(open)
+            .addExtras(Bundle().apply { putBoolean("android.requestPromotedOngoing", true) })
+            .setShortCriticalText("♪ $pillText")
+            .setStyle(progressStyle)
+            .addAction(android.R.drawable.ic_media_previous, "Previous", action("previous"))
+            .addAction(android.R.drawable.ic_media_pause, "Pause", action("pause"))
+            .addAction(android.R.drawable.ic_media_next, "Next", action("next"))
+        sessionArtworkBitmap?.let { bmp -> builder.setLargeIcon(bmp) }
+        runCatching { nm.notify(11, builder.build()) }
     }
 
     private fun updateNotification() {
         getSystemService(NotificationManager::class.java).notify(10, notification())
+        updateLiveIslandCapsule()
         updateSession()
     }
 

@@ -3169,6 +3169,18 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
     var showFavAudioLangs by remember { mutableStateOf(false) }
     var showFavSubLangs by remember { mutableStateOf(false) }
     var pendingGithubRedirect by remember { mutableStateOf(false) }
+    var notifTick by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                notifTick++
+                activity.service?.refreshNotification()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val listState = rememberLazyListState()
     key(epoch) {
         LazyColumn(
@@ -3236,6 +3248,79 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                                         )
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            item(key = "notifications_island") {
+                val nm = remember { activity.getSystemService(android.app.NotificationManager::class.java) }
+                val notificationsOn = remember(notifTick, epoch) { nm.areNotificationsEnabled() }
+                val liveIslandSupported = Build.VERSION.SDK_INT >= 36
+                val liveIslandOn = remember(notifTick, epoch) {
+                    if (Build.VERSION.SDK_INT >= 36) nm.canPostPromotedNotifications() else false
+                }
+                SettingsGlassCard(palette) {
+                    Text(
+                        if (liveIslandSupported) "Notifications & Dynamic Island" else "Playback Notifications",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.accent,
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text("Media notifications", color = palette.textPrimary, fontSize = 14.5.sp)
+                            Text(
+                                if (notificationsOn) "Enabled — album art & track controls active"
+                                else "Disabled — turn on for lockscreen art & Live Island",
+                                color = if (notificationsOn) palette.accentSecondary else Color(0xFFF59E0B),
+                                fontSize = 12.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        TextButton(onClick = {
+                            val intent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
+                            }
+                            runCatching { activity.startActivity(intent) }
+                        }) {
+                            Text(if (notificationsOn) "Manage" else "Enable", color = palette.accent)
+                        }
+                    }
+                    if (liveIslandSupported) {
+                        HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("Dynamic Island / Live Updates", color = palette.textPrimary, fontSize = 14.5.sp)
+                                Text(
+                                    if (liveIslandOn) "Enabled — Now Playing capsule active on status bar"
+                                    else "Allow Live Updates in system settings to show capsule",
+                                    color = if (liveIslandOn) palette.accentSecondary else Color(0xFFF59E0B),
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            TextButton(onClick = {
+                                val promoIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS).apply {
+                                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
+                                }
+                                val fallbackIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                    putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
+                                }
+                                runCatching { activity.startActivity(promoIntent) }
+                                    .onFailure { runCatching { activity.startActivity(fallbackIntent) } }
+                            }) {
+                                Text(if (liveIslandOn) "Manage" else "Enable", color = palette.accent)
                             }
                         }
                     }
