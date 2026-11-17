@@ -4,7 +4,6 @@ import android.animation.AnimatorSet
 import android.animation.ObjectAnimator
 import android.animation.ValueAnimator
 import android.content.Context
-import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.*
 import android.graphics.drawable.BitmapDrawable
@@ -34,9 +33,10 @@ import kotlin.math.sin
 /**
  * Spotify-style Liquid Glass Dynamic Island overlay controller.
  *
- * Uses a single MediaStyle notification in the shade (no duplicate notification cards)
- * while rendering an expandable Liquid Glass Dynamic Island around the top punch-hole
- * when audio is playing in the background and the user has granted overlay permission.
+ * Positions cleanly below the system status bar touch zone (so Android 12–16
+ * never intercepts taps or clips icons), uses zero-allocation caching on playback
+ * ticks for 120Hz butter-smooth performance, and expands on tap into a frosted
+ * Liquid Glass player card with HD album art, live seekbar, and 5 controls.
  */
 class DynamicIslandController(
     private val context: Context,
@@ -74,6 +74,7 @@ class DynamicIslandController(
 
     // Collapsed pill views
     private var pillThumb: ImageView? = null
+    private var pillTitle: TextView? = null
     private var pillSpectrum: SpectrumBarsView? = null
 
     // Expanded card views
@@ -88,14 +89,24 @@ class DynamicIslandController(
     private var expPlayPauseBtn: ImageView? = null
     private var expNextBtn: ImageView? = null
     private var expShuffleBtn: ImageView? = null
-    private var expOpenBtn: ImageView? = null
+
+    // Zero-allocation state caches so 500ms ticks never re-allocate bitmaps
+    private var lastArtworkRef: Bitmap? = null
+    private var cachedPillThumb: Bitmap? = null
+    private var cachedExpThumb: Bitmap? = null
+    private var lastPlayingBound: Boolean? = null
+    private var lastLikedBound: Boolean? = null
+    private var lastShuffleBound: Boolean? = null
+    private var lastAccentBound: Int = Int.MIN_VALUE
+    private var lastBgColor: Int = Color.rgb(30, 80, 140)
+    private var lastBoundTitle: String? = null
+    private var lastBoundArtist: String? = null
 
     private var isAdded = false
     private var isExpanded = false
     private var userDismissedForTrack: String? = null
     private var userSeeking = false
     private var lastSnapshot: Snapshot? = null
-    private var lastBgColor: Int = Color.rgb(30, 80, 140)
 
     private val autoCollapseRunnable = Runnable {
         if (isExpanded && !userSeeking) {
@@ -138,7 +149,6 @@ class DynamicIslandController(
         if (userDismissedForTrack != null && userDismissedForTrack != trackKey) {
             userDismissedForTrack = null
         }
-        // Hide collapsed pill if paused; keep visible briefly while expanded so user can tap Play
         if (!snapshot.playing && !isExpanded) {
             removeOverlay()
             return
@@ -146,14 +156,31 @@ class DynamicIslandController(
 
         lastSnapshot = snapshot
         ensureOverlayAdded()
-        bindSnapshot(snapshot)
+        bindSnapshot(snapshot, forceAll = false)
     }
 
     private fun dp(value: Float): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, context.resources.displayMetrics).toInt()
 
+    private fun statusBarHeightPx(): Int {
+        val resId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+        val h = if (resId > 0) context.resources.getDimensionPixelSize(resId) else dp(32f)
+        return h.coerceIn(dp(24f), dp(54f))
+    }
+
     private fun ensureOverlayAdded() {
         if (isAdded && rootView != null) return
+
+        // Reset bind caches for fresh view hierarchy
+        lastArtworkRef = null
+        cachedPillThumb = null
+        cachedExpThumb = null
+        lastPlayingBound = null
+        lastLikedBound = null
+        lastShuffleBound = null
+        lastAccentBound = Int.MIN_VALUE
+        lastBoundTitle = null
+        lastBoundArtist = null
 
         val container = FrameLayout(context).apply {
             clipChildren = false
@@ -168,56 +195,77 @@ class DynamicIslandController(
             }
         }
 
-        // ---- 1. COLLAPSED PUNCH-HOLE PILL ----
+        // ---- 1. COLLAPSED LIQUID GLASS DYNAMIC ISLAND PILL ----
+        // Placed cleanly right beneath the status bar so taps are 100% instant & never eaten by StatusBar!
         val pill = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6f), dp(4f), dp(10f), dp(4f))
+            setPadding(dp(6f), dp(5f), dp(12f), dp(5f))
             background = createPillBackground()
-            elevation = dp(10f).toFloat()
+            elevation = dp(12f).toFloat()
+            isClickable = true
+            isFocusable = false
         }
 
         val pThumb = ImageView(context).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            layoutParams = LinearLayout.LayoutParams(dp(24f), dp(24f))
+            layoutParams = LinearLayout.LayoutParams(dp(26f), dp(26f))
         }
         pillThumb = pThumb
 
-        // Center spacer clears the top-center punch-hole camera cleanly
-        val holeSpacer = View(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(122f), dp(1f))
+        val pTitle = TextView(context).apply {
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f)
+            typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = dp(138f)
+            minWidth = dp(56f)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                marginStart = dp(8f)
+                marginEnd = dp(10f)
+            }
         }
+        pillTitle = pTitle
 
         val spectrum = SpectrumBarsView(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(26f), dp(18f))
+            layoutParams = LinearLayout.LayoutParams(dp(22f), dp(16f))
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
         }
         pillSpectrum = spectrum
 
         pill.addView(pThumb)
-        pill.addView(holeSpacer)
+        pill.addView(pTitle)
         pill.addView(spectrum)
 
-        // Touch handling on collapsed pill: Tap -> expand, Long press -> open app, Swipe up -> dismiss
+        // Ultra-responsive touch handling on collapsed pill: Tap -> expand, Long-press -> open app, Swipe up -> dismiss
         var downY = 0f
+        var downX = 0f
         var downTime = 0L
-        var swiped = false
+        var gestureHandled = false
         val longPressRunnable = Runnable {
-            if (!swiped) {
+            if (!gestureHandled) {
+                gestureHandled = true
                 callbacks.onOpenApp()
             }
         }
         pill.setOnTouchListener { _, ev ->
             when (ev.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    downX = ev.rawX
                     downY = ev.rawY
                     downTime = System.currentTimeMillis()
-                    swiped = false
+                    gestureHandled = false
+                    pill.animate().scaleX(0.95f).scaleY(0.95f).setDuration(90L).start()
                     mainHandler.postDelayed(longPressRunnable, 480L)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (downY - ev.rawY > dp(24f)) {
-                        swiped = true
+                    if (!gestureHandled && downY - ev.rawY > dp(24f) && abs(downY - ev.rawY) > abs(downX - ev.rawX)) {
+                        gestureHandled = true
                         mainHandler.removeCallbacks(longPressRunnable)
                         lastSnapshot?.let { userDismissedForTrack = "${it.title}::${it.artist}" }
                         removeOverlay()
@@ -226,8 +274,9 @@ class DynamicIslandController(
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     mainHandler.removeCallbacks(longPressRunnable)
+                    pill.animate().scaleX(1f).scaleY(1f).setDuration(90L).start()
                     val dt = System.currentTimeMillis() - downTime
-                    if (!swiped && ev.action == MotionEvent.ACTION_UP && dt < 450L) {
+                    if (!gestureHandled && ev.action == MotionEvent.ACTION_UP && dt < 460L) {
                         setExpanded(true)
                     }
                     true
@@ -236,9 +285,9 @@ class DynamicIslandController(
             }
         }
 
-        // ---- 2. EXPANDED SPOTIFY-STYLE LIQUID GLASS ISLAND ----
+        // ---- 2. EXPANDED SPOTIFY-STYLE LIQUID GLASS ISLAND (Matches IMG-20261117-WA0016.jpg) ----
         val screenW = context.resources.displayMetrics.widthPixels
-        val expandedW = minOf(screenW - dp(22f), dp(378f))
+        val expandedW = minOf(screenW - dp(20f), dp(382f))
         val expanded = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16f), dp(14f), dp(16f), dp(12f))
@@ -248,7 +297,7 @@ class DynamicIslandController(
             clipToPadding = false
         }
 
-        // Top row: [Album Thumb + subtle badge]  [Title / Artist]  [Open App / Output icon]
+        // Top row: [56dp Album Thumbnail + corner badge]  [Title / Artist]  [Wave / Open App]
         val topRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -259,7 +308,7 @@ class DynamicIslandController(
         }
 
         val thumbFrame = FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(56f), dp(56f))
+            layoutParams = LinearLayout.LayoutParams(dp(58f), dp(58f))
             setOnClickListener {
                 setExpanded(false)
                 callbacks.onOpenApp()
@@ -275,7 +324,6 @@ class DynamicIslandController(
         expThumb = eThumb
         thumbFrame.addView(eThumb)
 
-        // Subtle MS PLAYER corner badge on the album art (matching Spotify's corner icon)
         val badgeView = ImageView(context).apply {
             setImageResource(R.drawable.ic_launcher)
             layoutParams = FrameLayout.LayoutParams(dp(18f), dp(18f)).apply {
@@ -305,7 +353,7 @@ class DynamicIslandController(
 
         val eTitle = TextView(context).apply {
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16.5f)
             typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.MARQUEE
@@ -316,7 +364,7 @@ class DynamicIslandController(
         expTitle = eTitle
 
         val eArtist = TextView(context).apply {
-            setTextColor(Color.parseColor("#D6FFFFFF"))
+            setTextColor(Color.parseColor("#DCFFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
@@ -340,7 +388,6 @@ class DynamicIslandController(
                 callbacks.onOpenApp()
             }
         }
-        expOpenBtn = eOpen
 
         topRow.addView(thumbFrame)
         topRow.addView(textCol)
@@ -359,7 +406,7 @@ class DynamicIslandController(
         }
 
         val ePos = TextView(context).apply {
-            setTextColor(Color.parseColor("#CCFFFFFF"))
+            setTextColor(Color.parseColor("#D4FFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             text = "00:00"
             minWidth = dp(38f)
@@ -373,7 +420,7 @@ class DynamicIslandController(
                 marginEnd = dp(4f)
             }
             progressTintList = ColorStateList.valueOf(Color.WHITE)
-            progressBackgroundTintList = ColorStateList.valueOf(Color.parseColor("#44FFFFFF"))
+            progressBackgroundTintList = ColorStateList.valueOf(Color.parseColor("#48FFFFFF"))
             thumbTintList = ColorStateList.valueOf(Color.WHITE)
             splitTrack = false
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -381,8 +428,7 @@ class DynamicIslandController(
                     if (fromUser) {
                         val dur = lastSnapshot?.durationMs ?: 0L
                         if (dur > 0L) {
-                            val targetMs = (dur * progress) / 1000L
-                            expPosText?.text = formatTime(targetMs)
+                            expPosText?.text = formatTime((dur * progress) / 1000L)
                         }
                         rescheduleAutoCollapse()
                     }
@@ -407,7 +453,7 @@ class DynamicIslandController(
         expSeekBar = eSeek
 
         val eDur = TextView(context).apply {
-            setTextColor(Color.parseColor("#CCFFFFFF"))
+            setTextColor(Color.parseColor("#D4FFFFFF"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             text = "00:00"
             gravity = Gravity.END
@@ -467,7 +513,7 @@ class DynamicIslandController(
         expanded.addView(seekRow)
         expanded.addView(controlsRow)
 
-        // Swipe up on expanded card collapses back to punch-hole pill
+        // Swipe up on expanded card collapses back to compact pill
         var expDownY = 0f
         expanded.setOnTouchListener { _, ev ->
             when (ev.action) {
@@ -490,7 +536,7 @@ class DynamicIslandController(
             pill,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                dp(34f),
+                dp(36f),
                 Gravity.TOP or Gravity.CENTER_HORIZONTAL,
             ),
         )
@@ -519,12 +565,12 @@ class DynamicIslandController(
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
                 WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = dp(6f)
+            // Sit cleanly right below the system status bar so 100% of taps & gestures register smoothly!
+            y = statusBarHeightPx() + dp(4f)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -546,23 +592,28 @@ class DynamicIslandController(
 
         val pill = pillContainer ?: return
         val exp = expandedContainer ?: return
+        val root = rootView ?: return
+        val params = layoutParams ?: return
 
         if (expand) {
             pill.visibility = View.GONE
+            pillSpectrum?.setActive(false)
             exp.visibility = View.VISIBLE
+            lastSnapshot?.let { bindSnapshot(it, forceAll = true) }
+            runCatching { wm.updateViewLayout(root, params) }
             exp.alpha = 0f
-            exp.scaleX = 0.72f
-            exp.scaleY = 0.60f
+            exp.scaleX = 0.80f
+            exp.scaleY = 0.65f
             exp.pivotX = exp.layoutParams.width / 2f
             exp.pivotY = 0f
             AnimatorSet().apply {
                 playTogether(
                     ObjectAnimator.ofFloat(exp, View.ALPHA, 0f, 1f),
-                    ObjectAnimator.ofFloat(exp, View.SCALE_X, 0.72f, 1f),
-                    ObjectAnimator.ofFloat(exp, View.SCALE_Y, 0.60f, 1f),
+                    ObjectAnimator.ofFloat(exp, View.SCALE_X, 0.80f, 1f),
+                    ObjectAnimator.ofFloat(exp, View.SCALE_Y, 0.65f, 1f),
                 )
-                duration = 260L
-                interpolator = OvershootInterpolator(0.85f)
+                duration = 230L
+                interpolator = OvershootInterpolator(0.75f)
                 start()
             }
             rescheduleAutoCollapse()
@@ -570,14 +621,16 @@ class DynamicIslandController(
             exp.visibility = View.GONE
             if (lastSnapshot?.playing == true) {
                 pill.visibility = View.VISIBLE
+                pillSpectrum?.setActive(true)
+                runCatching { wm.updateViewLayout(root, params) }
                 pill.alpha = 0f
-                pill.scaleX = 1.15f
+                pill.scaleX = 1.12f
                 AnimatorSet().apply {
                     playTogether(
                         ObjectAnimator.ofFloat(pill, View.ALPHA, 0f, 1f),
-                        ObjectAnimator.ofFloat(pill, View.SCALE_X, 1.15f, 1f),
+                        ObjectAnimator.ofFloat(pill, View.SCALE_X, 1.12f, 1f),
                     )
-                    duration = 200L
+                    duration = 180L
                     interpolator = DecelerateInterpolator()
                     start()
                 }
@@ -592,35 +645,50 @@ class DynamicIslandController(
         mainHandler.postDelayed(autoCollapseRunnable, 8000L)
     }
 
-    private fun bindSnapshot(s: Snapshot) {
-        // 1. Update artwork thumbnail (rounded circle in pill, rounded square in expanded)
-        val bmp = s.artwork
-        if (bmp != null) {
-            pillThumb?.setImageBitmap(roundedBitmap(bmp, dp(24f), circular = true))
-            expThumb?.setImageBitmap(roundedBitmap(bmp, dp(56f), circular = false, radiusPx = dp(14f).toFloat()))
-        } else {
-            pillThumb?.setImageResource(R.drawable.ic_launcher)
-            expThumb?.setImageResource(R.drawable.ic_launcher)
+    private fun bindSnapshot(s: Snapshot, forceAll: Boolean) {
+        // 1. Artwork — only scale & round when the Bitmap instance actually changes!
+        if (forceAll || s.artwork !== lastArtworkRef) {
+            lastArtworkRef = s.artwork
+            val bmp = s.artwork
+            if (bmp != null) {
+                cachedPillThumb = roundedBitmap(bmp, dp(26f), circular = true)
+                cachedExpThumb = roundedBitmap(bmp, dp(58f), circular = false, radiusPx = dp(14f).toFloat())
+                pillThumb?.setImageBitmap(cachedPillThumb)
+                expThumb?.setImageBitmap(cachedExpThumb)
+            } else {
+                cachedPillThumb = null
+                cachedExpThumb = null
+                pillThumb?.setImageResource(R.drawable.ic_launcher)
+                expThumb?.setImageResource(R.drawable.ic_launcher)
+            }
         }
 
-        // 2. Accent glow & waveform color
-        val vibrantAccent = boostAccentForDarkGlass(s.accentColor)
-        pillSpectrum?.setBarColor(vibrantAccent)
-        pillSpectrum?.setActive(s.playing)
-
-        if (lastBgColor != s.accentColor) {
-            lastBgColor = s.accentColor
-            expandedContainer?.background = createExpandedGlassBackground(s.accentColor)
-        }
-
-        // 3. Title, artist, timeline
-        if (expTitle?.text?.toString() != s.title) {
+        // 2. Title & Artist — only touch TextViews when text changes
+        if (forceAll || lastBoundTitle != s.title) {
+            lastBoundTitle = s.title
+            val cleanShort = s.title.replace(Regex("""\(.*?\)|\[.*?\]"""), "").trim().ifBlank { s.title }
+            pillTitle?.text = cleanShort
             expTitle?.text = s.title
             expTitle?.isSelected = true
         }
-        if (expArtist?.text?.toString() != s.artist) {
+        if (forceAll || lastBoundArtist != s.artist) {
+            lastBoundArtist = s.artist
             expArtist?.text = s.artist
         }
+
+        // 3. Accent color & waveform state
+        val vibrantAccent = boostAccentForDarkGlass(s.accentColor)
+        if (forceAll || lastAccentBound != s.accentColor) {
+            lastAccentBound = s.accentColor
+            lastBgColor = s.accentColor
+            pillSpectrum?.setBarColor(vibrantAccent)
+            expandedContainer?.background = createExpandedGlassBackground(s.accentColor)
+        }
+        pillSpectrum?.setActive(s.playing && !isExpanded)
+
+        // 4. Expanded card live seekbar & buttons (only update when expanded or forced!)
+        if (!isExpanded && !forceAll) return
+
         val dur = s.durationMs.coerceAtLeast(0L)
         val pos = s.positionMs.coerceIn(0L, max(dur, 1L))
         if (!userSeeking) {
@@ -629,22 +697,30 @@ class DynamicIslandController(
             expSeekBar?.progress = if (dur > 0L) ((pos * 1000L) / dur).toInt().coerceIn(0, 1000) else 0
         }
 
-        // 4. Control button icons
-        expPlayPauseBtn?.setImageDrawable(
-            createIconDrawable(if (s.playing) IconKind.PAUSE else IconKind.PLAY, Color.WHITE)
-        )
-        expLikeBtn?.setImageDrawable(
-            createIconDrawable(
-                if (s.liked) IconKind.LIKED_CHECK else IconKind.LIKE_OUTLINE,
-                if (s.liked) Color.parseColor("#FF22C55E") else Color.parseColor("#CCFFFFFF"),
+        if (forceAll || lastPlayingBound != s.playing) {
+            lastPlayingBound = s.playing
+            expPlayPauseBtn?.setImageDrawable(
+                createIconDrawable(if (s.playing) IconKind.PAUSE else IconKind.PLAY, Color.WHITE)
             )
-        )
-        expShuffleBtn?.setImageDrawable(
-            createIconDrawable(
-                IconKind.SHUFFLE,
-                if (s.shuffle) vibrantAccent else Color.parseColor("#B3FFFFFF"),
+        }
+        if (forceAll || lastLikedBound != s.liked) {
+            lastLikedBound = s.liked
+            expLikeBtn?.setImageDrawable(
+                createIconDrawable(
+                    if (s.liked) IconKind.LIKED_CHECK else IconKind.LIKE_OUTLINE,
+                    if (s.liked) Color.parseColor("#FF22C55E") else Color.parseColor("#CCFFFFFF"),
+                )
             )
-        )
+        }
+        if (forceAll || lastShuffleBound != s.shuffle || forceAll) {
+            lastShuffleBound = s.shuffle
+            expShuffleBtn?.setImageDrawable(
+                createIconDrawable(
+                    IconKind.SHUFFLE,
+                    if (s.shuffle) vibrantAccent else Color.parseColor("#B8FFFFFF"),
+                )
+            )
+        }
     }
 
     private fun removeOverlay() {
@@ -664,12 +740,12 @@ class DynamicIslandController(
         GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(18f).toFloat()
-            setColor(Color.parseColor("#F505070B"))
-            setStroke(dp(0.9f), Color.parseColor("#38FFFFFF"))
+            setColor(Color.parseColor("#F0080B10"))
+            setStroke(dp(1f), Color.parseColor("#44FFFFFF"))
         }
 
     private fun createExpandedGlassBackground(accentArgb: Int): LayerDrawable {
-        // Clamp glow brightness so white text & icons always maintain high contrast
+        // Clamp glow brightness so white text & icons always maintain crisp contrast
         val hsv = FloatArray(3)
         Color.colorToHSV(accentArgb, hsv)
         hsv[1] = hsv[1].coerceIn(0.42f, 0.92f)
@@ -690,8 +766,8 @@ class DynamicIslandController(
         val glow = GradientDrawable(
             GradientDrawable.Orientation.BOTTOM_TOP,
             intArrayOf(
-                Color.argb(175, r, g, b),
-                Color.argb(62, r, g, b),
+                Color.argb(180, r, g, b),
+                Color.argb(66, r, g, b),
                 Color.TRANSPARENT,
             ),
         ).apply {
@@ -704,7 +780,7 @@ class DynamicIslandController(
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(28f).toFloat()
             setColor(Color.TRANSPARENT)
-            setStroke(dp(1.1f), Color.parseColor("#48FFFFFF"))
+            setStroke(dp(1.1f), Color.parseColor("#4AFFFFFF"))
         }
 
         return LayerDrawable(arrayOf(base, glow, rim))
@@ -729,7 +805,6 @@ class DynamicIslandController(
             canvas.drawRoundRect(rect, radiusPx, radiusPx, paint)
         }
         paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
-        // Center-crop scale
         val srcW = source.width.toFloat().coerceAtLeast(1f)
         val srcH = source.height.toFloat().coerceAtLeast(1f)
         val scale = max(sizePx / srcW, sizePx / srcH)
@@ -840,7 +915,6 @@ class DynamicIslandController(
                 }
                 c.drawPath(p1, p)
                 c.drawPath(p2, p)
-                // Arrow tips
                 c.drawLine(w * 0.72f, h * 0.24f, w * 0.82f, h * 0.32f, p)
                 c.drawLine(w * 0.72f, h * 0.40f, w * 0.82f, h * 0.32f, p)
                 c.drawLine(w * 0.72f, h * 0.60f, w * 0.82f, h * 0.68f, p)
@@ -861,7 +935,7 @@ class DynamicIslandController(
         return BitmapDrawable(context.resources, bmp)
     }
 
-    /** Lightweight animated 4-bar equalizer drawn in the collapsed Dynamic Island pill. */
+    /** Lightweight hardware-layered 4-bar audio visualizer throttled to ~24fps for zero stutter. */
     private class SpectrumBarsView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.parseColor("#FF38BDF8")
@@ -869,12 +943,17 @@ class DynamicIslandController(
         }
         private var phase = 0f
         private var active = false
+        private var lastFrameMs = 0L
         private val animator = ValueAnimator.ofFloat(0f, (Math.PI * 2.0).toFloat()).apply {
-            duration = 1100L
+            duration = 1200L
             repeatCount = ValueAnimator.INFINITE
             addUpdateListener {
-                phase = it.animatedValue as Float
-                invalidate()
+                val now = System.currentTimeMillis()
+                if (now - lastFrameMs >= 42L) {
+                    lastFrameMs = now
+                    phase = it.animatedValue as Float
+                    invalidate()
+                }
             }
         }
 
