@@ -539,7 +539,6 @@ class PlaybackService : MediaBrowserServiceCompat() {
     private var sessionArtworkColor: Int = android.graphics.Color.rgb(12, 24, 42)
     private var artworkJob: Job? = null
     private var notifSyncJob: Job? = null
-    private var lastLiveCapsuleAt = 0L
     private var currentTrackLiked = false
     private var likedTrackUri: String? = null
     private var sessionStatus = -1
@@ -805,18 +804,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
             enableVibration(false)
         }
         nm.createNotificationChannel(playbackChannel)
-        if (Build.VERSION.SDK_INT >= 36) {
-            val liveCapsuleChannel = NotificationChannel("live_island", "Origin Island Capsule", NotificationManager.IMPORTANCE_DEFAULT).apply {
-                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-                setShowBadge(false)
-                setSound(null, null)
-                enableLights(false)
-                enableVibration(false)
-            }
-            nm.createNotificationChannel(liveCapsuleChannel)
-        }
-        if (!Store.prefs(this).getBoolean("live_island_capsule", false)) {
-            nm.cancel(11)
+        // Always clear any legacy second capsule notification so only one clean media card shows
+        nm.cancel(11)
+        if (Build.VERSION.SDK_INT >= 26) {
+            runCatching { nm.deleteNotificationChannel("live_island") }
         }
         val initialEffects = AudioEffectSettings.load(this)
         effectSettings.value = initialEffects
@@ -946,10 +937,6 @@ class PlaybackService : MediaBrowserServiceCompat() {
                             timeline.value = PlaybackTimeline(state.value.position, state.value.duration, state.value.seekable, seekTarget != null)
                             Library.videoPlaybackActive.value = videoAttached && state.value.item?.audio == false
                             updateSession()
-                            if (Build.VERSION.SDK_INT >= 36 && state.value.playing && state.value.item?.audio == true && now - lastLiveCapsuleAt >= 2000L) {
-                                lastLiveCapsuleAt = now
-                                updateLiveIslandCapsule()
-                            }
                         }
                         if (now - lastDiagAt >= 1000L) {
                             lastDiagAt = now
@@ -2985,14 +2972,14 @@ class PlaybackService : MediaBrowserServiceCompat() {
             .setShowWhen(false)
             .setSilent(true)
             .setOngoing(state.value.playing || state.value.buffering)
-            .addAction(android.R.drawable.ic_media_previous, "Previous", action("previous"))
+            .addAction(R.drawable.ic_notif_prev, "Previous", action("previous"))
             .addAction(
-                if (state.value.playing) android.R.drawable.ic_media_pause
-                else android.R.drawable.ic_media_play,
+                if (state.value.playing) R.drawable.ic_notif_pause
+                else R.drawable.ic_notif_play,
                 if (state.value.playing) "Pause" else "Play",
                 action(if (state.value.playing) "pause" else "play"),
             )
-            .addAction(android.R.drawable.ic_media_next, "Next", action("next"))
+            .addAction(R.drawable.ic_notif_next, "Next", action("next"))
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", action("stop"))
             .setStyle(
                 CompatMediaStyle()
@@ -3012,15 +2999,12 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
             )
         else startForeground(10, notification())
-        updateLiveIslandCapsule()
     }
 
     fun refreshNotification() {
         if (released) return
         if (state.value.item != null) {
             updateNotification()
-        } else {
-            getSystemService(NotificationManager::class.java).cancel(11)
         }
     }
 
@@ -3080,96 +3064,15 @@ class PlaybackService : MediaBrowserServiceCompat() {
             if (released || state.value.item == null) return@launch
             updateSession(forceMetadata = true, forceState = true)
             getSystemService(NotificationManager::class.java).notify(10, notification())
-            updateLiveIslandCapsule()
         }
-    }
-
-    private fun circularBadgeBitmap(source: Bitmap): Bitmap {
-        val size = 72
-        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(out)
-        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-        val rect = android.graphics.RectF(0f, 0f, size.toFloat(), size.toFloat())
-        canvas.drawOval(rect, paint)
-        paint.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.SRC_IN)
-        val srcW = source.width.toFloat().coerceAtLeast(1f)
-        val srcH = source.height.toFloat().coerceAtLeast(1f)
-        val scale = maxOf(size / srcW, size / srcH)
-        val dx = (size - srcW * scale) / 2f
-        val dy = (size - srcH * scale) / 2f
-        val matrix = android.graphics.Matrix().apply {
-            setScale(scale, scale)
-            postTranslate(dx, dy)
-        }
-        canvas.drawBitmap(source, matrix, paint)
-        return out
-    }
-
-    private fun updateLiveIslandCapsule() {
-        if (Build.VERSION.SDK_INT < 36) return
-        val nm = getSystemService(NotificationManager::class.java)
-        val capsuleEnabled = Store.prefs(this).getBoolean("live_island_capsule", false)
-        val cur = state.value
-        val curItem = cur.item
-        if (!capsuleEnabled || curItem == null || !curItem.audio || !cur.playing || !nm.canPostPromotedNotifications()) {
-            nm.cancel(11)
-            return
-        }
-        val title = curItem.title.takeIf { it.isNotBlank() } ?: "MS PLAYER"
-        val artist = curItem.artist.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
-            ?: "MS PLAYER"
-        val open = PendingIntent.getActivity(
-            this,
-            11,
-            Intent(this, MainActivity::class.java).putExtra("show_player", true),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        val shortTitle = title.replace(Regex("""\(.*?\)|\[.*?\]"""), "").trim().ifBlank { title }
-        val pillText = if (shortTitle.length > 14) shortTitle.take(13) + "…" else shortTitle
-        val dur = cur.duration.coerceAtLeast(0L)
-        val pos = cur.position.coerceIn(0L, dur.coerceAtLeast(1L))
-        val progressPct = if (dur > 0L) ((pos * 100L) / dur).toInt().coerceIn(0, 100) else 0
-
-        val progressStyle = android.app.Notification.ProgressStyle()
-            .setStyledByProgress(true)
-            .addProgressSegment(
-                android.app.Notification.ProgressStyle.Segment(100)
-                    .setColor(sessionArtworkColor)
-            )
-            .setProgress(progressPct)
-
-        val builder = android.app.Notification.Builder(this, "live_island")
-            .setContentTitle(title)
-            .setContentText(artist)
-            .setSubText("MS PLAYER")
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-            .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
-            .setColor(sessionArtworkColor)
-            .setContentIntent(open)
-            .addExtras(Bundle().apply { putBoolean("android.requestPromotedOngoing", true) })
-            .setShortCriticalText("♪ $pillText")
-            .setStyle(progressStyle)
-            .addAction(android.R.drawable.ic_media_previous, "Prev", action("previous"))
-            .addAction(android.R.drawable.ic_media_pause, "Pause", action("pause"))
-            .addAction(android.R.drawable.ic_media_next, "Next", action("next"))
-        val art = sessionArtworkBitmap
-        if (art != null) {
-            builder.setSmallIcon(android.graphics.drawable.Icon.createWithBitmap(circularBadgeBitmap(art)))
-            builder.setLargeIcon(art)
-        } else {
-            builder.setSmallIcon(R.drawable.ic_launcher)
-        }
-        lastLiveCapsuleAt = SystemClock.elapsedRealtime()
-        runCatching { nm.notify(11, builder.build()) }
     }
 
     private fun updateNotification() {
         state.value.item?.let { refreshLikedStatus(it) }
         updateSession()
-        getSystemService(NotificationManager::class.java).notify(10, notification())
-        updateLiveIslandCapsule()
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(10, notification())
+        nm.cancel(11)
     }
 
     private fun updateSession(forceMetadata: Boolean = false, forceState: Boolean = false) {
@@ -3245,12 +3148,12 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 .addCustomAction(
                     "toggle_like",
                     if (currentTrackLiked) "Unlike" else "Like",
-                    if (currentTrackLiked) android.R.drawable.btn_star_big_on else android.R.drawable.btn_star_big_off,
+                    if (currentTrackLiked) R.drawable.ic_notif_liked else R.drawable.ic_notif_like_add,
                 )
                 .addCustomAction(
                     "toggle_shuffle",
                     if (shuffleEnabled.value) "Shuffle On" else "Shuffle Off",
-                    android.R.drawable.ic_menu_sort_by_size,
+                    R.drawable.ic_notif_shuffle,
                 )
                 .setState(
                     status,

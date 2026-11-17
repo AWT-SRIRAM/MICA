@@ -3145,9 +3145,9 @@ private fun SettingsGlassCard(
             .frostedGlassChrome(
                 enabled = palette.isGlass,
                 shape = RoundedCornerShape(if (palette.isGlass) 18.dp else if (palette.isLight) 16.dp else 10.dp),
-                tint = if (palette.isLight) Color(0xCCFFFFFF) else Color(0x4C0B1320),
+                tint = palette.cardTint,
                 fallbackColor = palette.cardFallback,
-                fallbackBorderColor = if (palette.isLight) palette.cardBorder else Color.White.copy(alpha = 0.14f),
+                fallbackBorderColor = palette.cardBorder,
                 isLight = palette.isLight,
             )
             .padding(horizontal = 14.dp, vertical = 12.dp),
@@ -3256,14 +3256,10 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             item(key = "notifications_island") {
                 val nm = remember { activity.getSystemService(android.app.NotificationManager::class.java) }
                 val notificationsOn = remember(notifTick, epoch) { nm.areNotificationsEnabled() }
-                val liveIslandSupported = Build.VERSION.SDK_INT >= 36
-                val liveIslandPerm = remember(notifTick, epoch) {
-                    if (Build.VERSION.SDK_INT >= 36) nm.canPostPromotedNotifications() else false
-                }
                 val warnColor = if (palette.isLight) Color(0xFFB45309) else Color(0xFFFBBF24)
                 SettingsGlassCard(palette) {
                     Text(
-                        if (liveIslandSupported) "Notifications & Origin Island" else "Media Notification",
+                        "Media Notification",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = palette.accent,
@@ -3291,67 +3287,6 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                             runCatching { activity.startActivity(intent) }
                         }) {
                             Text(if (notificationsOn) "Manage" else "Enable", color = palette.accent)
-                        }
-                    }
-                    if (liveIslandSupported) {
-                        HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
-                        if (!liveIslandPerm) {
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                                    Text("System Origin Island (Live Updates)", color = palette.textPrimary, fontSize = 14.5.sp)
-                                    Text(
-                                        "Allow Android 16 Live Updates for native punch-hole pill",
-                                        color = warnColor,
-                                        fontSize = 12.sp,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                TextButton(onClick = {
-                                    val promoIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS).apply {
-                                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
-                                    }
-                                    val fallbackIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
-                                    }
-                                    runCatching { activity.startActivity(promoIntent) }
-                                        .onFailure { runCatching { activity.startActivity(fallbackIntent) } }
-                                }) {
-                                    Text("Enable", color = palette.accent)
-                                }
-                            }
-                        } else {
-                            var capsuleOn by remember(notifTick, epoch) {
-                                mutableStateOf(prefs.getBoolean("live_island_capsule", false))
-                            }
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                                    Text("System Origin Island pill", color = palette.textPrimary, fontSize = 14.5.sp)
-                                    Text(
-                                        if (capsuleOn) "On — native punch-hole pill (also adds Live Update card in shade)"
-                                        else "Off — single Spotify-style Control Center card only",
-                                        color = if (capsuleOn) palette.accentSecondary else palette.textSecondary,
-                                        fontSize = 11.5.sp,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                Switch(
-                                    checked = capsuleOn,
-                                    onCheckedChange = { enabled ->
-                                        capsuleOn = enabled
-                                        prefs.edit().putBoolean("live_island_capsule", enabled).apply()
-                                        activity.service?.refreshNotification()
-                                    },
-                                )
-                            }
                         }
                     }
                 }
