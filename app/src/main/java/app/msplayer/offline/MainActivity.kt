@@ -195,7 +195,6 @@ class MainActivity : ComponentActivity() {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                 service = (binder as PlaybackService.LocalBinder).service
                 bound = true
-                service?.setAppInForeground(lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
                 pendingUri?.let { uri ->
                     pendingUri = null
                     lifecycleScope.launch {
@@ -624,7 +623,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        service?.setAppInForeground(true)
         enableHighRefreshRate()
         if (showPlayer) service?.resumeVideoSurface()
         val nowAllFiles = hasAllFilesAccess()
@@ -654,7 +652,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
-        if (!isChangingConfigurations) service?.setAppInForeground(false)
         val inPipNow = inPip || isInPictureInPictureMode
         if (!isChangingConfigurations && !inPipNow) service?.suspendVideoSurface()
         if (
@@ -3259,13 +3256,14 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             item(key = "notifications_island") {
                 val nm = remember { activity.getSystemService(android.app.NotificationManager::class.java) }
                 val notificationsOn = remember(notifTick, epoch) { nm.areNotificationsEnabled() }
-                val overlayGranted = remember(notifTick, epoch) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) android.provider.Settings.canDrawOverlays(activity) else true
+                val liveIslandSupported = Build.VERSION.SDK_INT >= 36
+                val liveIslandPerm = remember(notifTick, epoch) {
+                    if (Build.VERSION.SDK_INT >= 36) nm.canPostPromotedNotifications() else false
                 }
                 val warnColor = if (palette.isLight) Color(0xFFB45309) else Color(0xFFFBBF24)
                 SettingsGlassCard(palette) {
                     Text(
-                        "Notifications & Dynamic Island",
+                        if (liveIslandSupported) "Notifications & Origin Island" else "Media Notification",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = palette.accent,
@@ -3276,10 +3274,10 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                            Text("Media notification", color = palette.textPrimary, fontSize = 14.5.sp)
+                            Text("Control Center media card", color = palette.textPrimary, fontSize = 14.5.sp)
                             Text(
-                                if (notificationsOn) "Enabled — single clean Control Center card with album art"
-                                else "Disabled — turn on for Control Center art & controls",
+                                if (notificationsOn) "Enabled — single clean 5-button card with album art"
+                                else "Disabled — enable for Control Center art & controls",
                                 color = if (notificationsOn) palette.accentSecondary else warnColor,
                                 fontSize = 12.sp,
                                 maxLines = 2,
@@ -3295,60 +3293,65 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                             Text(if (notificationsOn) "Manage" else "Enable", color = palette.accent)
                         }
                     }
-                    HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
-                    if (!overlayGranted) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                                Text("Liquid Glass Dynamic Island", color = palette.textPrimary, fontSize = 14.5.sp)
-                                Text(
-                                    "Allow display over apps for Spotify-style Dynamic Island with album art & seekbar",
-                                    color = warnColor,
-                                    fontSize = 12.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
+                    if (liveIslandSupported) {
+                        HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
+                        if (!liveIslandPerm) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text("System Origin Island (Live Updates)", color = palette.textPrimary, fontSize = 14.5.sp)
+                                    Text(
+                                        "Allow Android 16 Live Updates for native punch-hole pill",
+                                        color = warnColor,
+                                        fontSize = 12.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                TextButton(onClick = {
+                                    val promoIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS).apply {
+                                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
+                                    }
+                                    val fallbackIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, activity.packageName)
+                                    }
+                                    runCatching { activity.startActivity(promoIntent) }
+                                        .onFailure { runCatching { activity.startActivity(fallbackIntent) } }
+                                }) {
+                                    Text("Enable", color = palette.accent)
+                                }
+                            }
+                        } else {
+                            var capsuleOn by remember(notifTick, epoch) {
+                                mutableStateOf(prefs.getBoolean("live_island_capsule", false))
+                            }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                    Text("System Origin Island pill", color = palette.textPrimary, fontSize = 14.5.sp)
+                                    Text(
+                                        if (capsuleOn) "On — native punch-hole pill (also adds Live Update card in shade)"
+                                        else "Off — single Spotify-style Control Center card only",
+                                        color = if (capsuleOn) palette.accentSecondary else palette.textSecondary,
+                                        fontSize = 11.5.sp,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Switch(
+                                    checked = capsuleOn,
+                                    onCheckedChange = { enabled ->
+                                        capsuleOn = enabled
+                                        prefs.edit().putBoolean("live_island_capsule", enabled).apply()
+                                        activity.service?.refreshNotification()
+                                    },
                                 )
                             }
-                            TextButton(onClick = {
-                                val overlayIntent = Intent(
-                                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                    Uri.parse("package:${activity.packageName}"),
-                                )
-                                runCatching { activity.startActivity(overlayIntent) }
-                            }) {
-                                Text("Enable", color = palette.accent)
-                            }
-                        }
-                    } else {
-                        var islandOn by remember(notifTick, epoch) {
-                            mutableStateOf(prefs.getBoolean("dynamic_island_overlay", true))
-                        }
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                                Text("Liquid Glass Dynamic Island", color = palette.textPrimary, fontSize = 14.5.sp)
-                                Text(
-                                    if (islandOn) "Active — thumbnail pill & expandable Liquid Glass player"
-                                    else "Off — single Control Center card only",
-                                    color = if (islandOn) palette.accentSecondary else palette.textSecondary,
-                                    fontSize = 12.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            Switch(
-                                checked = islandOn,
-                                onCheckedChange = { enabled ->
-                                    islandOn = enabled
-                                    prefs.edit().putBoolean("dynamic_island_overlay", enabled).apply()
-                                    activity.service?.refreshNotification()
-                                },
-                            )
                         }
                     }
                 }
