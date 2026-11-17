@@ -3302,7 +3302,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                             Column(Modifier.weight(1f).padding(end = 8.dp)) {
                                 Text("Dynamic Island / Live Updates", color = palette.textPrimary, fontSize = 14.5.sp)
                                 Text(
-                                    if (liveIslandOn) "Enabled — Now Playing capsule active on status bar"
+                                    if (liveIslandOn) "Enabled — Live Updates permission granted"
                                     else "Allow Live Updates in system settings to show capsule",
                                     color = if (liveIslandOn) palette.accentSecondary else Color(0xFFF59E0B),
                                     fontSize = 12.sp,
@@ -3321,6 +3321,33 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                                     .onFailure { runCatching { activity.startActivity(fallbackIntent) } }
                             }) {
                                 Text(if (liveIslandOn) "Manage" else "Enable", color = palette.accent)
+                            }
+                        }
+                        if (liveIslandOn) {
+                            HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
+                            var capsuleOn by remember(notifTick, epoch) {
+                                mutableStateOf(prefs.getBoolean("live_island_capsule", true))
+                            }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                    Text("Status-bar Live Capsule", color = palette.textPrimary, fontSize = 14.5.sp)
+                                    Text(
+                                        "Turn off for a single clean Control Center media card only",
+                                        color = palette.textSecondary,
+                                        fontSize = 11.5.sp,
+                                    )
+                                }
+                                Switch(
+                                    checked = capsuleOn,
+                                    onCheckedChange = { enabled ->
+                                        capsuleOn = enabled
+                                        prefs.edit().putBoolean("live_island_capsule", enabled).apply()
+                                        activity.service?.refreshNotification()
+                                    },
+                                )
                             }
                         }
                     }

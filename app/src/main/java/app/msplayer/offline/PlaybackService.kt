@@ -7,11 +7,14 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaMetadata
+import android.media.browse.MediaBrowser
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.*
 import android.provider.MediaStore
+import android.service.media.MediaBrowserService
+import android.view.KeyEvent
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.videolan.libvlc.LibVLC
@@ -54,7 +57,32 @@ data class PlayerState(
     val hasPrimaryHwSubtitle: Boolean = false,
 )
 
-class PlaybackService : Service() {
+class MediaButtonReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != Intent.ACTION_MEDIA_BUTTON) return
+        val keyEvent: KeyEvent? = if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+        }
+        if (keyEvent?.action != KeyEvent.ACTION_DOWN) return
+        val cmd = when (keyEvent.keyCode) {
+            KeyEvent.KEYCODE_MEDIA_PLAY -> "play"
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> "pause"
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> "toggle"
+            KeyEvent.KEYCODE_MEDIA_NEXT -> "next"
+            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> "previous"
+            KeyEvent.KEYCODE_MEDIA_STOP -> "stop"
+            else -> return
+        }
+        runCatching {
+            context.startService(Intent(context, PlaybackService::class.java).setAction(cmd))
+        }
+    }
+}
+
+class PlaybackService : MediaBrowserService() {
     inner class LocalBinder : Binder() {
         val service
             get() = this@PlaybackService
@@ -508,6 +536,8 @@ class PlaybackService : Service() {
     private var sessionArtworkBitmap: Bitmap? = null
     private var sessionArtworkColor: Int = android.graphics.Color.rgb(12, 24, 42)
     private var artworkJob: Job? = null
+    private var notifSyncJob: Job? = null
+    private var lastLiveCapsuleAt = 0L
     private var sessionStatus = -1
     private var sessionRate = -1f
     private var sessionSentAt = 0L
@@ -800,6 +830,14 @@ class PlaybackService : Service() {
                 .build()
         session = MediaSession(this, "MS PLAYER")
         session.setPlaybackToLocal(mediaAudioAttributes)
+        setSessionToken(session.sessionToken)
+        val mediaButtonPendingIntent = PendingIntent.getBroadcast(
+            this,
+            99,
+            Intent(Intent.ACTION_MEDIA_BUTTON).setComponent(ComponentName(this, MediaButtonReceiver::class.java)),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        session.setMediaButtonReceiver(mediaButtonPendingIntent)
         val openActivityIntent = PendingIntent.getActivity(
             this,
             0,
@@ -887,6 +925,10 @@ class PlaybackService : Service() {
                             timeline.value = PlaybackTimeline(state.value.position, state.value.duration, state.value.seekable, seekTarget != null)
                             Library.videoPlaybackActive.value = videoAttached && state.value.item?.audio == false
                             updateSession()
+                            if (Build.VERSION.SDK_INT >= 36 && state.value.playing && state.value.item?.audio == true && now - lastLiveCapsuleAt >= 2000L) {
+                                lastLiveCapsuleAt = now
+                                updateLiveIslandCapsule()
+                            }
                         }
                         if (now - lastDiagAt >= 1000L) {
                             lastDiagAt = now
@@ -944,6 +986,7 @@ class PlaybackService : Service() {
                     state.value = state.value.copy(buffering = true, error = null)
                     updateSession(forceMetadata = true, forceState = true)
                     updateNotification()
+                    scheduleMediaNotificationSync()
                 }
                 MediaPlayer.Event.LengthChanged -> {
                     val len = event.lengthChanged.coerceAtLeast(0L)
@@ -951,6 +994,7 @@ class PlaybackService : Service() {
                         state.value = state.value.copy(duration = len)
                         timeline.value = timeline.value.copy(duration = len)
                         updateSession(forceMetadata = true)
+                        updateNotification()
                     }
                 }
                 MediaPlayer.Event.Playing -> {
@@ -978,6 +1022,7 @@ class PlaybackService : Service() {
                     }
                     updateSession(forceMetadata = true, forceState = true)
                     updateNotification()
+                    scheduleMediaNotificationSync()
                 }
                 MediaPlayer.Event.Paused -> {
                     Library.videoPlaybackActive.value = videoAttached && state.value.item?.audio == false
@@ -1159,12 +1204,31 @@ class PlaybackService : Service() {
         }
     }
 
-    override fun onBind(intent: Intent?) = binder
+    override fun onBind(intent: Intent?): IBinder? {
+        if (intent?.action == SERVICE_INTERFACE) {
+            return super.onBind(intent)
+        }
+        return binder
+    }
+
+    override fun onGetRoot(
+        clientPackageName: String,
+        clientUid: Int,
+        rootHints: Bundle?,
+    ): BrowserRoot = BrowserRoot("msplayer_root", null)
+
+    override fun onLoadChildren(
+        parentId: String,
+        result: Result<MutableList<MediaBrowser.MediaItem>>,
+    ) {
+        result.sendResult(mutableListOf())
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             "play" -> play()
             "pause" -> pause()
+            "toggle" -> toggle()
             "next" -> next()
             "previous" -> previous()
             "stop" -> stopPlayback()
@@ -1397,6 +1461,10 @@ class PlaybackService : Service() {
                 if (activeItem.audio && isLazyOnlineUri(activeItem.uri)) {
                     state.value = PlayerState(item = activeItem, buffering = true, decoder = decoderMode)
                     timeline.value = PlaybackTimeline(0L, activeItem.duration, false)
+                    loadNotificationArtwork(activeItem)
+                    updateSession(forceMetadata = true, forceState = true)
+                    foreground()
+                    scheduleMediaNotificationSync()
                     val resolved = AudioStreamResolver.resolveBestStream(
                         title = activeItem.title,
                         artist = activeItem.artist,
@@ -1525,8 +1593,9 @@ class PlaybackService : Service() {
                     player.media = media
                     player.rate = initialRate
                     media.release()
-                    foreground()
                     updateSession(forceMetadata = true, forceState = true)
+                    foreground()
+                    scheduleMediaNotificationSync()
                     // Trigger Auto-Queue Radio & background next-track pre-resolution for online audio
                     if (activeItem.audio && PlaybackRules.isStreamUrl(activeItem.uri)) {
                         triggerAutoQueueIfNeeded(activeItem)
@@ -2741,6 +2810,7 @@ class PlaybackService : Service() {
         clearSeek()
         dimensionProbe?.cancel()
         artworkJob?.cancel()
+        notifSyncJob?.cancel()
         scope.cancel()
         player.setEventListener(null)
         player.stop()
@@ -2890,6 +2960,8 @@ class PlaybackService : Service() {
             .setContentIntent(open)
             .setDeleteIntent(action("stop"))
             .setOnlyAlertOnce(true)
+            .setWhen(System.currentTimeMillis())
+            .setShowWhen(false)
             .setSound(null)
             .setOngoing(state.value.playing || state.value.buffering)
             .addAction(android.R.drawable.ic_media_previous, "Previous", action("previous"))
@@ -2929,12 +3001,24 @@ class PlaybackService : Service() {
         }
     }
 
+    private fun scheduleMediaNotificationSync() {
+        notifSyncJob?.cancel()
+        notifSyncJob = scope.launch {
+            delay(180L)
+            if (released || state.value.item == null) return@launch
+            updateSession(forceMetadata = true, forceState = true)
+            getSystemService(NotificationManager::class.java).notify(10, notification())
+            updateLiveIslandCapsule()
+        }
+    }
+
     private fun updateLiveIslandCapsule() {
         if (Build.VERSION.SDK_INT < 36) return
         val nm = getSystemService(NotificationManager::class.java)
+        val capsuleEnabled = Store.prefs(this).getBoolean("live_island_capsule", true)
         val cur = state.value
         val curItem = cur.item
-        if (curItem == null || !curItem.audio || !cur.playing || !nm.canPostPromotedNotifications()) {
+        if (!capsuleEnabled || curItem == null || !curItem.audio || !cur.playing || !nm.canPostPromotedNotifications()) {
             nm.cancel(11)
             return
         }
@@ -2968,23 +3052,25 @@ class PlaybackService : Service() {
             .setSubText("MS PLAYER")
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setShowWhen(false)
             .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
             .setColor(sessionArtworkColor)
             .setContentIntent(open)
             .addExtras(Bundle().apply { putBoolean("android.requestPromotedOngoing", true) })
             .setShortCriticalText("♪ $pillText")
             .setStyle(progressStyle)
-            .addAction(android.R.drawable.ic_media_previous, "Previous", action("previous"))
+            .addAction(android.R.drawable.ic_media_previous, "Prev", action("previous"))
             .addAction(android.R.drawable.ic_media_pause, "Pause", action("pause"))
             .addAction(android.R.drawable.ic_media_next, "Next", action("next"))
         sessionArtworkBitmap?.let { bmp -> builder.setLargeIcon(bmp) }
+        lastLiveCapsuleAt = SystemClock.elapsedRealtime()
         runCatching { nm.notify(11, builder.build()) }
     }
 
     private fun updateNotification() {
+        updateSession()
         getSystemService(NotificationManager::class.java).notify(10, notification())
         updateLiveIslandCapsule()
-        updateSession()
     }
 
     private fun updateSession(forceMetadata: Boolean = false, forceState: Boolean = false) {
