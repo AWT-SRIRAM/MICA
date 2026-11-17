@@ -40,6 +40,7 @@ import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.shape.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.pullToRefresh
@@ -102,6 +103,8 @@ class MainActivity : ComponentActivity() {
     var service by mutableStateOf<PlaybackService?>(null)
     var showPlayer by mutableStateOf(false)
     var inPip by mutableStateOf(false)
+    var onlineResetTrigger by mutableIntStateOf(0)
+    var libraryResetTrigger by mutableIntStateOf(0)
     var videos by mutableStateOf<List<MediaItem>>(emptyList())
     var audios by mutableStateOf<List<MediaItem>>(emptyList())
     var scanning by mutableStateOf(false)
@@ -391,7 +394,8 @@ class MainActivity : ComponentActivity() {
         }
 
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
-        if (showPlayer && keyCode in listOf(android.view.KeyEvent.KEYCODE_VOLUME_UP, android.view.KeyEvent.KEYCODE_VOLUME_DOWN)) {
+        val isVideoPlayer = showPlayer && service?.state?.value?.item?.audio == false
+        if (isVideoPlayer && keyCode in listOf(android.view.KeyEvent.KEYCODE_VOLUME_UP, android.view.KeyEvent.KEYCODE_VOLUME_DOWN)) {
             service?.volumeKey(keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP)
             return true
         }
@@ -471,6 +475,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        volumeControlStream = AudioManager.STREAM_MUSIC
         GlassTheme.init(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         enableHighRefreshRate()
@@ -668,9 +673,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
+        val stateVal = service?.state?.value
         if (
             !closing && showPlayer &&
-                service?.state?.value?.playing == true &&
+                stateVal?.item != null &&
+                stateVal.item.audio.not() &&
+                stateVal.playing &&
                 Store.prefs(this).getBoolean("auto_pip", true)
         )
             enterPip()
@@ -721,9 +729,11 @@ class MainActivity : ComponentActivity() {
     }
 
     fun enterPip() {
+        val currentItem = service?.state?.value?.item
         if (
             packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
-                service?.state?.value?.item != null
+                currentItem != null &&
+                currentItem.audio.not()
         ) {
             val autoEnter = Store.prefs(this).getBoolean("auto_pip", true)
             runCatching {
@@ -940,6 +950,11 @@ fun App(activity: MainActivity) {
         val useDarkIcons = palette.isLight && screenMode == AppScreenMode.LIBRARY
         controller.isAppearanceLightStatusBars = useDarkIcons
         controller.isAppearanceLightNavigationBars = useDarkIcons
+    }
+
+    // Keep Android 12+ auto-PiP strictly synced: enabled ONLY during active video playback, NEVER for music
+    LaunchedEffect(activity.showPlayer, state.item?.audio, state.playing) {
+        activity.updatePipParams()
     }
 
     SharedTransitionLayout {
@@ -1185,6 +1200,7 @@ private fun LibraryHome(
         Box(Modifier.fillMaxSize().layerBackdrop(appBackdrop)) {
             LiquidGlassBackdropBackground(glassEnabled, mode = palette.mode)
             Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+                if (tab != "Online") {
                 Row(
                     Modifier.fillMaxWidth().padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1266,14 +1282,6 @@ private fun LibraryHome(
                         IconButton(onClick = { onSearchingChange(true) }, modifier = Modifier.size(40.dp)) {
                             Icon(Icons.Default.Search, "Search", tint = palette.textPrimary, modifier = Modifier.size(21.dp))
                         }
-                        IconButton(onClick = { onGridChange(!grid) }, modifier = Modifier.size(40.dp)) {
-                            Icon(
-                                if (grid) Icons.Default.ViewList else Icons.Default.GridView,
-                                "Change layout",
-                                tint = palette.textPrimary,
-                                modifier = Modifier.size(21.dp),
-                            )
-                        }
                         Box {
                             IconButton(onClick = { sortMenu = true }, modifier = Modifier.size(40.dp)) {
                                 Icon(Icons.Default.MoreVert, "Library options", tint = palette.textPrimary, modifier = Modifier.size(21.dp))
@@ -1345,6 +1353,7 @@ private fun LibraryHome(
                             }
                         }
                     }
+                }
                 }
                 if (activity.scanning && !manualRefreshing) LinearProgressIndicator(Modifier.fillMaxWidth(), color = palette.accent)
                 Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -1424,18 +1433,25 @@ private fun LibraryHome(
                                     .fillMaxSize()
                                     .clipToBounds()
                                     .pullToRefresh(
-                                        isRefreshing = manualRefreshing && activity.scanning,
+                                        isRefreshing = manualRefreshing && (activity.scanning || curTab == "Online"),
                                         state = pullState,
                                         enabled = true,
                                         threshold = 34.dp,
                                         onRefresh = {
                                             manualRefreshing = true
                                             scope.launch {
-                                                activity.reload(forceScan = true)
-                                                activity.scanJob?.join()
-                                                manualRefreshing = false
-                                                runCatching { pullState.animateToHidden() }
-                                                onBumpRefresh()
+                                                if (curTab == "Online") {
+                                                    activity.onlineResetTrigger++
+                                                    kotlinx.coroutines.delay(450)
+                                                    manualRefreshing = false
+                                                    runCatching { pullState.animateToHidden() }
+                                                } else {
+                                                    activity.reload(forceScan = true)
+                                                    activity.scanJob?.join()
+                                                    manualRefreshing = false
+                                                    runCatching { pullState.animateToHidden() }
+                                                    onBumpRefresh()
+                                                }
                                             }
                                         },
                                     )
@@ -1449,6 +1465,26 @@ private fun LibraryHome(
                                     palette = palette,
                                     glassEnabled = glassEnabled,
                                     bottomPadding = listBottomPad,
+                                    onNavigateToTab = { onTabChange(it) },
+                                )
+                            }
+                            curTab == "Library" -> {
+                                YourLibraryScreen(
+                                    activity = activity,
+                                    service = service,
+                                    palette = palette,
+                                    glassEnabled = glassEnabled,
+                                    bottomPadding = listBottomPad,
+                                    onOpenPlaylist = { name ->
+                                        onTabChange("Playlists")
+                                        onActivePlaylistChange(name)
+                                    },
+                                    onOpenMedia = { item ->
+                                        activity.startMedia(listOf(item), item)
+                                    },
+                                    onNavigateToOnline = {
+                                        onTabChange("Online")
+                                    },
                                 )
                             }
                             curTab == "Playlists" && curPlaylist == null -> {
@@ -1533,22 +1569,15 @@ private fun LibraryHome(
                                         item(key = "quick_actions") {
                                             Row(
                                                 Modifier.fillMaxWidth()
-                                                    .padding(horizontal = 14.dp, vertical = 4.dp),
+                                                    .padding(horizontal = 14.dp, vertical = 6.dp),
                                                 horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically,
                                             ) {
                                                 QuickAction("Music", Icons.Default.Headphones) { onTabChange("Audio") }
-                                                QuickAction("Playlists", Icons.Default.PlaylistPlay) {
-                                                    onTabChange("Playlists")
-                                                }
-                                                QuickAction("History", Icons.Default.History) {
-                                                    onTabChange("History")
-                                                }
-                                                QuickAction("Stream", Icons.Default.CloudQueue) {
-                                                    onStreamDialogChange(true)
-                                                }
-                                                QuickAction("Open", Icons.Default.FileOpen) {
-                                                    activity.openFile.launch(arrayOf("*/*"))
-                                                }
+                                                QuickAction("Online", Icons.Default.Public) { onTabChange("Online") }
+                                                QuickAction("History", Icons.Default.History) { onTabChange("History") }
+                                                QuickAction("Stream", Icons.Default.CloudQueue) { onStreamDialogChange(true) }
+                                                QuickAction("Settings", Icons.Default.Settings) { onTabChange("Settings") }
                                             }
                                         }
                                         if (showContinueWatching && continueHero != null) {
@@ -1565,13 +1594,9 @@ private fun LibraryHome(
                                                         .padding(horizontal = 14.dp, vertical = 6.dp)
                                                         .height(148.dp)
                                                         .iosLiquidPress(heroSrc, scaleDown = 0.97f, sheenAlpha = 0.14f)
-                                                        .frostedGlassChrome(
-                                                            enabled = glassEnabled,
-                                                            shape = RoundedCornerShape(22.dp),
-                                                            tint = Color(0x400A1424),
-                                                            fallbackColor = Color(0xFF101826),
-                                                            fallbackBorderColor = palette.cardBorder,
-                                                        )
+                                                        .clip(RoundedCornerShape(22.dp))
+                                                        .background(if (palette.isLight) Color.White.copy(alpha = 0.70f) else Color.White.copy(alpha = 0.08f))
+                                                        .border(1.dp, Brush.linearGradient(listOf(Color.White.copy(alpha = 0.28f), Color.White.copy(alpha = 0.08f))), RoundedCornerShape(22.dp))
                                                         .clickable(interactionSource = heroSrc, indication = ripple()) {
                                                             play(heroVideo)
                                                         }
@@ -1766,10 +1791,17 @@ private fun LibraryHome(
                                                             glassEnabled ->
                                                                 base
                                                                     .padding(horizontal = 12.dp, vertical = 3.5.dp)
-                                                                    .frostedGlassChrome(
-                                                                        enabled = true,
-                                                                        shape = RoundedCornerShape(18.dp),
-                                                                        tint = if (isCurrentFolder) Color(0x460D2A4E) else Color(0x300B1424),
+                                                                    .clip(RoundedCornerShape(18.dp))
+                                                                    .background(
+                                                                        if (isCurrentFolder) palette.accent.copy(alpha = 0.16f)
+                                                                        else if (palette.isLight) Color.White.copy(alpha = 0.70f)
+                                                                        else Color.White.copy(alpha = 0.06f)
+                                                                    )
+                                                                    .border(
+                                                                        0.8.dp,
+                                                                        if (isCurrentFolder) Brush.linearGradient(listOf(palette.accent, palette.accentSecondary))
+                                                                        else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.22f), Color.White.copy(alpha = 0.06f))),
+                                                                        RoundedCornerShape(18.dp)
                                                                     )
                                                             palette.isLight ->
                                                                 base
@@ -1922,10 +1954,10 @@ private fun LibraryHome(
                 if (!glassEnabled) {
                     NavigationBar(containerColor = palette.navContainer, tonalElevation = 0.dp) {
                         listOf(
-                                Triple("Folders", Icons.Default.Folder, "Local"),
-                                Triple("Audio", Icons.Default.Headphones, "Audio"),
-                                Triple("Online", Icons.Default.Public, "Online"),
-                                Triple("Settings", Icons.Default.Settings, "Settings"),
+                                Triple("Folders", Icons.Rounded.PlayCircleOutline, "Video"),
+                                Triple("Audio", Icons.Rounded.Headphones, "Music"),
+                                Triple("Online", Icons.Rounded.Search, "Search"),
+                                Triple("Library", Icons.Rounded.VideoLibrary, "Library"),
                             )
                             .forEach { (name, icon, label) ->
                                 NavigationBarItem(
@@ -1937,6 +1969,12 @@ private fun LibraryHome(
                                         onSearchChange("")
                                         onSearchingChange(false)
                                         selected = emptySet()
+                                        if (name == "Online") {
+                                            activity.onlineResetTrigger++
+                                        }
+                                        if (name == "Library") {
+                                            activity.libraryResetTrigger++
+                                        }
                                     },
                                     icon = { Icon(icon, label) },
                                     label = { Text(label) },
@@ -1954,7 +1992,7 @@ private fun LibraryHome(
                 }
             }
         }
-        val showResumeFab = (folder != null || activePlaylist != null) && state.item?.audio != true && tab != "Settings" && tab != "Online" &&
+        val showResumeFab = (folder != null || activePlaylist != null) && state.item?.audio != true && tab != "Settings" && tab != "Online" && tab != "Library" &&
             !(tab == "Playlists" && activePlaylist == null) &&
             (activity.videos.isNotEmpty() || state.item != null)
         if (showResumeFab) {
@@ -2045,7 +2083,12 @@ private fun LibraryHome(
                                     backdrop = appBackdrop,
                                     enabled = true,
                                     shape = RoundedCornerShape(20.dp),
-                                    tint = Color(0x6E0E1726),
+                                    tint = if (palette.isLight) Color(0xC8FFFFFF) else Color(0x6E0E1726),
+                                    blurRadius = 14.dp,
+                                    refractionHeight = 14.dp,
+                                    refractionAmount = 22.dp,
+                                    chromaticAberration = true,
+                                    isLight = palette.isLight,
                                 )
                             palette.isLight ->
                                 it
@@ -2059,34 +2102,58 @@ private fun LibraryHome(
                         activity.showPlayer = true
                         activity.immersive(true)
                     }
-                    .padding(10.dp),
+                    .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Default.MusicNote, null, tint = palette.accent)
-                Text(
-                    state.item!!.title,
-                    Modifier.weight(1f).padding(horizontal = 12.dp),
-                    color = palette.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                // Rounded Square Thumbnail (NO SPINNING DISC - Matching Screenshot_20261117_054325.jpg)
+                val thumbBmp = rememberRemoteBitmap(state.item?.thumbUri)
+                Box(
+                    Modifier
+                        .size(46.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (palette.isLight) Color(0xFFE0F2FE) else Color(0xFF222B38)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (thumbBmp != null) {
+                        Image(thumbBmp.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    } else {
+                        Icon(Icons.Default.MusicNote, null, tint = palette.accent, modifier = Modifier.size(24.dp))
+                    }
+                }
+                Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
+                    Text(
+                        state.item!!.title,
+                        color = palette.textPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        state.item!!.artist.ifBlank { "MS Player" },
+                        color = palette.textSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 IconButton(onClick = { service.toggle() }) {
-                    Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause", tint = palette.textPrimary)
+                    Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "Play or pause", tint = palette.textPrimary, modifier = Modifier.size(26.dp))
                 }
                 IconButton(onClick = { service.next() }) {
-                    Icon(Icons.Default.SkipNext, "Next track", tint = palette.textPrimary)
+                    Icon(Icons.Default.SkipNext, "Next track", tint = palette.textPrimary, modifier = Modifier.size(24.dp))
                 }
                 IconButton(onClick = { service.stopPlayback() }) {
-                    Icon(Icons.Default.Close, "Dismiss and stop music", tint = palette.textSecondary)
+                    Icon(Icons.Default.Close, "Dismiss and stop music", tint = palette.textSecondary, modifier = Modifier.size(20.dp))
                 }
             }
         }
         if (glassEnabled) {
             val dockTabs = listOf(
-                Triple("Folders", Icons.Default.Folder, "Local"),
-                Triple("Audio", Icons.Default.Headphones, "Audio"),
-                Triple("Online", Icons.Default.Public, "Online"),
-                Triple("Settings", Icons.Default.Settings, "Settings"),
+                Triple("Folders", Icons.Rounded.PlayCircleOutline, "Video"),
+                Triple("Audio", Icons.Rounded.Headphones, "Music"),
+                Triple("Online", Icons.Rounded.Search, "Search"),
+                Triple("Library", Icons.Rounded.VideoLibrary, "Library"),
             )
             val activeIdx = dockTabs.indexOfFirst { it.first == tab }.coerceAtLeast(0)
             val density = LocalDensity.current
@@ -2098,6 +2165,12 @@ private fun LibraryHome(
                 onSearchChange("")
                 onSearchingChange(false)
                 selected = emptySet()
+                if (name == "Online") {
+                    activity.onlineResetTrigger++
+                }
+                if (name == "Library") {
+                    activity.libraryResetTrigger++
+                }
             }
             BoxWithConstraints(
                 modifier = Modifier
@@ -2110,11 +2183,12 @@ private fun LibraryHome(
                         backdrop = appBackdrop,
                         enabled = true,
                         shape = CircleShape,
-                        tint = Color(0x420C1524),
-                        blurRadius = 14.dp,
-                        refractionHeight = 14.dp,
-                        refractionAmount = 24.dp,
+                        tint = if (palette.isLight) Color(0xB8FFFFFF) else Color(0x420C1524),
+                        blurRadius = 16.dp,
+                        refractionHeight = 16.dp,
+                        refractionAmount = 26.dp,
                         chromaticAberration = true,
+                        isLight = palette.isLight,
                     )
                     .padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
@@ -2133,32 +2207,7 @@ private fun LibraryHome(
                     label = "crystalLensScale",
                 )
                 Box(
-                    Modifier
-                        .fillMaxSize()
-                        .pointerInput(dockTabs.size, tabWidthPx) {
-                            detectHorizontalDragGestures(
-                                onDragStart = { start ->
-                                    dragSlot = (start.x / tabWidthPx - 0.5f).coerceIn(0f, (dockTabs.size - 1).toFloat())
-                                },
-                                onHorizontalDrag = { change, dragAmount ->
-                                    change.consume()
-                                    val cur = dragSlot ?: activeIdx.toFloat()
-                                    val next = (cur + dragAmount / tabWidthPx).coerceIn(0f, (dockTabs.size - 1).toFloat())
-                                    dragSlot = next
-                                    val nearest = next.roundToInt().coerceIn(0, dockTabs.lastIndex)
-                                    if (nearest != lastHapticIdx) {
-                                        lastHapticIdx = nearest
-                                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    }
-                                },
-                                onDragEnd = {
-                                    val idx = (dragSlot ?: activeIdx.toFloat()).roundToInt().coerceIn(0, dockTabs.lastIndex)
-                                    dragSlot = null
-                                    switchDockTab(dockTabs[idx].first)
-                                },
-                                onDragCancel = { dragSlot = null },
-                            )
-                        }
+                    Modifier.fillMaxSize()
                 ) {
                     val dropletShape = CircleShape
                     Box(
@@ -2172,16 +2221,34 @@ private fun LibraryHome(
                             }
                             .clip(dropletShape)
                             .background(
-                                Brush.verticalGradient(
-                                    listOf(
-                                        Color.White.copy(alpha = 0.24f),
-                                        GlassTheme.CrystalCobalt.copy(alpha = 0.26f),
-                                        Color(0xFF0A2444).copy(alpha = 0.34f),
+                                if (palette.isLight) {
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color.White.copy(alpha = 0.94f),
+                                            Color(0xFFBAE6FD).copy(alpha = 0.36f),
+                                            Color.White.copy(alpha = 0.78f),
+                                        )
                                     )
-                                ),
+                                } else {
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color.White.copy(alpha = 0.24f),
+                                            GlassTheme.CrystalCobalt.copy(alpha = 0.26f),
+                                            Color(0xFF0A2444).copy(alpha = 0.34f),
+                                        )
+                                    )
+                                },
                                 dropletShape,
                             )
-                            .border(0.9.dp, liquidSpecularBrush(0.55f, GlassTheme.CrystalCobalt), dropletShape)
+                            .border(
+                                width = if (palette.isLight) 1.1.dp else 0.9.dp,
+                                brush = liquidSpecularBrush(
+                                    accentGlow = if (palette.isLight) 0.32f else 0.55f,
+                                    accentColor = if (palette.isLight) palette.accent else GlassTheme.CrystalCobalt,
+                                    isLight = palette.isLight,
+                                ),
+                                shape = dropletShape,
+                            )
                     )
                     Row(
                         modifier = Modifier.fillMaxSize(),
@@ -2191,7 +2258,12 @@ private fun LibraryHome(
                             val highlighted = (animatedSlot - idx).absoluteValue < 0.5f
                             val tabSrc = remember { MutableInteractionSource() }
                             val itemTint by animateColorAsState(
-                                targetValue = if (highlighted) Color(0xFF5FB0FF) else Color.White.copy(alpha = 0.84f),
+                                targetValue = when {
+                                    highlighted && palette.isLight -> palette.accent
+                                    highlighted -> Color(0xFF5FB0FF)
+                                    palette.isLight -> Color(0xFF475569)
+                                    else -> Color.White.copy(alpha = 0.84f)
+                                },
                                 animationSpec = MotionSpec.ColorSpring,
                                 label = "dockTabTint",
                             )
@@ -2453,9 +2525,10 @@ private fun StreamUrlDialog(
                     .frostedGlassChrome(
                         enabled = glassEnabled,
                         shape = RoundedCornerShape(if (glassEnabled) 22.dp else 16.dp),
-                        tint = Color(0xBC0B121D),
+                        tint = if (useLight) Color(0xE8FFFFFF) else Color(0xBC0B121D),
                         fallbackColor = if (useLight) Color(0xFFFFFFFF) else Color(0xFF1B1F26),
                         fallbackBorderColor = if (useLight) palette.cardBorder else Color.White.copy(alpha = 0.18f),
+                        isLight = useLight,
                     )
                     .padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -2607,9 +2680,10 @@ fun QuickAction(label: String, icon: ImageVector, action: () -> Unit) {
                 .frostedGlassChrome(
                     enabled = glassEnabled,
                     shape = CircleShape,
-                    tint = Color(0x520F2438),
+                    tint = if (palette.isLight) Color(0xCCFFFFFF) else Color(0x520F2438),
                     fallbackColor = if (palette.isLight) palette.accent.copy(alpha = 0.12f) else Color(0xFF102331),
                     fallbackBorderColor = if (palette.isLight) palette.cardBorder else Color.White.copy(alpha = 0.18f),
+                    isLight = palette.isLight,
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -2628,7 +2702,8 @@ fun QuickAction(label: String, icon: ImageVector, action: () -> Unit) {
 
 @Composable
 fun AllFilesAccessBanner(onGrant: () -> Unit) {
-    val glassEnabled by rememberGlassEnabled()
+    val palette = LocalAppPalette.current
+    val glassEnabled = palette.isGlass
     var dismissed by rememberSaveable { mutableStateOf(false) }
     if (dismissed) return
     Box(
@@ -2638,19 +2713,21 @@ fun AllFilesAccessBanner(onGrant: () -> Unit) {
             .frostedGlassChrome(
                 enabled = glassEnabled,
                 shape = RoundedCornerShape(16.dp),
-                tint = Color(0x3500B4D8),
-                fallbackColor = Color(0xFF102538),
+                tint = if (palette.isLight) Color(0xCCFFFFFF) else Color(0x3500B4D8),
+                fallbackColor = if (palette.isLight) palette.surface else Color(0xFF102538),
+                fallbackBorderColor = palette.cardBorder,
+                isLight = palette.isLight,
             )
             .padding(14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Default.FolderSpecial, null, tint = Cyan, modifier = Modifier.size(32.dp))
+            Icon(Icons.Default.FolderSpecial, null, tint = palette.accent, modifier = Modifier.size(32.dp))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text("Unlock In-Progress Downloads", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text("Unlock In-Progress Downloads", color = palette.textPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                 Text(
                     "Grant All Files Access to play .pending downloads and browse all folders.",
-                    color = Color(0xFFB0C4DE),
+                    color = palette.textSecondary,
                     fontSize = 12.sp,
                     lineHeight = 15.sp,
                 )
@@ -2658,14 +2735,14 @@ fun AllFilesAccessBanner(onGrant: () -> Unit) {
             Spacer(Modifier.width(8.dp))
             Button(
                 onClick = onGrant,
-                colors = ButtonDefaults.buttonColors(containerColor = Cyan),
+                colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Text("Enable", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
+                Text("Enable", color = palette.onAccent, fontWeight = FontWeight.Bold, fontSize = 12.5.sp)
             }
             IconButton(onClick = { dismissed = true }, modifier = Modifier.size(24.dp).padding(start = 4.dp)) {
-                Icon(Icons.Default.Close, null, tint = Color.LightGray.copy(alpha = 0.7f), modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.Close, null, tint = palette.textSecondary, modifier = Modifier.size(16.dp))
             }
         }
     }
@@ -2862,14 +2939,20 @@ fun MediaRow(
                     glassEnabled ->
                         base
                             .padding(horizontal = 12.dp, vertical = 3.5.dp)
-                            .frostedGlassChrome(
-                                enabled = true,
-                                shape = RoundedCornerShape(16.dp),
-                                tint = when {
-                                    selected -> Color(0x5A123656)
-                                    isPlaying -> Color(0x460D2A4E)
-                                    else -> Color(0x2A0B1424)
-                                },
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                when {
+                                    selected -> palette.accent.copy(alpha = 0.25f)
+                                    isPlaying -> palette.accent.copy(alpha = 0.16f)
+                                    palette.isLight -> Color.White.copy(alpha = 0.70f)
+                                    else -> Color.White.copy(alpha = 0.06f)
+                                }
+                            )
+                            .border(
+                                0.8.dp,
+                                if (isPlaying || selected) Brush.linearGradient(listOf(palette.accent, palette.accentSecondary))
+                                else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.22f), Color.White.copy(alpha = 0.06f))),
+                                RoundedCornerShape(16.dp)
                             )
                     palette.isLight ->
                         base
@@ -2947,10 +3030,17 @@ fun MediaTile(
                 when {
                     glassEnabled ->
                         base
-                            .frostedGlassChrome(
-                                enabled = true,
-                                shape = RoundedCornerShape(16.dp),
-                                tint = if (selected) Color(0x5A123656) else Color(0x2C0B1424),
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                if (selected) palette.accent.copy(alpha = 0.22f)
+                                else if (palette.isLight) Color.White.copy(alpha = 0.70f)
+                                else Color.White.copy(alpha = 0.06f)
+                            )
+                            .border(
+                                0.8.dp,
+                                if (selected) Brush.linearGradient(listOf(palette.accent, palette.accentSecondary))
+                                else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.22f), Color.White.copy(alpha = 0.06f))),
+                                RoundedCornerShape(16.dp)
                             )
                             .padding(6.dp)
                     palette.isLight ->
@@ -3055,9 +3145,10 @@ private fun SettingsGlassCard(
             .frostedGlassChrome(
                 enabled = palette.isGlass,
                 shape = RoundedCornerShape(if (palette.isGlass) 18.dp else if (palette.isLight) 16.dp else 10.dp),
-                tint = Color(0x4C0B1320),
+                tint = if (palette.isLight) Color(0xCCFFFFFF) else Color(0x4C0B1320),
                 fallbackColor = palette.cardFallback,
                 fallbackBorderColor = if (palette.isLight) palette.cardBorder else Color.White.copy(alpha = 0.14f),
+                isLight = palette.isLight,
             )
             .padding(horizontal = 14.dp, vertical = 12.dp),
         content = content,
@@ -3093,18 +3184,59 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             item(key = "appearance") {
                 SettingsGlassCard(palette) {
                     Text("Appearance", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.accent)
-                    Text("Theme", fontSize = 13.sp, color = palette.textSecondary, modifier = Modifier.padding(top = 8.dp))
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-                        AppThemeMode.entries.forEach { mode ->
-                            FilterChip(
-                                selected = currentThemeMode == mode,
-                                onClick = {
-                                    GlassTheme.setThemeMode(activity, mode)
-                                    epoch++
-                                },
-                                label = { Text(mode.label, color = if (currentThemeMode == mode) palette.accent else palette.textPrimary) },
-                                modifier = Modifier.padding(end = 6.dp),
-                            )
+                    Text("Theme (Also personalizes Music recommendations)", fontSize = 12.5.sp, color = palette.textSecondary, modifier = Modifier.padding(top = 6.dp, bottom = 10.dp))
+                    val rows = AppThemeMode.entries.chunked(2)
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        rows.forEach { pair ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                pair.forEach { mode ->
+                                    val isSel = currentThemeMode == mode
+                                    val swatchColor = when (mode) {
+                                        AppThemeMode.LIGHT -> Color(0xFFF8FAFC)
+                                        AppThemeMode.DARK -> Color(0xFF0B0F17)
+                                        AppThemeMode.DARK_LIQUID_GLASS -> Color(0xFF0A2444)
+                                        AppThemeMode.WHITE_LIQUID_GLASS -> Color(0xFFE0F2FE)
+                                    }
+                                    Row(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(
+                                                if (isSel) palette.accent.copy(alpha = if (palette.isLight) 0.16f else 0.24f)
+                                                else if (palette.isLight) Color.White.copy(alpha = 0.65f)
+                                                else Color.White.copy(alpha = 0.06f)
+                                            )
+                                            .border(
+                                                width = if (isSel) 1.4.dp else 0.8.dp,
+                                                color = if (isSel) palette.accent else if (palette.isLight) palette.cardBorder else Color.White.copy(alpha = 0.14f),
+                                                shape = RoundedCornerShape(14.dp),
+                                            )
+                                            .clickable {
+                                                GlassTheme.setThemeMode(activity, mode)
+                                                epoch++
+                                            }
+                                            .padding(horizontal = 10.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Box(
+                                            Modifier
+                                                .size(16.dp)
+                                                .clip(CircleShape)
+                                                .background(swatchColor)
+                                                .border(1.dp, if (isSel) palette.accent else palette.textSecondary.copy(alpha = 0.4f), CircleShape)
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            mode.label,
+                                            color = if (isSel) palette.accent else palette.textPrimary,
+                                            fontSize = 12.5.sp,
+                                            fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -3844,9 +3976,9 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
     DisposableEffect(Unit) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             runCatching {
+                // Select maximum supported refresh rate (120Hz/144Hz) for ultra-fluid motion and zero stutter
                 val modes = activity.display?.supportedModes ?: emptyArray()
-                val targetMode = modes.firstOrNull { kotlin.math.abs(it.refreshRate - 60f) < 1f }
-                    ?: modes.minByOrNull { it.refreshRate }
+                val targetMode = modes.maxByOrNull { it.refreshRate }
                 if (targetMode != null) {
                     val lp = activity.window.attributes
                     lp.preferredDisplayModeId = targetMode.modeId
@@ -3892,6 +4024,14 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                 delay(650L)
                 feedback = null
             }
+    }
+    val videoEnteredAt = remember { android.os.SystemClock.elapsedRealtime() }
+    val hardwareVolume by service.volumeKeyEvent.collectAsState()
+    LaunchedEffect(hardwareVolume) {
+        val ev = hardwareVolume ?: return@LaunchedEffect
+        if (ev.first >= videoEnteredAt) {
+            hint(PlayerFeedback.Level(brightness = false, percent = ev.second))
+        }
     }
     LaunchedEffect(state.playing) {
         if (!state.playing && !locked) {

@@ -40,6 +40,8 @@ data class MediaItem(
     val modified: Long = 0,
     val artist: String = "",
     val thumbUri: String? = null,
+    val sourceVideoId: String = "",
+    val streamUserAgent: String = "",
 )
 
 object LibraryCache {
@@ -132,6 +134,7 @@ data class MediaStreamDetail(
     val sampleRateHz: Int = 0,
     val channels: Int = 0,
     val language: String = "",
+    val bitrate: String = "",
 )
 
 data class MediaDetailedInfo(
@@ -146,6 +149,7 @@ data class MediaDetailedInfo(
     val durationMs: Long,
     val encodingSoftware: String,
     val streams: List<MediaStreamDetail>,
+    val overallBitrateKbps: Int = 0,
 )
 
 object Store {
@@ -1478,6 +1482,13 @@ object Library {
             vlcText.isNotEmpty() -> "Embedded subtitle"
             else -> "None"
         }
+        val finalDur = durationMs.takeIf { it > 0 } ?: containerInfo.durationMs
+        val overallBitrateKbps = if (sizeBytes > 0 && finalDur > 0) {
+            ((sizeBytes * 8L) / finalDur).toInt()
+        } else if (item.audio && PlaybackRules.isStreamUrl(item.uri)) {
+            if (item.uri.contains("_320.mp4") || item.uri.contains("saavn")) 320 else 160
+        } else 0
+
         return MediaDetailedInfo(
             fileName = item.title,
             location = location,
@@ -1487,9 +1498,10 @@ object Library {
             format = formatLabel,
             width = finalW,
             height = finalH,
-            durationMs = durationMs.takeIf { it > 0 } ?: containerInfo.durationMs,
+            durationMs = finalDur,
             encodingSoftware = containerInfo.encodingSoftware.ifBlank { vlcEncodedBy },
             streams = streamList,
+            overallBitrateKbps = overallBitrateKbps,
         )
     }
 

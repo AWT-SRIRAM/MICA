@@ -710,7 +710,7 @@ fun AudioEffectsControls(service: PlaybackService) {
 
         // Scrollable Preset Strip matching native vertical EQ reference
         val stripPresets = remember {
-            listOf("Custom", "Normal", "Classical", "Dance", "Flat", "Rock", "Clarity", "Bass Boost", "Treble Boost", "Movie", "Music")
+            listOf("Original", "Custom", "Normal", "Classical", "Dance", "Flat", "Rock", "Clarity", "Bass Boost", "Treble Boost", "Movie", "Music")
         }
         Row(
             Modifier
@@ -1514,6 +1514,7 @@ fun MediaInformationContent(
             rows = listOf(
                 "Format" to info.format,
                 "Resolution" to (if (info.width > 0 && info.height > 0) "${info.width} × ${info.height}" else ""),
+                "Bitrate" to (if (info.overallBitrateKbps > 0) "${info.overallBitrateKbps} kbps" else ""),
                 "Length" to (if (info.durationMs > 0) durationText(info.durationMs) else ""),
                 "Encoding SW" to info.encodingSoftware,
             ),
@@ -1532,6 +1533,7 @@ fun MediaInformationContent(
                 }
                 if (stream.sampleRateHz > 0) add("Sample rate" to "${stream.sampleRateHz} Hz")
                 if (stream.channels > 0) add("Channels" to "${stream.channels} ch")
+                if (stream.type == "Audio" && info.overallBitrateKbps > 0) add("Bitrate" to "${info.overallBitrateKbps} kbps")
                 if (stream.language.isNotBlank()) add("Language" to stream.language)
             }
             InfoSection(title = "Stream #${stream.index}", rows = streamRows)

@@ -338,11 +338,14 @@ class CrystalUpgradeTest {
 
     @Test
     fun appThemeModeFromStorageMigratesLegacyGlassFlag() {
-        assertEquals(AppThemeMode.LIQUID_GLASS, AppThemeMode.fromStorage(null, legacyGlassEnabled = true))
+        assertEquals(AppThemeMode.DARK_LIQUID_GLASS, AppThemeMode.fromStorage(null, legacyGlassEnabled = true))
         assertEquals(AppThemeMode.DARK, AppThemeMode.fromStorage(null, legacyGlassEnabled = false))
         assertEquals(AppThemeMode.LIGHT, AppThemeMode.fromStorage("light", legacyGlassEnabled = true))
         assertEquals(AppThemeMode.DARK, AppThemeMode.fromStorage("dark", legacyGlassEnabled = true))
-        assertEquals(AppThemeMode.LIQUID_GLASS, AppThemeMode.fromStorage("liquid_glass", legacyGlassEnabled = false))
+        assertEquals(AppThemeMode.DARK_LIQUID_GLASS, AppThemeMode.fromStorage("liquid_glass", legacyGlassEnabled = false))
+        assertEquals(AppThemeMode.DARK_LIQUID_GLASS, AppThemeMode.fromStorage("dark_liquid_glass", legacyGlassEnabled = false))
+        assertEquals(AppThemeMode.WHITE_LIQUID_GLASS, AppThemeMode.fromStorage("white_liquid_glass", legacyGlassEnabled = false))
+        assertEquals(AppThemeMode.WHITE_LIQUID_GLASS, AppThemeMode.fromStorage("light_glass", legacyGlassEnabled = false))
     }
 
     @Test

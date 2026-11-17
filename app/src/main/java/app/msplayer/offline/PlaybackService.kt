@@ -2,6 +2,7 @@ package app.msplayer.offline
 
 import android.app.*
 import android.content.*
+import android.graphics.Bitmap
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -192,6 +193,7 @@ class PlaybackService : Service() {
     val shuffleEnabled = MutableStateFlow(false)
     val repeatMode = MutableStateFlow("off")
     val volumeLevel = MutableStateFlow(100)
+    val volumeKeyEvent = MutableStateFlow<Pair<Long, Int>?>(null)
     private var boostedVolume = 100
     private var ducked = false
     val sleepTimerRemainingMs = MutableStateFlow<Long?>(null)
@@ -271,11 +273,13 @@ class PlaybackService : Service() {
     }
     fun volumeKey(up: Boolean) {
         val current = volumePercent()
-        if (current > 100) setVolumePercent(current + if (up) 5 else -5)
-        else {
+        val updated = if (current > 100 || (up && current >= 100)) {
+            setVolumePercent((current + if (up) 5 else -5).coerceIn(0, 200))
+        } else {
             audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, if (up) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, 0)
-            volumeLevel.value = volumePercent()
+            volumePercent().also { volumeLevel.value = it }
         }
+        volumeKeyEvent.value = SystemClock.elapsedRealtime() to updated
     }
     private val routeCallback = object : android.media.AudioDeviceCallback() {
         override fun onAudioDevicesAdded(devices: Array<out android.media.AudioDeviceInfo>) { resetBoost() }
@@ -316,8 +320,146 @@ class PlaybackService : Service() {
         Store.prefs(this).edit().putString("repeat", value).apply()
     }
     fun toggleShuffle() { shuffleEnabled.value = !shuffleEnabled.value }
+    val autoQueueActive = MutableStateFlow(false)
+    val autoQueueLoading = MutableStateFlow(false)
+    val autoQueueSeedTitle = MutableStateFlow<String?>(null)
+    private var autoQueueJob: Job? = null
+    private var preResolveJob: Job? = null
+    private var lastAutoQueueSeedKey: String? = null
+
+    private fun isLazyOnlineUri(uri: String): Boolean =
+        uri.startsWith("yt_") || uri.startsWith("saavn_") || uri.startsWith("resolve://")
+
+    private fun extractVideoId(item: MediaItem): String =
+        item.sourceVideoId.ifBlank {
+            when {
+                item.uri.startsWith("yt_") -> item.uri.removePrefix("yt_")
+                item.uri.startsWith("resolve://yt/") -> item.uri.removePrefix("resolve://yt/")
+                item.uri.startsWith("saavn_") -> item.uri
+                else -> ""
+            }
+        }
+
+    fun appendToQueue(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        val existingKeys = queue.map { "${it.title.lowercase().trim()}::${it.artist.lowercase().trim()}" }.toMutableSet()
+        val existingUris = queue.map { it.uri }.toMutableSet()
+        val existingVids = queue.mapNotNull { it.sourceVideoId.takeIf { v -> v.isNotBlank() } }.toMutableSet()
+        val toAdd = items.filter { candidate ->
+            val key = "${candidate.title.lowercase().trim()}::${candidate.artist.lowercase().trim()}"
+            val vid = candidate.sourceVideoId
+            val dup = key in existingKeys || candidate.uri in existingUris || (vid.isNotBlank() && vid in existingVids)
+            if (!dup) {
+                existingKeys.add(key)
+                existingUris.add(candidate.uri)
+                if (vid.isNotBlank()) existingVids.add(vid)
+            }
+            !dup
+        }
+        if (toAdd.isNotEmpty()) {
+            queue = queue + toAdd
+            queueItems.value = queue
+            autoQueueActive.value = true
+            preResolveNextTrack()
+        }
+    }
+
+    fun triggerAutoQueueIfNeeded(seed: MediaItem) {
+        if (!seed.audio) return
+        val isOnline = PlaybackRules.isStreamUrl(seed.uri) || isLazyOnlineUri(seed.uri) || seed.sourceVideoId.isNotBlank()
+        if (!isOnline) return
+        val remaining = (queue.size - 1 - index).coerceAtLeast(0)
+        if (remaining >= 3) return
+        val seedKey = "${seed.title.lowercase().trim()}::${seed.artist.lowercase().trim()}::${extractVideoId(seed)}"
+        if (lastAutoQueueSeedKey == seedKey && autoQueueLoading.value) return
+        lastAutoQueueSeedKey = seedKey
+        autoQueueJob?.cancel()
+        autoQueueLoading.value = true
+        autoQueueSeedTitle.value = seed.title
+        autoQueueJob = scope.launch(Dispatchers.IO) {
+            try {
+                val vid = extractVideoId(seed)
+                val similarTracks = if (vid.startsWith("saavn_")) {
+                    val jioRecs = JioSaavnClient.fetchSimilarSongs(vid, seed.title, seed.artist)
+                    if (jioRecs.size >= 5) jioRecs
+                    else (jioRecs + YtMusicClient.fetchUpNextRadio("", seed.title, seed.artist))
+                        .distinctBy { it.title.lowercase().trim() }
+                } else {
+                    val ytRecs = YtMusicClient.fetchUpNextRadio(vid, seed.title, seed.artist)
+                    if (ytRecs.size >= 5) ytRecs
+                    else (ytRecs + JioSaavnClient.fetchSimilarSongs("", seed.title, seed.artist))
+                        .distinctBy { it.title.lowercase().trim() }
+                }
+
+                val mediaItems = similarTracks.map { t ->
+                    val lazyUri = t.directStreamUrl.takeIf { it.startsWith("http") }
+                        ?: if (t.videoId.startsWith("saavn_")) t.videoId else "yt_${t.videoId}"
+                    MediaItem(
+                        uri = lazyUri,
+                        title = t.title,
+                        artist = t.artist,
+                        audio = true,
+                        thumbUri = t.thumbUrl,
+                        sourceVideoId = t.videoId,
+                    )
+                }
+                withContext(Dispatchers.Main) {
+                    if (mediaItems.isNotEmpty()) {
+                        appendToQueue(mediaItems)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+            } finally {
+                withContext(Dispatchers.Main) {
+                    autoQueueLoading.value = false
+                }
+            }
+        }
+    }
+
+    private fun preResolveNextTrack() {
+        val nextIdx = index + 1
+        val nextItem = queue.getOrNull(nextIdx) ?: return
+        if (!nextItem.audio || !isLazyOnlineUri(nextItem.uri)) return
+        preResolveJob?.cancel()
+        preResolveJob = scope.launch(Dispatchers.IO) {
+            try {
+                val vid = extractVideoId(nextItem)
+                val resolved = AudioStreamResolver.resolveBestStream(
+                    title = nextItem.title,
+                    artist = nextItem.artist,
+                    ytVideoId = vid,
+                    rawThumbUrl = nextItem.thumbUri ?: "",
+                    directStreamUrl = "",
+                )
+                if (resolved != null && resolved.streamUrl.isNotBlank()) {
+                    withContext(Dispatchers.Main) {
+                        val currentAtIdx = queue.getOrNull(nextIdx)
+                        if (currentAtIdx != null && currentAtIdx.uri == nextItem.uri) {
+                            val updated = currentAtIdx.copy(
+                                uri = resolved.streamUrl,
+                                thumbUri = resolved.hdThumbUrl.ifBlank { currentAtIdx.thumbUri ?: "" },
+                                streamUserAgent = resolved.userAgent,
+                            )
+                            val mutable = queue.toMutableList()
+                            mutable[nextIdx] = updated
+                            queue = mutable
+                            queueItems.value = queue
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {}
+        }
+    }
+
     fun playQueueItem(item: MediaItem) {
-        val next = queue.indexOfFirst { it.uri == item.uri }
+        val next = queue.indexOfFirst {
+            it.uri == item.uri || (item.sourceVideoId.isNotBlank() && it.sourceVideoId == item.sourceVideoId)
+        }
         if (next >= 0) { savePosition(); index = next; retried = false; openCurrent(null) }
     }
     fun markAB() {
@@ -358,7 +500,14 @@ class PlaybackService : Service() {
     }
     private var focusHeld = false
     private var sessionMediaKey: String? = null
+    private var sessionTitle: String? = null
+    private var sessionArtist: String? = null
     private var sessionDuration = -1L
+    private var sessionArtKey: String? = null
+    private var sessionArtIdentity: String = "none"
+    private var sessionArtworkBitmap: Bitmap? = null
+    private var sessionArtworkColor: Int = android.graphics.Color.rgb(12, 24, 42)
+    private var artworkJob: Job? = null
     private var sessionStatus = -1
     private var sessionRate = -1f
     private var sessionSentAt = 0L
@@ -547,23 +696,6 @@ class PlaybackService : Service() {
         player.attachViews(layout, null, useTexture, false)
         enforceCenterGravity(layout)
         applyHighRefreshPresentation(layout)
-        val surfaceVideo = layout.findViewById<android.view.View>(org.videolan.R.id.surface_video)
-            ?: layout.findViewById<android.view.View>(org.videolan.R.id.texture_video)
-        surfaceVideo?.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
-            val vlp = v.layoutParams as? android.widget.FrameLayout.LayoutParams
-            if (vlp != null && vlp.gravity != android.view.Gravity.CENTER) {
-                vlp.gravity = android.view.Gravity.CENTER
-                v.layoutParams = vlp
-            }
-        }
-        val frame = layout.findViewById<android.widget.FrameLayout>(org.videolan.R.id.player_surface_frame)
-        frame?.addOnLayoutChangeListener { f, _, _, _, _, _, _, _, _ ->
-            val flp = f.layoutParams as? android.widget.FrameLayout.LayoutParams
-            if (flp != null && flp.gravity != android.view.Gravity.CENTER) {
-                flp.gravity = android.view.Gravity.CENTER
-                f.layoutParams = flp
-            }
-        }
         layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)
             ?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
         videoAttached = true
@@ -630,10 +762,14 @@ class PlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        getSystemService(NotificationManager::class.java)
-            .createNotificationChannel(
-                NotificationChannel("playback", "Playback", NotificationManager.IMPORTANCE_LOW)
-            )
+        val playbackChannel = NotificationChannel("playback", "Media Playback", NotificationManager.IMPORTANCE_LOW).apply {
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            setShowBadge(false)
+            setSound(null, null)
+            enableLights(false)
+            enableVibration(false)
+        }
+        getSystemService(NotificationManager::class.java).createNotificationChannel(playbackChannel)
         val initialEffects = AudioEffectSettings.load(this)
         effectSettings.value = initialEffects
         vlc = createVlc(initialEffects)
@@ -642,17 +778,24 @@ class PlaybackService : Service() {
         audioManager.registerAudioDeviceCallback(routeCallback, Handler(Looper.getMainLooper()))
         repeatMode.value = Store.prefs(this).getString("repeat", "off") ?: "off"
         userPausedAudio = Store.prefs(this).getBoolean("user_paused_audio", false)
+        val mediaAudioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+            .build()
         focus =
             AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                        .build()
-                )
+                .setAudioAttributes(mediaAudioAttributes)
                 .setOnAudioFocusChangeListener(focusListener)
                 .build()
         session = MediaSession(this, "MS PLAYER")
+        session.setPlaybackToLocal(mediaAudioAttributes)
+        val openActivityIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).putExtra("show_player", true),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        session.setSessionActivity(openActivityIntent)
         session.setCallback(
             object : MediaSession.Callback() {
                 override fun onPlay() = play()
@@ -752,15 +895,17 @@ class PlaybackService : Service() {
         arrayListOf(
             "--no-video-title-show",
             "--audio-time-stretch",
-            "--file-caching=300",
+            "--file-caching=1500",
             "--network-caching=2000",
+            "--no-drop-late-frames",
+            "--no-skip-frames",
             "--codec=mediacodec_ndk,mediacodec_jni,all",
             "--avcodec-threads=0",
             "--avcodec-fast",
             // Native surfaces keep text subtitles independently positionable.
             // GLES remains available for projections the Android output cannot handle.
             "--vout=android-display,android-opaque,gles2",
-            "--avcodec-skiploopfilter=1",
+            "--avcodec-skiploopfilter=0",
         ).apply {
             addAll(SubtitleStyle.load(this@PlaybackService).options())
             addAll(eff.spatializerOptions())
@@ -784,9 +929,23 @@ class PlaybackService : Service() {
             )
                 android.util.Log.i("MSPlayer", "Playback event ${event.type}")
             when (event.type) {
+                MediaPlayer.Event.Opening -> {
+                    state.value = state.value.copy(buffering = true, error = null)
+                    updateSession(forceMetadata = true, forceState = true)
+                    updateNotification()
+                }
+                MediaPlayer.Event.LengthChanged -> {
+                    val len = event.lengthChanged.coerceAtLeast(0L)
+                    if (len > 0L && len != state.value.duration) {
+                        state.value = state.value.copy(duration = len)
+                        timeline.value = timeline.value.copy(duration = len)
+                        updateSession(forceMetadata = true)
+                    }
+                }
                 MediaPlayer.Event.Playing -> {
                     Library.videoPlaybackActive.value = state.value.item?.audio == false
-                    state.value = state.value.copy(playing = true, buffering = false, error = null)
+                    val realLen = player.length.takeIf { it > 0L } ?: state.value.duration
+                    state.value = state.value.copy(playing = true, buffering = false, error = null, duration = realLen)
                     refreshTracks()
                     player.currentVideoTrack?.let { video ->
                         val dimensions = metadataDimensions ?: PlaybackRules.displayDimensions(video.width, video.height, video.orientation, video.sarNum, video.sarDen)
@@ -806,11 +965,13 @@ class PlaybackService : Service() {
                         state.value = state.value.copy(rate = prior.rate, audioDelay = prior.audioDelay, subtitleDelay = prior.subtitleDelay)
                         if (!prior.playing) pause(false)
                     }
+                    updateSession(forceMetadata = true, forceState = true)
                     updateNotification()
                 }
                 MediaPlayer.Event.Paused -> {
                     Library.videoPlaybackActive.value = videoAttached && state.value.item?.audio == false
                     state.value = state.value.copy(playing = false, buffering = false)
+                    updateSession(forceState = true)
                     updateNotification()
                 }
                 MediaPlayer.Event.ESAdded,
@@ -904,10 +1065,63 @@ class PlaybackService : Service() {
                     }
                 }
                 MediaPlayer.Event.EncounteredError -> {
-                    if (!retried && decoderMode != "Software") {
+                    val currentItem = state.value.item
+                    val isOnlineAudio = currentItem?.audio == true && (PlaybackRules.isStreamUrl(currentItem.uri) || isLazyOnlineUri(currentItem.uri))
+                    if (isOnlineAudio && !retried) {
+                        retried = true
+                        state.value = state.value.copy(buffering = true, error = null)
+                        val failedIndex = index
+                        val failedUri = currentItem.uri
+                        scope.launch(Dispatchers.IO) {
+                            val fallback = AudioStreamResolver.resolveAlternateStream(
+                                title = currentItem.title,
+                                artist = currentItem.artist,
+                                ytVideoId = extractVideoId(currentItem),
+                                rawThumbUrl = currentItem.thumbUri ?: "",
+                                excludeUrl = failedUri,
+                            )
+                            withContext(Dispatchers.Main) {
+                                if (state.value.item?.title != currentItem.title) return@withContext
+                                if (fallback != null && fallback.streamUrl.isNotBlank() && fallback.streamUrl != failedUri) {
+                                    val updated = currentItem.copy(
+                                        uri = fallback.streamUrl,
+                                        thumbUri = fallback.hdThumbUrl.ifBlank { currentItem.thumbUri ?: "" },
+                                        streamUserAgent = fallback.userAgent,
+                                    )
+                                    val mutable = queue.toMutableList()
+                                    if (failedIndex in mutable.indices) {
+                                        mutable[failedIndex] = updated
+                                        queue = mutable
+                                    } else {
+                                        queue = listOf(updated)
+                                        index = 0
+                                    }
+                                    queueItems.value = queue
+                                    openCurrent(0L, restore = false, autoPlay = true)
+                                } else if (index + 1 < queue.size) {
+                                    // Gracefully advance to next track instead of stranding playback
+                                    next()
+                                } else {
+                                    state.value = state.value.copy(
+                                        error = "Unable to stream this track right now. Tap to retry or pick another song.",
+                                        playing = false,
+                                        buffering = false,
+                                    )
+                                    abandonFocus()
+                                    updateNotification()
+                                    stopForeground(STOP_FOREGROUND_DETACH)
+                                }
+                            }
+                        }
+                        return@setEventListener
+                    }
+                    val is4kOrLarge = state.value.videoWidth >= 3840 || state.value.videoHeight >= 2160 || (state.value.item?.size ?: 0L) > 2L * 1024 * 1024 * 1024
+                    if (!retried && decoderMode != "Software" && !is4kOrLarge && !isOnlineAudio) {
                         retried = true
                         decoderMode = "Software"
                         openCurrent(state.value.position, false)
+                    } else if (isOnlineAudio && index + 1 < queue.size) {
+                        next()
                     } else {
                         decoderMode = Store.prefs(this).getString("decoder", "Auto") ?: "Auto"
                         Library.videoPlaybackActive.value = false
@@ -951,6 +1165,12 @@ class PlaybackService : Service() {
         endTemporarySpeed()
         resetBoost()
         savePosition()
+        autoQueueJob?.cancel()
+        preResolveJob?.cancel()
+        autoQueueActive.value = false
+        autoQueueLoading.value = false
+        autoQueueSeedTitle.value = null
+        lastAutoQueueSeedKey = null
         externalSubtitles.clear()
         pendingStyleTracks = null
         queue = items.ifEmpty { listOf(selected) }
@@ -992,7 +1212,9 @@ class PlaybackService : Service() {
         externalLabelsBySpuId.clear()
         requestedPause = false
         Library.videoPlaybackActive.value = item.audio.not()
-        // Auto-detect embedded MKV/MP4 subtitle cues, saved AI subtitles, and sidecar files
+        val isOnlineAudioItem = item.audio && (PlaybackRules.isStreamUrl(item.uri) || isLazyOnlineUri(item.uri))
+        // Auto-detect embedded MKV/MP4 subtitle cues, saved AI subtitles, and sidecar files (skip for remote online audio)
+        if (!isOnlineAudioItem) {
         subtitleDemuxing.value = true
         subtitleCuesRevision.value++
         demuxJob = scope.launch(Dispatchers.IO) {
@@ -1154,12 +1376,50 @@ class PlaybackService : Service() {
                 }
             }
         }
+        } else {
+            subtitleDemuxing.value = false
+        }
         opening =
             scope.launch {
+                var activeItem = item
+                val currentIdx = index
+                if (activeItem.audio && isLazyOnlineUri(activeItem.uri)) {
+                    state.value = PlayerState(item = activeItem, buffering = true, decoder = decoderMode)
+                    timeline.value = PlaybackTimeline(0L, activeItem.duration, false)
+                    val resolved = AudioStreamResolver.resolveBestStream(
+                        title = activeItem.title,
+                        artist = activeItem.artist,
+                        ytVideoId = extractVideoId(activeItem),
+                        rawThumbUrl = activeItem.thumbUri ?: "",
+                        directStreamUrl = "",
+                    )
+                    if (resolved == null || resolved.streamUrl.isBlank()) {
+                        if (currentIdx + 1 < queue.size) {
+                            index = currentIdx + 1
+                            retried = false
+                            openCurrent(null, autoPlay = autoPlay)
+                        } else {
+                            state.value = PlayerState(item = activeItem, error = "Unable to stream this track right now.")
+                            stopForeground(STOP_FOREGROUND_DETACH)
+                        }
+                        return@launch
+                    }
+                    activeItem = activeItem.copy(
+                        uri = resolved.streamUrl,
+                        thumbUri = resolved.hdThumbUrl.ifBlank { activeItem.thumbUri ?: "" },
+                        streamUserAgent = resolved.userAgent,
+                    )
+                    val mutable = queue.toMutableList()
+                    if (currentIdx in mutable.indices) {
+                        mutable[currentIdx] = activeItem
+                        queue = mutable
+                        queueItems.value = queue
+                    }
+                }
                 val saved =
-                    if (restore && Store.prefs(this@PlaybackService).getBoolean("resume", true))
+                    if (restore && Store.prefs(this@PlaybackService).getBoolean("resume", true) && !activeItem.audio)
                         withContext(Dispatchers.IO) {
-                            Store.db(this@PlaybackService).dao().saved(item.uri)
+                            Store.db(this@PlaybackService).dao().saved(activeItem.uri)
                         }
                     else null
                 try {
@@ -1171,10 +1431,12 @@ class PlaybackService : Service() {
                     activeDescriptor = null
                     // Parcel file descriptors preserve provider permissions and support local
                     // seekable content.
-                    val uri = Uri.parse(item.uri)
-                    val directFile = resolveLocalFile(uri, item)
-                        ?: Library.resolvePathFile(this@PlaybackService, uri, item)
-                        ?: Library.findPhysicalMediaFile(item)
+                    val uri = Uri.parse(activeItem.uri)
+                    val directFile = if (PlaybackRules.isStreamUrl(activeItem.uri)) null else {
+                        resolveLocalFile(uri, activeItem)
+                            ?: Library.resolvePathFile(this@PlaybackService, uri, activeItem)
+                            ?: Library.findPhysicalMediaFile(activeItem)
+                    }
                     val media = if (directFile != null && directFile.canRead()) {
                         Media(vlc, directFile.absolutePath)
                     } else if (uri.scheme == "content") {
@@ -1191,29 +1453,42 @@ class PlaybackService : Service() {
                         }
                     } else Media(vlc, uri)
                     media.setHWDecoderEnabled(decoderMode != "Software", decoderMode == "Hardware")
-                    if (PlaybackRules.isStreamUrl(item.uri)) {
-                        media.addOption(":network-caching=2000")
+                    if (PlaybackRules.isStreamUrl(activeItem.uri)) {
+                        if (activeItem.audio) {
+                            media.addOption(":network-caching=800")
+                            media.addOption(":live-caching=800")
+                        } else {
+                            media.addOption(":network-caching=1500")
+                        }
                         media.addOption(":http-reconnect")
                         media.addOption(":http-forward-cookies")
-                        media.addOption(":http-user-agent=Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 MSPLAYER/0.6.9")
-                        Store.recordStream(this@PlaybackService, item.uri)
+                        val isYtStream = activeItem.uri.contains("googlevideo.com") || activeItem.uri.contains("youtube.com")
+                        val streamUa = activeItem.streamUserAgent.ifBlank {
+                            if (isYtStream) {
+                                "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
+                            } else {
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                            }
+                        }
+                        media.addOption(":http-user-agent=$streamUa")
+                        Store.recordStream(this@PlaybackService, activeItem.uri)
                     } else {
-                        if (item.audio) {
-                            media.addOption(":file-caching=150")
+                        if (activeItem.audio) {
+                            media.addOption(":file-caching=250")
                         } else {
-                            media.addOption(":file-caching=300")
+                            media.addOption(":file-caching=1500")
                         }
                     }
                     val start =
                         position
                             ?: saved?.let {
-                                PlaybackRules.resume(it.position, item.duration, it.watched)
+                                PlaybackRules.resume(it.position, activeItem.duration, it.watched)
                             }
                             ?: 0
                     if (start > 0) media.addOption(":start-time=${start / 1000.0}")
                     resumeAnchor = start.takeIf { it > 0 }
-                    val folderPrefs = if (Store.folderMemoryEnabled(this@PlaybackService) && item.folder.isNotBlank()) {
-                        Store.folderMemory(this@PlaybackService, item.folder)
+                    val folderPrefs = if (Store.folderMemoryEnabled(this@PlaybackService) && activeItem.folder.isNotBlank()) {
+                        Store.folderMemory(this@PlaybackService, activeItem.folder)
                     } else null
                     val initialRate = if (restore && pendingStyleRestore == null && folderPrefs?.rate != null && folderPrefs.rate in 0.25f..4f) {
                         folderPrefs.rate
@@ -1225,27 +1500,34 @@ class PlaybackService : Service() {
                     }
                     state.value =
                         PlayerState(
-                            item = item,
+                            item = activeItem,
                             videoWidth = metadataDimensions?.first ?: 0,
                             videoHeight = metadataDimensions?.second ?: 0,
                             buffering = true,
                             rate = initialRate,
                             decoder = decoderMode,
                             position = start,
-                            duration = item.duration,
+                            duration = activeItem.duration,
                         )
-                    timeline.value = PlaybackTimeline(start, item.duration, false)
+                    timeline.value = PlaybackTimeline(start, activeItem.duration, false)
+                    loadNotificationArtwork(activeItem)
                     player.media = media
                     player.rate = initialRate
                     media.release()
                     foreground()
+                    updateSession(forceMetadata = true, forceState = true)
+                    // Trigger Auto-Queue Radio & background next-track pre-resolution for online audio
+                    if (activeItem.audio && PlaybackRules.isStreamUrl(activeItem.uri)) {
+                        triggerAutoQueueIfNeeded(activeItem)
+                        preResolveNextTrack()
+                    }
                     // Native rotation/SAR is available with the first track event. Avoid
                     // a second demux/metadata reader before high-bitrate playback starts.
                     dimensionProbe = scope.launch {
                         delay(2000)
-                        if (!item.audio && state.value.videoWidth == 0) {
-                            val dimensions = Library.videoDimensions(this@PlaybackService, item.uri)
-                            if (state.value.item?.uri == item.uri && dimensions != null) {
+                        if (!activeItem.audio && state.value.videoWidth == 0) {
+                            val dimensions = Library.videoDimensions(this@PlaybackService, activeItem.uri)
+                            if (state.value.item?.uri == activeItem.uri && dimensions != null) {
                                 metadataDimensions = dimensions
                                 state.value = state.value.copy(videoWidth = dimensions.first, videoHeight = dimensions.second)
                             }
@@ -1253,7 +1535,7 @@ class PlaybackService : Service() {
                     }
                     if (requestFocus()) {
                         if (autoPlay) {
-                            if (item.audio || videoAttached) player.play() else pendingPlayback = true
+                            if (activeItem.audio || videoAttached) player.play() else pendingPlayback = true
                         } else {
                             requestedPause = true
                             state.value = state.value.copy(playing = false, buffering = false)
@@ -1270,18 +1552,18 @@ class PlaybackService : Service() {
                     val isPendingOrSecurity = e is SecurityException ||
                         e.message?.contains("pending", ignoreCase = true) == true ||
                         e.message?.contains("Only owner", ignoreCase = true) == true ||
-                        PlaybackRules.temporaryFile(item.title)
+                        PlaybackRules.temporaryFile(activeItem.title)
                     if (isPendingOrSecurity && android.os.Build.VERSION.SDK_INT >= 30 && !android.os.Environment.isExternalStorageManager()) {
                         requiresAllFilesPermission.value = true
                     }
                     val errorMsg = if (requiresAllFilesPermission.value) {
                         "All files access required to play in-progress downloads (.pending)."
-                    } else if (PlaybackRules.temporaryFile(item.title)) {
+                    } else if (PlaybackRules.temporaryFile(activeItem.title)) {
                         "This download is unavailable or still private to its downloader. Open a completed copy or choose an accessible folder."
                     } else {
                         "Cannot open file: ${e.message}"
                     }
-                    state.value = PlayerState(item = item, error = errorMsg)
+                    state.value = PlayerState(item = activeItem, error = errorMsg)
                     stopForeground(STOP_FOREGROUND_DETACH)
                 }
             }
@@ -2447,6 +2729,7 @@ class PlaybackService : Service() {
         pendingPlayback = false
         clearSeek()
         dimensionProbe?.cancel()
+        artworkJob?.cancel()
         scope.cancel()
         player.setEventListener(null)
         player.stop()
@@ -2496,6 +2779,80 @@ class PlaybackService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
+    private fun scaleForNotification(source: Bitmap): Bitmap {
+        val maxDim = 512
+        val w = source.width
+        val h = source.height
+        if (w <= 0 || h <= 0) return source
+        if (w <= maxDim && h <= maxDim) return source
+        val scale = maxDim.toFloat() / maxOf(w, h).toFloat()
+        val nw = (w * scale).toInt().coerceAtLeast(1)
+        val nh = (h * scale).toInt().coerceAtLeast(1)
+        return runCatching { Bitmap.createScaledBitmap(source, nw, nh, true) }.getOrDefault(source)
+    }
+
+    private fun loadNotificationArtwork(targetItem: MediaItem) {
+        val targetKey = "${targetItem.uri}::${targetItem.title}"
+        if (sessionArtKey == targetKey && sessionArtworkBitmap != null) return
+        artworkJob?.cancel()
+        sessionArtKey = targetKey
+
+        // 0ms instant RAM cache check (already loaded by Search / MusicPlayer / Library)
+        val instantBmp = targetItem.thumbUri?.takeIf { it.isNotBlank() }?.let { OnlineImageCache.get(it) }
+            ?: OnlineImageCache.get("libart::${targetItem.uri}::${targetItem.title}".lowercase())
+        if (instantBmp != null) {
+            val scaled = scaleForNotification(instantBmp)
+            sessionArtworkBitmap = scaled
+            val mood = extractAdaptiveMoodColors(scaled)
+            sessionArtworkColor = android.graphics.Color.rgb(
+                (mood.primary.red * 255).toInt(),
+                (mood.primary.green * 255).toInt(),
+                (mood.primary.blue * 255).toInt(),
+            )
+            return
+        }
+
+        // Clear stale artwork from the previous track immediately so old art never lingers
+        sessionArtworkBitmap = null
+        sessionArtworkColor = android.graphics.Color.rgb(12, 24, 42)
+
+        artworkJob = scope.launch(Dispatchers.IO) {
+            try {
+                val loaded: Bitmap? = if (targetItem.audio) {
+                    TrackArtworkStore.resolveAndCacheCover(
+                        context = this@PlaybackService,
+                        uri = targetItem.uri,
+                        title = targetItem.title,
+                        artist = targetItem.artist,
+                        existingThumbUri = targetItem.thumbUri,
+                    )
+                } else {
+                    runCatching { Library.thumbnail(this@PlaybackService, targetItem) }.getOrNull()
+                }
+                if (loaded != null) {
+                    val scaled = scaleForNotification(loaded)
+                    val mood = extractAdaptiveMoodColors(scaled)
+                    val dominantArgb = android.graphics.Color.rgb(
+                        (mood.primary.red * 255).toInt(),
+                        (mood.primary.green * 255).toInt(),
+                        (mood.primary.blue * 255).toInt(),
+                    )
+                    withContext(Dispatchers.Main) {
+                        val active = state.value.item
+                        if (!released && active != null && "${active.uri}::${active.title}" == targetKey) {
+                            sessionArtworkBitmap = scaled
+                            sessionArtworkColor = dominantArgb
+                            updateSession(forceMetadata = true)
+                            updateNotification()
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun notification(): android.app.Notification {
         val open =
             PendingIntent.getActivity(
@@ -2504,17 +2861,24 @@ class PlaybackService : Service() {
                 Intent(this, MainActivity::class.java).putExtra("show_player", true),
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
-        return android.app.Notification.Builder(this, "playback")
+        val curItem = state.value.item
+        val title = curItem?.title?.takeIf { it.isNotBlank() } ?: "MS PLAYER"
+        val artist = curItem?.artist?.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
+            ?: "MS PLAYER"
+        val builder = android.app.Notification.Builder(this, "playback")
             .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle(state.value.item?.title ?: "MS PLAYER")
-            .setContentText(
-                if (state.value.playing) "Playing · MS PLAYER" else "Paused · MS PLAYER"
-            )
+            .setContentTitle(title)
+            .setContentText(artist)
+            .setSubText("MS PLAYER")
+            .setCategory(android.app.Notification.CATEGORY_TRANSPORT)
+            .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
+            .setColor(sessionArtworkColor)
+            .setColorized(true)
             .setContentIntent(open)
             .setDeleteIntent(action("stop"))
             .setOnlyAlertOnce(true)
             .setSound(null)
-            .setOngoing(state.value.playing)
+            .setOngoing(state.value.playing || state.value.buffering)
             .addAction(android.R.drawable.ic_media_previous, "Previous", action("previous"))
             .addAction(
                 if (state.value.playing) android.R.drawable.ic_media_pause
@@ -2527,9 +2891,10 @@ class PlaybackService : Service() {
             .setStyle(
                 android.app.Notification.MediaStyle()
                     .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(1, 2, 3)
+                    .setShowActionsInCompactView(0, 1, 2)
             )
-            .build()
+        sessionArtworkBitmap?.let { builder.setLargeIcon(it) }
+        return builder.build()
     }
 
     private fun foreground() {
@@ -2548,26 +2913,65 @@ class PlaybackService : Service() {
         updateSession()
     }
 
-    private fun updateSession() {
+    private fun updateSession(forceMetadata: Boolean = false, forceState: Boolean = false) {
         val value = state.value
-        if (sessionMediaKey != value.item?.uri || sessionDuration != value.duration) {
-            session.setMetadata(
-                MediaMetadata.Builder()
-                    .putString(MediaMetadata.METADATA_KEY_TITLE, value.item?.title)
-                    .putLong(MediaMetadata.METADATA_KEY_DURATION, value.duration)
-                    .build()
-            )
-            sessionMediaKey = value.item?.uri
-            sessionDuration = value.duration
+        val curItem = value.item
+        val title = curItem?.title?.takeIf { it.isNotBlank() } ?: "MS PLAYER"
+        val artist = curItem?.artist?.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
+            ?: "MS PLAYER"
+        val album = curItem?.folder?.takeIf { it.isNotBlank() && it != "Opened files" } ?: "MS PLAYER"
+        val dur = value.duration.coerceAtLeast(0L)
+        val art = sessionArtworkBitmap
+        val artIdentity = if (art != null) "${sessionArtKey}#${art.hashCode()}" else "none"
+
+        val metadataChanged = forceMetadata ||
+            sessionMediaKey != curItem?.uri ||
+            sessionTitle != title ||
+            sessionArtist != artist ||
+            sessionDuration != dur ||
+            sessionArtIdentity != artIdentity
+
+        if (curItem != null && metadataChanged) {
+            val metaBuilder = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_MEDIA_ID, curItem.uri)
+                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST, artist)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, artist)
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, album)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, dur)
+            if (art != null) {
+                metaBuilder
+                    .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art)
+                    .putBitmap(MediaMetadata.METADATA_KEY_ART, art)
+                    .putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, art)
+            }
+            curItem.thumbUri?.takeIf { it.startsWith("http") }?.let { httpArt ->
+                metaBuilder
+                    .putString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI, httpArt)
+                    .putString(MediaMetadata.METADATA_KEY_ART_URI, httpArt)
+                    .putString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI, httpArt)
+            }
+            session.setMetadata(metaBuilder.build())
+            sessionMediaKey = curItem.uri
+            sessionTitle = title
+            sessionArtist = artist
+            sessionDuration = dur
+            sessionArtIdentity = artIdentity
         }
-        val status =
-            if (value.item == null) PlaybackState.STATE_STOPPED
-            else if (value.playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED
+        val status = when {
+            curItem == null -> PlaybackState.STATE_STOPPED
+            value.buffering && !value.playing -> PlaybackState.STATE_BUFFERING
+            value.playing -> PlaybackState.STATE_PLAYING
+            else -> PlaybackState.STATE_PAUSED
+        }
         val now = SystemClock.elapsedRealtime()
         // Android extrapolates the position from speed and timestamp. Avoid
-        // rebroadcasting unchanged metadata/state on every UI timeline tick.
+        // rebroadcasting unchanged state on every UI timeline tick unless forced.
         if (
-            status == sessionStatus &&
+            !forceState &&
+                status == sessionStatus &&
                 value.rate == sessionRate &&
                 kotlin.math.abs(value.position - sessionPosition) < 2000 &&
                 now - sessionSentAt < 2000
@@ -2584,7 +2988,7 @@ class PlaybackService : Service() {
                         PlaybackState.ACTION_SKIP_TO_PREVIOUS or
                         PlaybackState.ACTION_STOP
                 )
-                .setState(status, value.position, value.rate)
+                .setState(status, value.position.coerceAtLeast(0L), if (status == PlaybackState.STATE_PLAYING) value.rate else 0f)
                 .build()
         )
         sessionStatus = status

@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.CornerBasedShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
@@ -72,12 +73,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 enum class AppThemeMode(val key: String, val label: String) {
     LIGHT("light", "Light"),
     DARK("dark", "Dark"),
-    LIQUID_GLASS("liquid_glass", "Liquid Glass");
+    DARK_LIQUID_GLASS("dark_liquid_glass", "Dark Liquid Glass"),
+    WHITE_LIQUID_GLASS("white_liquid_glass", "White Liquid Glass");
 
     companion object {
         fun fromStorage(rawKey: String?, legacyGlassEnabled: Boolean): AppThemeMode =
-            entries.firstOrNull { it.key.equals(rawKey, ignoreCase = true) }
-                ?: if (legacyGlassEnabled) LIQUID_GLASS else DARK
+            when (rawKey?.lowercase()) {
+                "light" -> LIGHT
+                "dark" -> DARK
+                "dark_liquid_glass", "dark_glass", "liquid_glass", "auto_glass", "auto" -> DARK_LIQUID_GLASS
+                "white_liquid_glass", "light_glass" -> WHITE_LIQUID_GLASS
+                else -> if (legacyGlassEnabled) DARK_LIQUID_GLASS else DARK
+            }
     }
 }
 
@@ -95,6 +102,7 @@ data class AppPalette(
     val textSecondary: Color,
     val accent: Color,
     val accentSecondary: Color,
+    val onAccent: Color,
     val navContainer: Color,
     val popupTint: Color,
     val popupFallback: Color,
@@ -103,50 +111,74 @@ data class AppPalette(
     val divider: Color,
 )
 
-val LightAppPalette = AppPalette(
+val LightPalette = AppPalette(
     mode = AppThemeMode.LIGHT,
     isLight = true,
     isGlass = false,
-    background = Color(0xFFF4F7FB),
+    background = Color(0xFFF3F6FA),
     surface = Color(0xFFFFFFFF),
     cardTint = Color(0xFFFFFFFF),
     cardFallback = Color(0xFFFFFFFF),
-    cardBorder = Color(0xFFDCE3EE),
+    cardBorder = Color(0xFFE2E8F0),
     textPrimary = Color(0xFF0F172A),
-    textSecondary = Color(0xFF526074),
-    accent = Color(0xFF0077E6),
-    accentSecondary = Color(0xFF0284C7),
-    navContainer = Color(0xFFF2F6FC),
+    textSecondary = Color(0xFF475569),
+    accent = Color(0xFF0284C7),
+    accentSecondary = Color(0xFF0369A1),
+    onAccent = Color.White,
+    navContainer = Color(0xFFFFFFFF),
     popupTint = Color(0xFFFFFFFF),
     popupFallback = Color(0xFFFFFFFF),
-    chipBackground = Color(0xFFE7EEF8),
-    chipText = Color(0xFF334155),
-    divider = Color(0xFFE2E8F0),
+    chipBackground = Color(0xFFE2E8F0),
+    chipText = Color(0xFF0F172A),
+    divider = Color(0xFFCBD5E1),
 )
 
-val DarkAppPalette = AppPalette(
+val DarkPalette = AppPalette(
     mode = AppThemeMode.DARK,
     isLight = false,
     isGlass = false,
-    background = Color.Black,
-    surface = Color(0xFF101318),
-    cardTint = Color(0xFF101318),
-    cardFallback = Color(0xFF101318),
-    cardBorder = Color.White.copy(alpha = 0.14f),
+    background = Color(0xFF070A0F),
+    surface = Color(0xFF121721),
+    cardTint = Color(0xFF121721),
+    cardFallback = Color(0xFF121721),
+    cardBorder = Color.White.copy(alpha = 0.12f),
     textPrimary = Color.White,
-    textSecondary = Color(0xFF8D96A7),
+    textSecondary = Color(0xFF9FB0C4),
     accent = Color(0xFF00A8FF),
     accentSecondary = Color(0xFF66D8F3),
-    navContainer = Color(0xFF101216),
-    popupTint = Color(0xFF131922),
-    popupFallback = Color(0xFF131922),
-    chipBackground = Color(0xFF232934),
-    chipText = Color(0xFFE0E5EF),
+    onAccent = Color.Black,
+    navContainer = Color(0xFF0E131B),
+    popupTint = Color(0xFF161D28),
+    popupFallback = Color(0xFF161D28),
+    chipBackground = Color(0xFF1E2633),
+    chipText = Color(0xFFE2E8F0),
     divider = Color.White.copy(alpha = 0.10f),
 )
 
-val GlassAppPalette = AppPalette(
-    mode = AppThemeMode.LIQUID_GLASS,
+val WhiteLiquidGlassPalette = AppPalette(
+    mode = AppThemeMode.WHITE_LIQUID_GLASS,
+    isLight = true,
+    isGlass = true,
+    background = Color(0xFFF4F8FF),
+    surface = Color(0xCCFFFFFF),
+    cardTint = Color(0xB8FFFFFF),
+    cardFallback = Color(0xF5FFFFFF),
+    cardBorder = Color.White.copy(alpha = 0.92f),
+    textPrimary = Color(0xFF0F172A),
+    textSecondary = Color(0xFF475569),
+    accent = Color(0xFF0284C7),
+    accentSecondary = Color(0xFF0EA5E9),
+    onAccent = Color.White,
+    navContainer = Color(0xB8FFFFFF),
+    popupTint = Color(0xE8FFFFFF),
+    popupFallback = Color(0xFFFFFFFF),
+    chipBackground = Color(0xB8FFFFFF),
+    chipText = Color(0xFF0F172A),
+    divider = Color(0xFFCBD5E1),
+)
+
+val DarkLiquidGlassPalette = AppPalette(
+    mode = AppThemeMode.DARK_LIQUID_GLASS,
     isLight = false,
     isGlass = true,
     background = Color(0xFF020409),
@@ -158,6 +190,7 @@ val GlassAppPalette = AppPalette(
     textSecondary = Color(0xFF9FB0C4),
     accent = Color(0xFF00A8FF),
     accentSecondary = Color(0xFF66D8F3),
+    onAccent = Color.Black,
     navContainer = Color(0x360C1524),
     popupTint = Color(0xEB070D17),
     popupFallback = Color(0xFF131922),
@@ -166,17 +199,24 @@ val GlassAppPalette = AppPalette(
     divider = Color.White.copy(alpha = 0.10f),
 )
 
-val LocalAppPalette = staticCompositionLocalOf { GlassAppPalette }
+val LightGlassPalette = WhiteLiquidGlassPalette
+val DarkGlassPalette = DarkLiquidGlassPalette
+val LightAppPalette = LightPalette
+val DarkAppPalette = DarkPalette
+val GlassAppPalette = DarkLiquidGlassPalette
 
-fun paletteFor(mode: AppThemeMode): AppPalette = when (mode) {
-    AppThemeMode.LIGHT -> LightAppPalette
-    AppThemeMode.DARK -> DarkAppPalette
-    AppThemeMode.LIQUID_GLASS -> GlassAppPalette
+val LocalAppPalette = staticCompositionLocalOf { DarkLiquidGlassPalette }
+
+fun paletteFor(mode: AppThemeMode, isSystemDark: Boolean = true): AppPalette = when (mode) {
+    AppThemeMode.LIGHT -> LightPalette
+    AppThemeMode.DARK -> DarkPalette
+    AppThemeMode.DARK_LIQUID_GLASS -> DarkLiquidGlassPalette
+    AppThemeMode.WHITE_LIQUID_GLASS -> WhiteLiquidGlassPalette
 }
 
 object GlassTheme {
     val enabled = MutableStateFlow(true)
-    val themeMode = MutableStateFlow(AppThemeMode.LIQUID_GLASS)
+    val themeMode = MutableStateFlow(AppThemeMode.DARK_LIQUID_GLASS)
     val CrystalCobalt = Color(0xFF0A66FF)
 
     fun init(context: Context) {
@@ -186,20 +226,29 @@ object GlassTheme {
             legacyGlassEnabled = prefs.getBoolean("liquid_glass", true),
         )
         themeMode.value = resolved
-        enabled.value = resolved == AppThemeMode.LIQUID_GLASS
+        enabled.value = resolved == AppThemeMode.DARK_LIQUID_GLASS || resolved == AppThemeMode.WHITE_LIQUID_GLASS
     }
 
     fun setThemeMode(context: Context, mode: AppThemeMode) {
+        val isGlass = mode == AppThemeMode.DARK_LIQUID_GLASS || mode == AppThemeMode.WHITE_LIQUID_GLASS
         Store.prefs(context).edit()
             .putString("app_theme_mode", mode.key)
-            .putBoolean("liquid_glass", mode == AppThemeMode.LIQUID_GLASS)
+            .putBoolean("liquid_glass", isGlass)
             .apply()
         themeMode.value = mode
-        enabled.value = mode == AppThemeMode.LIQUID_GLASS
+        enabled.value = isGlass
     }
 
     fun setEnabled(context: Context, value: Boolean) {
-        setThemeMode(context, if (value) AppThemeMode.LIQUID_GLASS else AppThemeMode.DARK)
+        val cur = themeMode.value
+        val target = if (value) {
+            if (cur == AppThemeMode.LIGHT || cur == AppThemeMode.WHITE_LIQUID_GLASS) AppThemeMode.WHITE_LIQUID_GLASS
+            else AppThemeMode.DARK_LIQUID_GLASS
+        } else {
+            if (cur == AppThemeMode.LIGHT || cur == AppThemeMode.WHITE_LIQUID_GLASS) AppThemeMode.LIGHT
+            else AppThemeMode.DARK
+        }
+        setThemeMode(context, target)
     }
 }
 
@@ -293,17 +342,33 @@ fun rememberAppThemeMode(): State<AppThemeMode> = GlassTheme.themeMode.collectAs
 @Composable
 fun rememberAppPalette(): AppPalette {
     val mode by rememberAppThemeMode()
-    return remember(mode) { paletteFor(mode) }
+    val isSystemDark = isSystemInDarkTheme()
+    return remember(mode, isSystemDark) { paletteFor(mode, isSystemDark) }
 }
 
-fun liquidSpecularBrush(accentGlow: Float = 0.34f, accentColor: Color = Accent): Brush = Brush.linearGradient(
-    colors = listOf(
-        Color.White.copy(alpha = 0.72f),
-        Color.White.copy(alpha = 0.24f),
-        Color.White.copy(alpha = 0.12f),
-        accentColor.copy(alpha = accentGlow),
+fun liquidSpecularBrush(
+    accentGlow: Float = 0.34f,
+    accentColor: Color = Accent,
+    isLight: Boolean = false,
+): Brush = if (isLight) {
+    Brush.linearGradient(
+        colors = listOf(
+            Color.White.copy(alpha = 0.98f),
+            Color.White.copy(alpha = 0.72f),
+            Color(0xFFBAE6FD).copy(alpha = 0.45f),
+            accentColor.copy(alpha = accentGlow.coerceAtMost(0.32f)),
+        )
     )
-)
+} else {
+    Brush.linearGradient(
+        colors = listOf(
+            Color.White.copy(alpha = 0.72f),
+            Color.White.copy(alpha = 0.24f),
+            Color.White.copy(alpha = 0.12f),
+            accentColor.copy(alpha = accentGlow),
+        )
+    )
+}
 
 fun liquidSelectedBorder(): Brush = Brush.linearGradient(
     colors = listOf(
@@ -370,13 +435,13 @@ fun LiquidGlassBackdropBackground(
     modifier: Modifier = Modifier,
     primaryGlow: Color = Accent,
     secondaryGlow: Color = Color(0xFF2CE6D2),
-    mode: AppThemeMode = if (enabled) AppThemeMode.LIQUID_GLASS else AppThemeMode.DARK,
+    mode: AppThemeMode = if (enabled) AppThemeMode.DARK_LIQUID_GLASS else AppThemeMode.DARK,
 ) {
     val pColor by animateColorAsState(primaryGlow, MotionSpec.ColorSpring, label = "primaryGlow")
     val sColor by animateColorAsState(secondaryGlow, MotionSpec.ColorSpring, label = "secondaryGlow")
 
     when (mode) {
-        AppThemeMode.LIQUID_GLASS -> {
+        AppThemeMode.DARK_LIQUID_GLASS -> {
             Box(
                 modifier
                     .fillMaxSize()
@@ -424,17 +489,22 @@ fun LiquidGlassBackdropBackground(
                 )
             }
         }
-        AppThemeMode.LIGHT -> {
+        AppThemeMode.WHITE_LIQUID_GLASS -> {
+            // Optical crystal-pearl backdrop with soft refractive sky/lavender light fields
+            // so AGSL liquid-glass lens distortion & chromatic rim effects visibly refract light.
             Box(
                 modifier
                     .fillMaxSize()
                     .background(
-                        Brush.verticalGradient(
+                        Brush.linearGradient(
                             colors = listOf(
-                                Color(0xFFF6F9FE),
-                                Color(0xFFF1F5FB),
-                                Color(0xFFEAF1FB),
-                            )
+                                Color(0xFFF8FBFF),
+                                Color(0xFFEEF5FF),
+                                Color(0xFFF3F7FD),
+                                Color(0xFFEAF2FC),
+                            ),
+                            start = Offset.Zero,
+                            end = Offset(1200f, 2500f),
                         )
                     )
             ) {
@@ -444,18 +514,52 @@ fun LiquidGlassBackdropBackground(
                         .background(
                             Brush.radialGradient(
                                 colors = listOf(
-                                    Color(0xFF0077E6).copy(alpha = 0.08f),
+                                    Color(0xFF38BDF8).copy(alpha = 0.22f),
+                                    Color(0xFF7DD3FC).copy(alpha = 0.09f),
                                     Color.Transparent,
                                 ),
-                                center = Offset(860f, 260f),
-                                radius = 900f,
+                                center = Offset(920f, 280f),
+                                radius = 960f,
+                            )
+                        )
+                )
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    Color(0xFF818CF8).copy(alpha = 0.16f),
+                                    Color(0xFFC4B5FD).copy(alpha = 0.06f),
+                                    Color.Transparent,
+                                ),
+                                center = Offset(180f, 1280f),
+                                radius = 880f,
+                            )
+                        )
+                )
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    Color(0xFF2DD4BF).copy(alpha = 0.14f),
+                                    Color(0xFF99F6E4).copy(alpha = 0.05f),
+                                    Color.Transparent,
+                                ),
+                                center = Offset(860f, 2260f),
+                                radius = 860f,
                             )
                         )
                 )
             }
         }
+        AppThemeMode.LIGHT -> {
+            Box(modifier.fillMaxSize().background(LightPalette.background))
+        }
         AppThemeMode.DARK -> {
-            Box(modifier.fillMaxSize().background(Color.Black))
+            Box(modifier.fillMaxSize().background(DarkPalette.background))
         }
     }
 }
@@ -473,7 +577,13 @@ fun Modifier.liquidGlassSurface(
     shadow: Shadow? = Shadow(radius = 18.dp, color = Color.Black.copy(alpha = 0.42f)),
     fallbackColor: Color = Color(0xFF101216),
     fallbackBorderColor: Color = Color.White.copy(alpha = 0.14f),
+    isLight: Boolean = false,
 ): Modifier {
+    val resolvedShadow = if (isLight && shadow != null) {
+        Shadow(radius = 16.dp, color = Color(0xFF0F172A).copy(alpha = 0.10f))
+    } else {
+        shadow
+    }
     if (enabled && backdrop != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         return this.drawBackdrop(
             backdrop = backdrop,
@@ -492,13 +602,13 @@ fun Modifier.liquidGlassSurface(
             },
             highlight = {
                 Highlight(
-                    width = 1.dp,
-                    blurRadius = 0.5.dp,
-                    alpha = 0.92f,
+                    width = if (isLight) 1.3.dp else 1.dp,
+                    blurRadius = if (isLight) 0.6.dp else 0.5.dp,
+                    alpha = if (isLight) 0.98f else 0.92f,
                     style = HighlightStyle.Default,
                 )
             },
-            shadow = { shadow },
+            shadow = { resolvedShadow },
             onDrawSurface = { drawRect(tint) },
         )
     }
@@ -506,8 +616,8 @@ fun Modifier.liquidGlassSurface(
         .clip(shape)
         .background(if (enabled) tint else fallbackColor, shape)
         .border(
-            width = 0.9.dp,
-            brush = if (enabled) liquidSpecularBrush() else Brush.linearGradient(listOf(fallbackBorderColor, fallbackBorderColor)),
+            width = if (isLight) 1.dp else 0.9.dp,
+            brush = if (enabled) liquidSpecularBrush(isLight = isLight) else Brush.linearGradient(listOf(fallbackBorderColor, fallbackBorderColor)),
             shape = shape,
         )
 }
@@ -519,27 +629,32 @@ fun Modifier.frostedGlassChrome(
     fallbackColor: Color = Color.Black.copy(alpha = 0.62f),
     borderWidth: Dp = 1.dp,
     fallbackBorderColor: Color = Color.White.copy(alpha = 0.18f),
+    isLight: Boolean = false,
 ): Modifier = if (enabled) {
+    val gradientColors = if (isLight) {
+        listOf(
+            Color.White.copy(alpha = 0.88f).compositeOver(tint),
+            tint,
+            Color(0xFFE2EEFF).copy(alpha = 0.55f).compositeOver(tint),
+        )
+    } else {
+        listOf(
+            Color.White.copy(alpha = 0.17f).compositeOver(tint),
+            tint,
+            Color(0xFF04080F).copy(alpha = (tint.alpha + 0.14f).coerceIn(0.45f, 0.95f)).compositeOver(tint),
+        )
+    }
     this
         .clip(shape)
-        .background(
-            Brush.verticalGradient(
-                listOf(
-                    Color.White.copy(alpha = 0.17f).compositeOver(tint),
-                    tint,
-                    Color(0xFF04080F).copy(alpha = (tint.alpha + 0.14f).coerceIn(0.45f, 0.95f)).compositeOver(tint),
-                )
-            ),
-            shape,
-        )
+        .background(Brush.verticalGradient(gradientColors), shape)
         .drawWithContent {
             drawContent()
             drawLine(
                 brush = Brush.horizontalGradient(
                     listOf(
                         Color.Transparent,
-                        Color.White.copy(alpha = 0.36f),
-                        Color.White.copy(alpha = 0.12f),
+                        Color.White.copy(alpha = if (isLight) 0.95f else 0.36f),
+                        Color.White.copy(alpha = if (isLight) 0.55f else 0.12f),
                         Color.Transparent,
                     )
                 ),
@@ -548,7 +663,7 @@ fun Modifier.frostedGlassChrome(
                 strokeWidth = 1.dp.toPx(),
             )
         }
-        .border(borderWidth, liquidSpecularBrush(), shape)
+        .border(borderWidth, liquidSpecularBrush(isLight = isLight), shape)
 } else {
     this
         .clip(shape)
@@ -575,9 +690,10 @@ fun LiquidGlassPopupMenu(
             .frostedGlassChrome(
                 enabled = glassEnabled,
                 shape = RoundedCornerShape(18.dp),
-                tint = Color(0xEB070D17),
+                tint = if (useLight) Color(0xE8FFFFFF) else Color(0xEB070D17),
                 fallbackColor = if (useLight) Color(0xFFFFFFFF) else Color(0xFF131922),
                 fallbackBorderColor = if (useLight) Color(0xFFDCE3EE) else Color.White.copy(alpha = 0.18f),
+                isLight = useLight,
             ),
         offset = offset,
         containerColor = Color.Transparent,
@@ -663,9 +779,10 @@ fun LiquidGlassAlertDialog(
                     .frostedGlassChrome(
                         enabled = glassEnabled,
                         shape = RoundedCornerShape(24.dp),
-                        tint = Color(0x940B131F),
+                        tint = if (useLight) Color(0xEAFFFFFF) else Color(0x940B131F),
                         fallbackColor = if (useLight) Color(0xFFFFFFFF) else Color(0xFF141A24),
                         fallbackBorderColor = if (useLight) Color(0xFFDCE3EE) else Color.White.copy(alpha = 0.18f),
+                        isLight = useLight,
                     )
                     .padding(horizontal = 20.dp, vertical = 16.dp)
             ) {

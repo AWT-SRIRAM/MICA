@@ -116,9 +116,9 @@ data class AudioEffectSettings(
 
     companion object {
         val presets = listOf(
-            "Clear Voice", "Clarity", "Bass Boost",
-            "Movie", "Music", "Headphones",
-            "Deep Bass", "Night Mode", "Original",
+            "Original", "Clear Voice", "Clarity",
+            "Bass Boost", "Movie", "Music",
+            "Headphones", "Deep Bass", "Night Mode",
         )
         val reverbPresets = listOf(
             "None", "Small Room", "Medium Room", "Large Room", "Medium Hall", "Large Hall", "Plate"

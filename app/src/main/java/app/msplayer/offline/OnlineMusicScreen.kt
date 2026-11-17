@@ -17,6 +17,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -35,14 +36,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
 
 object OnlineImageCache {
-    private val memoryCache = LruCache<String, Bitmap>(60)
+    private val memoryCache = LruCache<String, Bitmap>(80)
 
     fun get(url: String): Bitmap? = memoryCache.get(url)
     fun put(url: String, bitmap: Bitmap) {
@@ -59,10 +65,15 @@ fun rememberRemoteBitmap(url: String?): Bitmap? {
         if (bitmap == null) {
             withContext(Dispatchers.IO) {
                 val loaded = runCatching {
-                    val conn = URL(url).openConnection() as HttpURLConnection
-                    conn.connectTimeout = 5000
-                    conn.readTimeout = 5000
-                    conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                    val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 4000
+                        readTimeout = 4000
+                        instanceFollowRedirects = true
+                        setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                        setRequestProperty("Connection", "keep-alive")
+                    }
+                    val bytes = conn.inputStream.use { it.readBytes() }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 }.getOrNull()
                 if (loaded != null) {
                     OnlineImageCache.put(url, loaded)
@@ -76,6 +87,7 @@ fun rememberRemoteBitmap(url: String?): Bitmap? {
     return bitmap
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OnlineMusicScreen(
     activity: MainActivity,
@@ -83,63 +95,288 @@ fun OnlineMusicScreen(
     palette: AppPalette,
     glassEnabled: Boolean,
     bottomPadding: Dp,
+    onNavigateToTab: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val scope = rememberCoroutineScope()
+    val activeDownloads by AudioDownloadManager.activeDownloads.collectAsState()
+    val fallbackPlayerState = remember { MutableStateFlow(PlayerState()) }
+    val playerState by (service?.state ?: fallbackPlayerState).collectAsState()
 
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var isSearching by remember { mutableStateOf(false) }
     var searchResults by remember { mutableStateOf<List<YtTrack>>(emptyList()) }
-    var trendingTracks by remember { mutableStateOf<List<YtTrack>>(emptyList()) }
-    var resolvingTrackId by remember { mutableStateOf<String?>(null) }
-    var activeCategory by rememberSaveable { mutableStateOf("Top Hits") }
+    var activeCategory by rememberSaveable { mutableStateOf("Home") }
+    var showLanguageModal by remember { mutableStateOf(false) }
+    var showGoogleAuthModal by remember { mutableStateOf(false) }
+    var showGoogleSignOutConfirm by remember { mutableStateOf(false) }
+    var googleSignedIn by remember { mutableStateOf(YtMusicClient.isGoogleSignedIn(context)) }
+    var loadingTrackId by remember { mutableStateOf<String?>(null) }
+    var activePlayJob by remember { mutableStateOf<Job?>(null) }
 
-    val categories = listOf("Top Hits", "Trending", "Pop", "Rock", "Lo-Fi", "Acoustic", "Bollywood", "EDM", "Hip Hop")
+    // Interactive Playlist View state
+    var selectedPlaylist by remember { mutableStateOf<PlaylistCard?>(null) }
+    var playlistTracks by remember { mutableStateOf<List<YtTrack>>(emptyList()) }
+    var isLoadingPlaylistTracks by remember { mutableStateOf(false) }
+    var searchedPlaylists by remember { mutableStateOf<List<PlaylistCard>>(emptyList()) }
+
+    // Persistent language preferences (Default: Tamil + English)
+    val availableLanguages = listOf("Tamil", "English", "Telugu", "Hindi", "Malayalam", "Punjabi", "Kannada")
+    var selectedLanguages by remember {
+        val saved = Store.prefs(context).getStringSet("online_languages_v1", setOf("Tamil", "English")) ?: setOf("Tamil", "English")
+        mutableStateOf(saved)
+    }
+
+    // Track user's favorite / recently played artists for personalized "For You" recommendations
+    var topPersonalArtists by remember { mutableStateOf<List<String>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val savedArtists = Store.prefs(context).getString("recent_online_artists_v1", "")
+                ?.split("|")?.map { it.trim() }?.filter { it.isNotBlank() }.orEmpty()
+            val historyArtists = runCatching {
+                val dao = Store.db(activity).dao()
+                val allMedia = activity.audios
+                val favUris = dao.entries("Favorites").map { it.uri }.toSet()
+                val histUris = dao.history().take(20).map { it.uri }
+                (allMedia.filter { it.uri in favUris } + histUris.mapNotNull { u -> allMedia.find { it.uri == u } })
+                    .mapNotNull { it.artist.substringBefore(",").trim().takeIf { a -> a.length > 2 && !a.equals("Unknown", true) && !a.equals("Unknown Artist", true) } }
+            }.getOrDefault(emptyList())
+            val merged = (savedArtists + historyArtists).distinct().take(4)
+            withContext(Dispatchers.Main) { topPersonalArtists = merged }
+        }
+    }
+
+    val themeVibeLabel = when (palette.mode) {
+        AppThemeMode.WHITE_LIQUID_GLASS -> "Crystal Light Vibes • Personalized"
+        AppThemeMode.LIGHT -> "Daylight Energy • Personalized"
+        AppThemeMode.DARK_LIQUID_GLASS -> "Midnight Glass Vibes • Personalized"
+        AppThemeMode.DARK -> "Deep Obsidian Mix • Personalized"
+    }
+
+    val categories = remember(palette.mode) {
+        when (palette.mode) {
+            AppThemeMode.WHITE_LIQUID_GLASS -> listOf("✨ For You", "☀️ Crystal Pop", "🎸 Acoustic Glass", "🌿 Fresh Morning", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Bollywood")
+            AppThemeMode.LIGHT -> listOf("✨ For You", "☀️ Daylight Hits", "🎵 Feel Good", "🎸 Acoustic", "Popular Artists", "Tamil Hits", "English Pop", "Trending", "Kollywood")
+            AppThemeMode.DARK_LIQUID_GLASS -> listOf("✨ For You", "🌙 Midnight Glass", "🌌 Lo-Fi Chill", "🔊 Deep Bass", "Popular Artists", "Tamil OST & BGM", "Trending", "Kollywood", "EDM")
+            AppThemeMode.DARK -> listOf("✨ For You", "🖤 Night Drive", "🔥 Mass BGM", "🎧 Hip-Hop & EDM", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Lo-Fi")
+        }
+    }
+
+    fun recordPlayedArtist(artistName: String) {
+        val primary = artistName.substringBefore(",").substringBefore("•").trim()
+        if (primary.length < 3 || primary.equals("Unknown", true) || primary.equals("YouTube Music", true)) return
+        val updated = (listOf(primary) + topPersonalArtists.filterNot { it.equals(primary, true) }).take(6)
+        topPersonalArtists = updated
+        Store.prefs(context).edit().putString("recent_online_artists_v1", updated.joinToString("|")).apply()
+    }
+
+    fun openPlaylist(playlist: PlaylistCard) {
+        selectedPlaylist = playlist
+        isLoadingPlaylistTracks = true
+        scope.launch {
+            val tracks = when {
+                playlist.listId.startsWith("VL") || playlist.listId.startsWith("PL") || playlist.listId.startsWith("RD") || playlist.listId.startsWith("MPREb_") -> {
+                    YtMusicClient.fetchPlaylistTracks(playlist.listId)
+                }
+                playlist.listId.isNotBlank() -> {
+                    val jioTracks = JioSaavnClient.fetchPlaylistTracks(playlist.listId)
+                    if (jioTracks.isNotEmpty()) jioTracks else YtMusicClient.fetchPlaylistTracks(playlist.listId)
+                }
+                else -> {
+                    YtMusicClient.searchSongs(playlist.searchQuery.ifBlank { playlist.title })
+                }
+            }
+            playlistTracks = tracks
+            isLoadingPlaylistTracks = false
+        }
+    }
+
+    fun playTrack(track: YtTrack) {
+        // Cancel any previous pending tap resolution so rapid taps never collide or fail silently
+        activePlayJob?.cancel()
+        val requestId = track.videoId
+        loadingTrackId = requestId
+        recordPlayedArtist(track.artist)
+        activePlayJob = activity.lifecycleScope.launch {
+            try {
+                // High-speed Backend Dual Engine (JioSaavn 320k primary + YT Music iOS/Android/VR fallback)
+                val resolved = AudioStreamResolver.resolveBestStream(
+                    title = track.title,
+                    artist = track.artist,
+                    ytVideoId = track.videoId,
+                    rawThumbUrl = track.thumbUrl,
+                    directStreamUrl = track.directStreamUrl
+                )
+                if (resolved != null && service != null) {
+                    val mediaItem = MediaItem(
+                        uri = resolved.streamUrl,
+                        title = track.title,
+                        artist = track.artist,
+                        audio = true,
+                        thumbUri = resolved.hdThumbUrl.ifBlank { track.thumbUrl },
+                        sourceVideoId = track.videoId,
+                        streamUserAgent = resolved.userAgent,
+                    )
+                    service.open(listOf(mediaItem), mediaItem, autoPlay = true)
+                    activity.showPlayer = true
+                } else {
+                    Toast.makeText(context, "Could not stream audio track — retrying alternate engine", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } finally {
+                if (loadingTrackId == requestId) {
+                    loadingTrackId = null
+                }
+            }
+        }
+    }
+
+    fun playAllPlaylist(tracks: List<YtTrack>) {
+        if (tracks.isEmpty() || service == null) return
+        activePlayJob?.cancel()
+        val first = tracks.first()
+        loadingTrackId = first.videoId
+        recordPlayedArtist(first.artist)
+        activePlayJob = activity.lifecycleScope.launch {
+            try {
+                val items = tracks.map { t ->
+                    val lazyUri = t.directStreamUrl.takeIf { it.startsWith("http") }
+                        ?: if (t.videoId.startsWith("saavn_")) t.videoId else "yt_${t.videoId}"
+                    MediaItem(
+                        uri = lazyUri,
+                        title = t.title,
+                        artist = t.artist,
+                        audio = true,
+                        thumbUri = t.thumbUrl,
+                        sourceVideoId = t.videoId,
+                    )
+                }
+                val resolved = AudioStreamResolver.resolveBestStream(
+                    first.title, first.artist, first.videoId, first.thumbUrl, first.directStreamUrl
+                )
+                if (resolved != null) {
+                    val playable = items.toMutableList()
+                    playable[0] = MediaItem(
+                        uri = resolved.streamUrl,
+                        title = first.title,
+                        artist = first.artist,
+                        audio = true,
+                        thumbUri = resolved.hdThumbUrl.ifBlank { first.thumbUrl },
+                        sourceVideoId = first.videoId,
+                        streamUserAgent = resolved.userAgent,
+                    )
+                    service.open(playable, playable[0], autoPlay = true)
+                    activity.showPlayer = true
+                } else {
+                    Toast.makeText(context, "Could not start playlist playback", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } finally {
+                if (loadingTrackId == first.videoId) loadingTrackId = null
+            }
+        }
+    }
 
     fun performSearch(q: String) {
         if (q.isBlank()) return
         focusManager.clearFocus()
         isSearching = true
         scope.launch {
-            val results = YtMusicClient.searchSongs(q)
-            searchResults = results
-            isSearching = false
-        }
-    }
-
-    // Load initial trending tracks
-    LaunchedEffect(Unit) {
-        if (trendingTracks.isEmpty()) {
-            isSearching = true
-            val initial = YtMusicClient.getTrending()
-            trendingTracks = initial
-            if (searchResults.isEmpty()) {
-                searchResults = initial
-            }
-            isSearching = false
-        }
-    }
-
-    fun playTrack(track: YtTrack) {
-        if (resolvingTrackId != null) return
-        resolvingTrackId = track.videoId
-        scope.launch {
-            val streamUrl = YtMusicClient.resolveStreamUrl(track.videoId)
-            resolvingTrackId = null
-            if (streamUrl != null && service != null) {
-                val mediaItem = MediaItem(
-                    uri = streamUrl,
-                    title = track.title,
-                    artist = track.artist,
-                    audio = true,
-                    thumbUri = track.thumbUrl,
-                )
-                service.open(listOf(mediaItem), mediaItem, autoPlay = true)
-                activity.showPlayer = true
+            if (activeCategory == "Playlists") {
+                val jioDef = async { JioSaavnClient.searchPlaylists(q) }
+                val ytDef = async { YtMusicClient.searchPlaylists(q) }
+                val jio = runCatching { jioDef.await() }.getOrDefault(emptyList())
+                val yt = runCatching { ytDef.await() }.getOrDefault(emptyList())
+                searchedPlaylists = (yt + jio).distinctBy { it.title.lowercase() }
             } else {
-                Toast.makeText(context, "Could not stream audio track", Toast.LENGTH_SHORT).show()
+                val results = YtMusicClient.searchSongs(q)
+                searchResults = results
+                // Background pre-fetch playlists for seamless instant filter toggle
+                launch {
+                    val jioDef = async { JioSaavnClient.searchPlaylists(q) }
+                    val ytDef = async { YtMusicClient.searchPlaylists(q) }
+                    val jio = runCatching { jioDef.await() }.getOrDefault(emptyList())
+                    val yt = runCatching { ytDef.await() }.getOrDefault(emptyList())
+                    searchedPlaylists = (yt + jio).distinctBy { it.title.lowercase() }
+                }
+                // High-speed pre-resolution of top 3 tracks in background for instant 0ms tap start
+                activity.lifecycleScope.launch(Dispatchers.IO) {
+                    results.take(3).forEach { track ->
+                        AudioStreamResolver.resolveBestStream(track.title, track.artist, track.videoId, track.thumbUrl, track.directStreamUrl)
+                    }
+                }
             }
+            isSearching = false
+        }
+    }
+
+    fun loadCategoryTracks(cat: String) {
+        if (cat == "Playlists") {
+            selectedPlaylist = null
+            if (searchQuery.isNotBlank()) {
+                performSearch(searchQuery)
+            }
+            return
+        }
+        val personalSeed = topPersonalArtists.take(2).joinToString(" ")
+        val langHint = selectedLanguages.take(2).joinToString(" ")
+        val themeHint = when (palette.mode) {
+            AppThemeMode.WHITE_LIQUID_GLASS -> "Acoustic Feel Good Pop"
+            AppThemeMode.LIGHT -> "Upbeat Bright Hits"
+            AppThemeMode.DARK_LIQUID_GLASS -> "Chill Midnight Lo-Fi"
+            AppThemeMode.DARK -> "Bass Mass BGM"
+        }
+        val query = when (cat) {
+            "Home" -> {
+                if (personalSeed.isNotBlank()) "$personalSeed $langHint Top Hits 2026"
+                else if ("Tamil" in selectedLanguages && "English" in selectedLanguages) "Top Tamil English Hits 2026 Anirudh"
+                else if ("Tamil" in selectedLanguages) "Latest Tamil Hit Songs 2026"
+                else "Top Global Hits 2026"
+            }
+            "✨ For You" -> {
+                if (personalSeed.isNotBlank()) "$personalSeed $themeHint Mix"
+                else "$langHint $themeHint 2026"
+            }
+            "☀️ Crystal Pop", "☀️ Daylight Hits" -> "$langHint Bright Pop Feel Good Songs 2026"
+            "🎸 Acoustic Glass", "🎸 Acoustic" -> "$langHint Acoustic Unplugged Melody Hits"
+            "🌿 Fresh Morning" -> "$langHint Fresh Morning Chill Melodies"
+            "🎵 Feel Good" -> "$langHint Happy Feel Good Hits 2026"
+            "🌙 Midnight Glass" -> "$langHint Late Night Chill Slowed Melodies"
+            "🌌 Lo-Fi Chill", "Lo-Fi" -> "$langHint Lo-Fi Chill Slowed Reverb"
+            "🔊 Deep Bass" -> "$langHint Deep Bass Boosted EDM Hits"
+            "🖤 Night Drive" -> "$langHint Night Drive Synthwave Chill Hits"
+            "🔥 Mass BGM", "Tamil OST & BGM" -> "Anirudh Vikram Jailer Leo Mass BGM OST"
+            "🎧 Hip-Hop & EDM" -> "Top Hip Hop EDM Party Hits 2026"
+            "Top Hits" -> "Top 50 Chartbusters 2026"
+            "Popular Artists" -> "Anirudh AR Rahman Harris Jayaraj Best Hits"
+            "Tamil Hits" -> "Latest Tamil Hit Songs 2026 Anirudh"
+            "English Pop" -> "Top English Pop Hits 2026"
+            "Trending" -> "Viral Trending Songs 2026"
+            "Kollywood" -> "Kollywood Hitlist Anirudh AR Rahman Yuvan"
+            "Bollywood" -> "Top Bollywood Songs Arijit Singh"
+            "EDM" -> "EDM Party Hits 2026"
+            else -> "$cat Songs 2026"
+        }
+        performSearch(query)
+    }
+
+    // Initial load & refresh when theme or language changes on Home
+    LaunchedEffect(selectedLanguages, palette.mode) {
+        if (searchResults.isEmpty() || (activeCategory == "✨ For You" && searchQuery.isBlank())) {
+            loadCategoryTracks(activeCategory)
+        }
+    }
+
+    // Dock tab tap returns to root
+    LaunchedEffect(activity.onlineResetTrigger) {
+        if (activity.onlineResetTrigger > 0) {
+            searchQuery = ""
+            selectedPlaylist = null
+            activeCategory = "Home"
+            loadCategoryTracks("Home")
         }
     }
 
@@ -148,36 +385,38 @@ fun OnlineMusicScreen(
             .fillMaxSize()
             .padding(bottom = bottomPadding)
     ) {
-        // Top Search Bar
+        // Clean, Full-Width Liquid Glass Search Bar
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(24.dp)),
+                shape = RoundedCornerShape(26.dp),
+                modifier = Modifier.weight(1f),
                 placeholder = {
                     Text(
-                        "Search YouTube Music...",
+                        if (activeCategory == "Playlists") "Search Playlists..." else "Search Songs & Artists...",
                         color = palette.textSecondary.copy(alpha = 0.7f),
                         fontSize = 14.sp
                     )
                 },
                 leadingIcon = {
-                    Icon(Icons.Default.Search, null, tint = palette.accent)
+                    IconButton(onClick = { performSearch(searchQuery) }) {
+                        Icon(Icons.Rounded.Search, "Search", tint = palette.accent)
+                    }
                 },
                 trailingIcon = {
                     if (searchQuery.isNotEmpty()) {
                         IconButton(onClick = {
                             searchQuery = ""
-                            searchResults = trendingTracks
+                            selectedPlaylist = null
+                            loadCategoryTracks(activeCategory)
                         }) {
-                            Icon(Icons.Default.Close, null, tint = palette.textSecondary)
+                            Icon(Icons.Rounded.Close, null, tint = palette.textSecondary)
                         }
                     }
                 },
@@ -186,58 +425,288 @@ fun OnlineMusicScreen(
                 keyboardActions = KeyboardActions(onSearch = { performSearch(searchQuery) }),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = palette.accent,
-                    unfocusedBorderColor = if (glassEnabled) Color.White.copy(alpha = 0.15f) else palette.cardBorder,
-                    focusedContainerColor = if (glassEnabled) Color.White.copy(alpha = 0.06f) else palette.surface,
-                    unfocusedContainerColor = if (glassEnabled) Color.White.copy(alpha = 0.04f) else palette.surface,
+                    unfocusedBorderColor = if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.90f) else if (glassEnabled) Color.White.copy(alpha = 0.18f) else palette.cardBorder,
+                    focusedContainerColor = if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.80f) else if (glassEnabled) Color.White.copy(alpha = 0.08f) else palette.surface,
+                    unfocusedContainerColor = if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.65f) else if (glassEnabled) Color.White.copy(alpha = 0.04f) else palette.surface,
                     focusedTextColor = palette.textPrimary,
                     unfocusedTextColor = palette.textPrimary,
                 ),
             )
-            Spacer(Modifier.width(8.dp))
-            IconButton(
-                onClick = { performSearch(searchQuery) },
-                modifier = Modifier
-                    .clip(CircleShape)
-                    .background(palette.accent)
-                    .size(46.dp)
-            ) {
-                Icon(Icons.Default.ArrowForward, "Search", tint = Color.Black)
-            }
         }
 
-        // Category Chips
+        // Category & Language Chips Row with Liquid Glass Surfaces
         LazyRow(
             Modifier.fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
+            val chipShape = RoundedCornerShape(18.dp)
+
+            // 1. Dedicated [🏠 Home] Chip
+            item(key = "home_chip") {
+                val isHome = activeCategory == "Home" && searchQuery.isBlank() && selectedPlaylist == null
+                Box(
+                    modifier = Modifier
+                        .liquidGlassSurface(
+                            backdrop = null,
+                            enabled = glassEnabled,
+                            shape = chipShape,
+                            tint = if (isHome) palette.accent.copy(alpha = if (palette.isLight) 0.20f else 0.32f) else if (palette.isLight) Color.White.copy(alpha = 0.78f) else Color.White.copy(alpha = 0.08f),
+                            blurRadius = 8.dp,
+                            refractionHeight = 8.dp,
+                            refractionAmount = 14.dp,
+                            fallbackColor = if (isHome) palette.accent else palette.surface,
+                            isLight = palette.isLight,
+                        )
+                        .border(
+                            width = if (isHome) 1.2.dp else 0.8.dp,
+                            brush = if (isHome) Brush.linearGradient(listOf(palette.accent, palette.accentSecondary)) else liquidSpecularBrush(isLight = palette.isLight),
+                            shape = chipShape
+                        )
+                        .clickable {
+                            activeCategory = "Home"
+                            searchQuery = ""
+                            selectedPlaylist = null
+                            loadCategoryTracks("Home")
+                        }
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("🏠 ", fontSize = 12.sp)
+                        Text(
+                            "Home",
+                            color = if (isHome) (if (!glassEnabled) palette.onAccent else if (palette.isLight) palette.accent else Color.White) else palette.textPrimary,
+                            fontSize = 12.5.sp,
+                            fontWeight = if (isHome) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            // 2. Dedicated [🔥 Top Hits] Chip
+            item(key = "top_hits_chip") {
+                val isTop = activeCategory == "Top Hits" && searchQuery.isBlank() && selectedPlaylist == null
+                Box(
+                    modifier = Modifier
+                        .liquidGlassSurface(
+                            backdrop = null,
+                            enabled = glassEnabled,
+                            shape = chipShape,
+                            tint = if (isTop) palette.accent.copy(alpha = if (palette.isLight) 0.20f else 0.32f) else if (palette.isLight) Color.White.copy(alpha = 0.78f) else Color.White.copy(alpha = 0.08f),
+                            blurRadius = 8.dp,
+                            refractionHeight = 8.dp,
+                            refractionAmount = 14.dp,
+                            fallbackColor = if (isTop) palette.accent else palette.surface,
+                            isLight = palette.isLight,
+                        )
+                        .border(
+                            width = if (isTop) 1.2.dp else 0.8.dp,
+                            brush = if (isTop) Brush.linearGradient(listOf(palette.accent, palette.accentSecondary)) else liquidSpecularBrush(isLight = palette.isLight),
+                            shape = chipShape
+                        )
+                        .clickable {
+                            activeCategory = "Top Hits"
+                            searchQuery = ""
+                            selectedPlaylist = null
+                            loadCategoryTracks("Top Hits")
+                        }
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("🔥 ", fontSize = 12.sp)
+                        Text(
+                            "Top Hits",
+                            color = if (isTop) (if (!glassEnabled) palette.onAccent else if (palette.isLight) palette.accent else Color.White) else palette.textPrimary,
+                            fontSize = 12.5.sp,
+                            fontWeight = if (isTop) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            // 3. Dedicated [📁 Playlists] Chip
+            item(key = "playlists_chip") {
+                val isPlaylists = activeCategory == "Playlists" && selectedPlaylist == null
+                Box(
+                    modifier = Modifier
+                        .liquidGlassSurface(
+                            backdrop = null,
+                            enabled = glassEnabled,
+                            shape = chipShape,
+                            tint = if (isPlaylists) palette.accent.copy(alpha = if (palette.isLight) 0.20f else 0.32f) else if (palette.isLight) Color.White.copy(alpha = 0.78f) else Color.White.copy(alpha = 0.08f),
+                            blurRadius = 8.dp,
+                            refractionHeight = 8.dp,
+                            refractionAmount = 14.dp,
+                            fallbackColor = if (isPlaylists) palette.accent else palette.surface,
+                            isLight = palette.isLight,
+                        )
+                        .border(
+                            width = if (isPlaylists) 1.2.dp else 0.8.dp,
+                            brush = if (isPlaylists) Brush.linearGradient(listOf(palette.accent, palette.accentSecondary)) else liquidSpecularBrush(isLight = palette.isLight),
+                            shape = chipShape
+                        )
+                        .clickable {
+                            if (activeCategory == "Playlists") {
+                                activeCategory = "Home"
+                                if (searchQuery.isNotBlank()) performSearch(searchQuery) else loadCategoryTracks("Home")
+                            } else {
+                                activeCategory = "Playlists"
+                                selectedPlaylist = null
+                                if (searchQuery.isNotBlank() && searchedPlaylists.isEmpty()) {
+                                    performSearch(searchQuery)
+                                }
+                            }
+                        }
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("📁 ", fontSize = 12.sp)
+                        Text(
+                            "Playlists",
+                            color = if (isPlaylists) (if (!glassEnabled) palette.onAccent else if (palette.isLight) palette.accent else Color.White) else palette.textPrimary,
+                            fontSize = 12.5.sp,
+                            fontWeight = if (isPlaylists) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+
+            // 4. Theme-Aware & Personalized Category Chips
             items(categories) { cat ->
-                val isSelected = activeCategory == cat
+                val isSelected = activeCategory == cat && searchQuery.isBlank() && selectedPlaylist == null
                 val chipSrc = remember { MutableInteractionSource() }
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(
-                            if (isSelected) palette.accent else if (glassEnabled) Color.White.copy(alpha = 0.08f) else palette.surface
+                        .liquidGlassSurface(
+                            backdrop = null,
+                            enabled = glassEnabled,
+                            shape = chipShape,
+                            tint = if (isSelected) palette.accent.copy(alpha = if (palette.isLight) 0.20f else 0.32f) else if (palette.isLight) Color.White.copy(alpha = 0.78f) else Color.White.copy(alpha = 0.08f),
+                            blurRadius = 8.dp,
+                            refractionHeight = 8.dp,
+                            refractionAmount = 14.dp,
+                            fallbackColor = if (isSelected) palette.accent else palette.surface,
+                            isLight = palette.isLight,
                         )
-                        .clickable(interactionSource = chipSrc, indication = ripple()) {
+                        .border(
+                            width = if (isSelected) 1.2.dp else 0.8.dp,
+                            brush = if (isSelected) Brush.linearGradient(listOf(palette.accent, palette.accentSecondary)) else liquidSpecularBrush(isLight = palette.isLight),
+                            shape = chipShape
+                        )
+                        .clickable(interactionSource = chipSrc, indication = null) {
                             activeCategory = cat
-                            searchQuery = cat
-                            performSearch(cat)
+                            searchQuery = ""
+                            selectedPlaylist = null
+                            loadCategoryTracks(cat)
                         }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
                 ) {
                     Text(
                         cat,
-                        color = if (isSelected) Color.Black else palette.textPrimary,
-                        fontSize = 13.sp,
+                        color = if (isSelected) (if (!glassEnabled) palette.onAccent else if (palette.isLight) palette.accent else Color.White) else palette.textPrimary,
+                        fontSize = 12.5.sp,
                         fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                     )
                 }
             }
+
+            // 5. Clean Universal [🌐 Languages ▾] Chip (At the end)
+            item(key = "lang_filter") {
+                Box(
+                    modifier = Modifier
+                        .liquidGlassSurface(
+                            backdrop = null,
+                            enabled = glassEnabled,
+                            shape = chipShape,
+                            tint = palette.accent.copy(alpha = 0.16f),
+                            blurRadius = 8.dp,
+                            fallbackColor = palette.surface,
+                        )
+                        .border(1.dp, palette.accent.copy(alpha = 0.5f), chipShape)
+                        .clickable { showLanguageModal = true }
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("🌐 ", fontSize = 12.sp)
+                        Text(
+                            "Languages ▾",
+                            color = palette.accent,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            }
+
+            // 6. Google Account Status Chip (At the end)
+            item(key = "google_auth") {
+                Box(
+                    modifier = Modifier
+                        .liquidGlassSurface(
+                            backdrop = null,
+                            enabled = glassEnabled,
+                            shape = chipShape,
+                            tint = if (googleSignedIn) palette.accent.copy(alpha = 0.20f) else if (palette.isLight) Color.White.copy(alpha = 0.70f) else Color.White.copy(alpha = 0.08f),
+                            blurRadius = 8.dp,
+                            fallbackColor = palette.surface,
+                        )
+                        .border(
+                            1.dp,
+                            if (googleSignedIn) palette.accent.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.15f),
+                            chipShape
+                        )
+                        .clickable {
+                            if (googleSignedIn) {
+                                showGoogleSignOutConfirm = true
+                            } else {
+                                showGoogleAuthModal = true
+                            }
+                        }
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (googleSignedIn) "👤 Google: Active" else "👤 Google Sign In",
+                            color = if (googleSignedIn) palette.accent else palette.textPrimary,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
+            // 7. [⬇️ Downloads] Chip (At the end)
+            item(key = "downloads_chip") {
+                Box(
+                    modifier = Modifier
+                        .liquidGlassSurface(
+                            backdrop = null,
+                            enabled = glassEnabled,
+                            shape = chipShape,
+                            tint = if (palette.isLight) Color.White.copy(alpha = 0.70f) else Color.White.copy(alpha = 0.08f),
+                            blurRadius = 8.dp,
+                            fallbackColor = palette.surface,
+                        )
+                        .border(1.dp, Color.White.copy(alpha = 0.15f), chipShape)
+                        .clickable { onNavigateToTab("Library") }
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("⬇️ ", fontSize = 12.sp)
+                        Text(
+                            "Downloads",
+                            color = palette.textPrimary,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
         }
 
-        if (isSearching) {
+        // Loading or Results
+        if (isSearching && searchResults.isEmpty() && searchedPlaylists.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(
@@ -247,31 +716,8 @@ fun OnlineMusicScreen(
                     )
                     Spacer(Modifier.height(14.dp))
                     Text(
-                        "Connecting to YouTube Music...",
+                        "Connecting to Online Music...",
                         color = palette.textSecondary,
-                        fontSize = 14.sp
-                    )
-                }
-            }
-        } else if (searchResults.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        Icons.Default.MusicOff,
-                        null,
-                        tint = palette.textSecondary.copy(alpha = 0.4f),
-                        modifier = Modifier.size(64.dp)
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Text(
-                        "No songs found",
-                        color = palette.textSecondary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        "Try another search keyword or category",
-                        color = palette.textSecondary.copy(alpha = 0.7f),
                         fontSize = 13.sp
                     )
                 }
@@ -280,126 +726,508 @@ fun OnlineMusicScreen(
             LazyColumn(
                 Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // If trending exists and not searching, show horizontal featured spotlight
-                if (trendingTracks.isNotEmpty() && searchQuery.isEmpty()) {
-                    item {
-                        Text(
-                            "Trending Spotlight",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.textPrimary,
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        )
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            contentPadding = PaddingValues(vertical = 4.dp)
+                if (selectedPlaylist != null) {
+                    // Dedicated Playlist Detail View
+                    val playlist = selectedPlaylist!!
+                    item(key = "playlist_detail_header") {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 6.dp)
                         ) {
-                            items(trendingTracks.take(8), key = { "spotlight_${it.videoId}" }) { t ->
-                                SpotlightCard(
-                                    track = t,
-                                    palette = palette,
-                                    isResolving = resolvingTrackId == t.videoId,
-                                    onClick = { playTrack(t) }
-                                )
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(onClick = { selectedPlaylist = null }) {
+                                    Icon(Icons.Rounded.ArrowBack, "Back", tint = palette.textPrimary)
+                                }
+                                Spacer(Modifier.width(4.dp))
+                                Text("Featured Playlist", color = palette.textSecondary, fontSize = 13.sp)
+                            }
+
+                            Spacer(Modifier.height(6.dp))
+
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val bmp = rememberRemoteBitmap(playlist.coverUrl)
+                                val coverShape = RoundedCornerShape(16.dp)
+                                Box(
+                                    Modifier
+                                        .size(108.dp)
+                                        .clip(coverShape)
+                                        .background(Color(0xFF1E293B))
+                                        .border(1.2.dp, liquidSpecularBrush(), coverShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (bmp != null) {
+                                        Image(bmp.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                    } else {
+                                        Icon(Icons.Rounded.QueueMusic, null, tint = palette.accent, modifier = Modifier.size(44.dp))
+                                    }
+                                }
+
+                                Spacer(Modifier.width(14.dp))
+
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        playlist.title,
+                                        color = palette.textPrimary,
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        playlist.subtitle,
+                                        color = palette.textSecondary,
+                                        fontSize = 12.5.sp,
+                                        maxLines = 1
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        "${if (playlistTracks.isNotEmpty()) playlistTracks.size else playlist.songCount.coerceAtLeast(1)} Tracks • 320kbps High Fidelity",
+                                        color = palette.accent,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+
+                            Spacer(Modifier.height(12.dp))
+
+                            Button(
+                                onClick = { playAllPlaylist(playlistTracks) },
+                                colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent),
+                                shape = RoundedCornerShape(24.dp),
+                                modifier = Modifier.fillMaxWidth().height(46.dp)
+                            ) {
+                                Icon(Icons.Rounded.PlayArrow, null, tint = palette.onAccent, modifier = Modifier.size(22.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Play All (${playlistTracks.size} Tracks)", color = palette.onAccent, fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
                             }
                         }
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            "Top Results",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.textPrimary,
-                            modifier = Modifier.padding(bottom = 4.dp)
+                    }
+
+                    if (isLoadingPlaylistTracks) {
+                        item(key = "playlist_loading") {
+                            Box(
+                                Modifier.fillMaxWidth().height(180.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                CircularProgressIndicator(color = palette.accent, modifier = Modifier.size(32.dp))
+                            }
+                        }
+                    } else {
+                        items(playlistTracks, key = { it.videoId }) { track ->
+                            val dlProgress = activeDownloads[track.videoId]
+                            val isPlaying = playerState.playing && playerState.item?.title == track.title
+                            OnlineTrackRow(
+                                track = track,
+                                palette = palette,
+                                glassEnabled = glassEnabled,
+                                isLoading = loadingTrackId == track.videoId,
+                                isDownloading = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed,
+                                isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
+                                dlProgress = dlProgress?.progress ?: 0f,
+                                isPlaying = isPlaying,
+                                onPlay = { playTrack(track) },
+                                onDownload = {
+                                    AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
+                                }
+                            )
+                        }
+                    }
+                } else if (activeCategory == "Playlists") {
+                    val playlistsToShow = if (searchQuery.isNotBlank() && searchedPlaylists.isNotEmpty()) searchedPlaylists else YtMusicClient.getCuratedPlaylists()
+                    item(key = "curated_playlists_hdr") {
+                        Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 4.dp)) {
+                            Text("Curated Collections & Playlists", color = palette.textSecondary, fontSize = 12.sp)
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                if (searchQuery.isNotBlank()) "Playlist Results for \"$searchQuery\"" else "Featured Playlists",
+                                color = palette.textPrimary,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    items(playlistsToShow, key = { it.title + it.listId }) { playlist ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.72f) else if (glassEnabled) Color.White.copy(alpha = 0.05f) else palette.surface)
+                                .border(0.8.dp, if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.92f) else if (glassEnabled) Color.White.copy(alpha = 0.10f) else palette.cardBorder, RoundedCornerShape(16.dp))
+                                .clickable {
+                                    openPlaylist(playlist)
+                                }
+                                .padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val bmp = rememberRemoteBitmap(playlist.coverUrl)
+                            Box(
+                                Modifier
+                                    .size(60.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (palette.isLight) Color(0xFFE0F2FE) else Color(0xFF222B38)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (bmp != null) {
+                                    Image(bmp.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                } else {
+                                    Icon(Icons.Rounded.QueueMusic, null, tint = palette.accent, modifier = Modifier.size(28.dp))
+                                }
+                            }
+                            Spacer(Modifier.width(14.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(playlist.title, color = palette.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(2.dp))
+                                Text(playlist.subtitle, color = palette.textSecondary, fontSize = 12.sp)
+                            }
+                            Icon(Icons.Rounded.ChevronRight, null, tint = palette.textSecondary, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                } else if ((activeCategory == "Home" || activeCategory == "Top Hits") && searchQuery.isBlank() && searchResults.isNotEmpty()) {
+                    // Section 1: "Quick Picks & Hits" (Top 8 songs, Theme-Aware & Personalized)
+                    item(key = "home_start_listening_hdr") {
+                        Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 4.dp)) {
+                            Text(
+                                if (topPersonalArtists.isNotEmpty()) "$themeVibeLabel • ${topPersonalArtists.first()}" else themeVibeLabel,
+                                color = palette.accent,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text("Quick Picks & Hits", color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    val topPicks = searchResults.take(8)
+                    items(topPicks, key = { "pick_${it.videoId}" }) { track ->
+                        val dlProgress = activeDownloads[track.videoId]
+                        val isPlaying = playerState.playing && playerState.item?.title == track.title
+                        OnlineTrackRow(
+                            track = track,
+                            palette = palette,
+                            glassEnabled = glassEnabled,
+                            isLoading = loadingTrackId == track.videoId,
+                            isDownloading = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed,
+                            isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
+                            dlProgress = dlProgress?.progress ?: 0f,
+                            isPlaying = isPlaying,
+                            onPlay = { playTrack(track) },
+                            onDownload = {
+                                AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
+                            }
                         )
                     }
-                }
 
-                items(searchResults, key = { it.videoId }) { track ->
-                    OnlineTrackRow(
-                        track = track,
-                        palette = palette,
-                        glassEnabled = glassEnabled,
-                        isResolving = resolvingTrackId == track.videoId,
-                        onClick = { playTrack(track) }
-                    )
+                    // Section 2: "Popular Artists" (Real portrait headshots)
+                    item(key = "home_popular_artists_hdr") {
+                        Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
+                            Text("Popular Artists", color = palette.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    item(key = "home_popular_artists_row") {
+                        LazyRow(
+                            Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            items(YtMusicClient.getPopularArtists()) { artist ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier
+                                        .width(96.dp)
+                                        .clickable {
+                                            searchQuery = artist.searchQuery
+                                            performSearch(artist.searchQuery)
+                                        }
+                                ) {
+                                    val bmp = rememberRemoteBitmap(artist.avatarUrl)
+                                    Box(
+                                        Modifier
+                                            .size(80.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(0xFF222B38))
+                                            .border(1.5.dp, palette.accent.copy(alpha = 0.5f), CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (bmp != null) {
+                                            Image(bmp.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                        } else {
+                                            Icon(Icons.Rounded.AccountCircle, null, tint = palette.accent, modifier = Modifier.size(36.dp))
+                                        }
+                                    }
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(artist.name, color = palette.textPrimary, fontSize = 12.5.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(artist.subtitle, color = palette.textSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                    }
+
+                    // Section 3: "Featured Playlists Carousel"
+                    item(key = "home_playlists_carousel_hdr") {
+                        Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
+                            Text("Featured Playlists & Collections", color = palette.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    item(key = "home_playlists_carousel_row") {
+                        LazyRow(
+                            Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            items(YtMusicClient.getCuratedPlaylists()) { playlist ->
+                                Column(
+                                    modifier = Modifier
+                                        .width(136.dp)
+                                        .clickable {
+                                            openPlaylist(playlist)
+                                        }
+                                ) {
+                                    val bmp = rememberRemoteBitmap(playlist.coverUrl)
+                                    val plShape = RoundedCornerShape(16.dp)
+                                    Box(
+                                        Modifier
+                                            .size(136.dp)
+                                            .clip(plShape)
+                                            .background(Color(0xFF222B38))
+                                            .border(1.dp, liquidSpecularBrush(), plShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (bmp != null) {
+                                            Image(bmp.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                        } else {
+                                            Icon(Icons.Rounded.QueueMusic, null, tint = palette.accent, modifier = Modifier.size(36.dp))
+                                        }
+                                    }
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(playlist.title, color = palette.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(playlist.subtitle, color = palette.textSecondary, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                    }
+
+                    // Section 4: "Trending Hits" (Remaining 20+ songs)
+                    item(key = "home_trending_hdr") {
+                        Column(Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 8.dp)) {
+                            Text("Trending & Recommended Hits", color = palette.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    val remaining = searchResults.drop(8)
+                    items(remaining, key = { it.videoId }) { track ->
+                        val dlProgress = activeDownloads[track.videoId]
+                        val isPlaying = playerState.playing && playerState.item?.title == track.title
+                        OnlineTrackRow(
+                            track = track,
+                            palette = palette,
+                            glassEnabled = glassEnabled,
+                            isLoading = loadingTrackId == track.videoId,
+                            isDownloading = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed,
+                            isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
+                            dlProgress = dlProgress?.progress ?: 0f,
+                            isPlaying = isPlaying,
+                            onPlay = { playTrack(track) },
+                            onDownload = {
+                                AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
+                            }
+                        )
+                    }
+
+                    // Section 5: "Popular albums and singles"
+                    item(key = "home_popular_albums_hdr") {
+                        Column(Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp)) {
+                            Text("Popular albums and singles", color = palette.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    item(key = "home_popular_albums_row") {
+                        LazyRow(
+                            Modifier.fillMaxWidth(),
+                            contentPadding = PaddingValues(horizontal = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            items(YtMusicClient.getPopularAlbums()) { album ->
+                                Column(
+                                    modifier = Modifier
+                                        .width(130.dp)
+                                        .clickable {
+                                            searchQuery = album.searchQuery
+                                            performSearch(album.searchQuery)
+                                        }
+                                ) {
+                                    val bmp = rememberRemoteBitmap(album.coverUrl)
+                                    Box(
+                                        Modifier
+                                            .size(130.dp)
+                                            .clip(RoundedCornerShape(16.dp))
+                                            .background(Color(0xFF222B38))
+                                            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        if (bmp != null) {
+                                            Image(bmp.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                        } else {
+                                            Icon(Icons.Rounded.Album, null, tint = palette.accent, modifier = Modifier.size(40.dp))
+                                        }
+                                    }
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(album.title, color = palette.textPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(album.artist, color = palette.textSecondary, fontSize = 11.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Normal Results List
+                    items(searchResults, key = { it.videoId }) { track ->
+                        val dlProgress = activeDownloads[track.videoId]
+                        val isPlaying = playerState.playing && playerState.item?.title == track.title
+                        OnlineTrackRow(
+                            track = track,
+                            palette = palette,
+                            glassEnabled = glassEnabled,
+                            isLoading = loadingTrackId == track.videoId,
+                            isDownloading = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed,
+                            isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
+                            dlProgress = dlProgress?.progress ?: 0f,
+                            isPlaying = isPlaying,
+                            onPlay = { playTrack(track) },
+                            onDownload = {
+                                AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
+                            }
+                        )
+                    }
                 }
             }
         }
     }
-}
 
-@Composable
-private fun SpotlightCard(
-    track: YtTrack,
-    palette: AppPalette,
-    isResolving: Boolean,
-    onClick: () -> Unit,
-) {
-    val bitmap = rememberRemoteBitmap(track.thumbUrl)
-    val src = remember { MutableInteractionSource() }
-
-    Box(
-        modifier = Modifier
-            .width(140.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF141A24))
-            .clickable(interactionSource = src, indication = ripple(), onClick = onClick)
-    ) {
-        Column {
-            Box(
+    // Language Selector Modal BottomSheet
+    if (showLanguageModal) {
+        ModalBottomSheet(
+            onDismissRequest = { showLanguageModal = false },
+            containerColor = if (palette.isLight) Color(0xF8F8FBFF) else if (glassEnabled) Color(0xF0121A28) else palette.surface,
+            contentColor = palette.textPrimary,
+            shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+        ) {
+            Column(
                 Modifier
                     .fillMaxWidth()
-                    .height(130.dp)
-                    .clip(RoundedCornerShape(topStart = 14.dp, topEnd = 14.dp))
-                    .background(Color.DarkGray)
+                    .padding(horizontal = 24.dp, vertical = 12.dp)
             ) {
-                if (bitmap != null) {
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.Headphones, null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(36.dp))
-                    }
-                }
-                if (isResolving) {
-                    Box(
+                Text(
+                    "Preferred Music Languages",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = palette.textPrimary
+                )
+                Text(
+                    "Select the languages you want to appear in your trending feed.",
+                    fontSize = 13.sp,
+                    color = palette.textSecondary,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
+                )
+
+                availableLanguages.forEach { lang ->
+                    val isChecked = lang in selectedLanguages
+                    Row(
                         Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.65f)),
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                val updated = if (isChecked) {
+                                    if (selectedLanguages.size > 1) selectedLanguages - lang else selectedLanguages
+                                } else {
+                                    selectedLanguages + lang
+                                }
+                                selectedLanguages = updated
+                                Store.prefs(context).edit().putStringSet("online_languages_v1", updated).apply()
+                            }
+                            .padding(vertical = 12.dp, horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        CircularProgressIndicator(
-                            color = palette.accent,
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.dp
+                        Text(
+                            lang,
+                            fontSize = 15.sp,
+                            fontWeight = if (isChecked) FontWeight.SemiBold else FontWeight.Normal,
+                            color = palette.textPrimary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Checkbox(
+                            checked = isChecked,
+                            onCheckedChange = null,
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = palette.accent,
+                                checkmarkColor = palette.onAccent
+                            )
                         )
                     }
                 }
-            }
-            Column(Modifier.padding(8.dp)) {
-                Text(
-                    track.title,
-                    color = palette.textPrimary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    track.artist,
-                    color = palette.textSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+
+                Spacer(Modifier.height(16.dp))
+                Button(
+                    onClick = {
+                        showLanguageModal = false
+                        loadCategoryTracks(activeCategory)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent),
+                    shape = RoundedCornerShape(24.dp)
+                ) {
+                    Text("Apply & Refresh Feed", fontWeight = FontWeight.Bold, color = palette.onAccent)
+                }
+                Spacer(Modifier.height(24.dp))
             }
         }
+    }
+
+    if (showGoogleAuthModal) {
+        GoogleAuthDialog(
+            onDismiss = { showGoogleAuthModal = false },
+            onAuthSuccess = {
+                googleSignedIn = true
+                showGoogleAuthModal = false
+                loadCategoryTracks(activeCategory)
+            }
+        )
+    }
+
+    if (showGoogleSignOutConfirm) {
+        LiquidGlassAlertDialog(
+            onDismissRequest = { showGoogleSignOutConfirm = false },
+            title = { Text("Google Account", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "You are currently signed in with Google. Signing out will switch YouTube Music back to high-speed guest mode.",
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    YtMusicClient.setGoogleAuthCookies(context, null)
+                    googleSignedIn = false
+                    showGoogleSignOutConfirm = false
+                    Toast.makeText(context, "Signed out of Google", Toast.LENGTH_SHORT).show()
+                    loadCategoryTracks(activeCategory)
+                }) {
+                    Text("Sign Out", color = Color(0xFFE53935), fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showGoogleSignOutConfirm = false }) {
+                    Text("Cancel", color = palette.textPrimary)
+                }
+            },
+        )
     }
 }
 
@@ -408,72 +1236,64 @@ private fun OnlineTrackRow(
     track: YtTrack,
     palette: AppPalette,
     glassEnabled: Boolean,
-    isResolving: Boolean,
-    onClick: () -> Unit,
+    isLoading: Boolean,
+    isDownloading: Boolean = false,
+    isDlComplete: Boolean = false,
+    dlProgress: Float = 0f,
+    isPlaying: Boolean = false,
+    onPlay: () -> Unit,
+    onDownload: () -> Unit = {},
 ) {
-    val bitmap = rememberRemoteBitmap(track.thumbUrl)
-    val src = remember { MutableInteractionSource() }
-
+    val rowBg = when {
+        glassEnabled && palette.isLight -> Color.White.copy(alpha = 0.72f)
+        glassEnabled -> Color.White.copy(alpha = 0.05f)
+        else -> palette.surface
+    }
+    val rowBorder = when {
+        glassEnabled && palette.isLight -> Color.White.copy(alpha = 0.92f)
+        glassEnabled -> Color.White.copy(alpha = 0.10f)
+        else -> palette.cardBorder
+    }
     Row(
-        modifier = Modifier
+        Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(
-                if (glassEnabled) Color.White.copy(alpha = 0.05f) else palette.surface
-            )
-            .clickable(interactionSource = src, indication = ripple(), onClick = onClick)
+            .clip(RoundedCornerShape(16.dp))
+            .background(rowBg)
+            .border(0.8.dp, rowBorder, RoundedCornerShape(16.dp))
+            .clickable { onPlay() }
             .padding(10.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Thumbnail
+        val bmp = rememberRemoteBitmap(track.thumbUrl)
         Box(
-            modifier = Modifier
-                .size(52.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Color.DarkGray)
+            Modifier
+                .size(54.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (palette.isLight) Color(0xFFE0F2FE) else Color(0xFF222B38)),
+            contentAlignment = Alignment.Center
         ) {
-            if (bitmap != null) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
+            if (bmp != null) {
+                Image(bmp.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
             } else {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Icon(
-                        Icons.Default.MusicNote,
-                        null,
-                        tint = palette.accent.copy(alpha = 0.7f),
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
+                Icon(Icons.Rounded.MusicNote, null, tint = palette.accent, modifier = Modifier.size(24.dp))
             }
-
-            if (isResolving) {
+            if (isLoading) {
                 Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.65f)),
+                    Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(
-                        color = palette.accent,
-                        modifier = Modifier.size(22.dp),
-                        strokeWidth = 2.dp
-                    )
+                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
                 }
             }
         }
 
         Spacer(Modifier.width(12.dp))
 
-        // Title and Artist
         Column(Modifier.weight(1f)) {
             Text(
                 track.title,
-                color = palette.textPrimary,
-                fontSize = 14.sp,
+                color = if (isPlaying) palette.accent else palette.textPrimary,
+                fontSize = 14.5.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -485,34 +1305,56 @@ private fun OnlineTrackRow(
                     color = palette.textSecondary,
                     fontSize = 12.sp,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
                 if (track.durationText.isNotBlank()) {
-                    Text(
-                        " • ${track.durationText}",
-                        color = palette.textSecondary.copy(alpha = 0.7f),
-                        fontSize = 12.sp
-                    )
+                    Text(" • ${track.durationText}", color = palette.textSecondary.copy(alpha = 0.7f), fontSize = 11.5.sp)
                 }
             }
         }
 
-        Spacer(Modifier.width(8.dp))
-
-        // Play Button
-        IconButton(
-            onClick = onClick,
+        // Circular Liquid Glass Play Action Button
+        Box(
             modifier = Modifier
-                .size(36.dp)
+                .size(38.dp)
                 .clip(CircleShape)
-                .background(palette.accent.copy(alpha = 0.12f))
+                .background(
+                    when {
+                        isPlaying -> palette.accent
+                        palette.isLight -> Color.White.copy(alpha = 0.90f)
+                        else -> Color.White.copy(alpha = 0.08f)
+                    }
+                )
+                .border(
+                    width = 0.9.dp,
+                    color = if (isPlaying) palette.accent else if (palette.isLight) palette.accent.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.18f),
+                    shape = CircleShape
+                )
+                .clickable { onPlay() },
+            contentAlignment = Alignment.Center
         ) {
-            Icon(
-                if (isResolving) Icons.Default.HourglassTop else Icons.Default.PlayArrow,
-                contentDescription = "Play",
-                tint = palette.accent,
-                modifier = Modifier.size(20.dp)
-            )
+            if (isLoading) {
+                CircularProgressIndicator(
+                    color = palette.accent,
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
+            } else if (isPlaying) {
+                Icon(
+                    Icons.Rounded.GraphicEq,
+                    contentDescription = "Playing",
+                    tint = palette.onAccent,
+                    modifier = Modifier.size(20.dp)
+                )
+            } else {
+                Icon(
+                    Icons.Rounded.PlayArrow,
+                    contentDescription = "Play song",
+                    tint = if (palette.isLight) palette.accent else Color.White,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
         }
     }
 }
