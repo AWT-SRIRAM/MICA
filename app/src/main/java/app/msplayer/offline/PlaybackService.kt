@@ -6,15 +6,17 @@ import android.graphics.Bitmap
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.MediaMetadata
-import android.media.browse.MediaBrowser
-import android.media.session.MediaSession
-import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.*
 import android.provider.MediaStore
-import android.service.media.MediaBrowserService
+import android.support.v4.media.MediaBrowserCompat
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
 import android.view.KeyEvent
+import androidx.core.app.NotificationCompat
+import androidx.media.MediaBrowserServiceCompat
+import androidx.media.app.NotificationCompat.MediaStyle as CompatMediaStyle
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.videolan.libvlc.LibVLC
@@ -82,7 +84,7 @@ class MediaButtonReceiver : BroadcastReceiver() {
     }
 }
 
-class PlaybackService : MediaBrowserService() {
+class PlaybackService : MediaBrowserServiceCompat() {
     inner class LocalBinder : Binder() {
         val service
             get() = this@PlaybackService
@@ -209,8 +211,8 @@ class PlaybackService : MediaBrowserService() {
     lateinit var player: MediaPlayer
         private set
 
-    private lateinit var session: MediaSession
-    val mediaSessionToken: MediaSession.Token
+    private lateinit var session: MediaSessionCompat
+    val mediaSessionToken: MediaSessionCompat.Token
         get() = session.sessionToken
 
     private lateinit var audioManager: AudioManager
@@ -828,16 +830,20 @@ class PlaybackService : MediaBrowserService() {
                 .setAudioAttributes(mediaAudioAttributes)
                 .setOnAudioFocusChangeListener(focusListener)
                 .build()
-        session = MediaSession(this, "MS PLAYER")
-        session.setPlaybackToLocal(mediaAudioAttributes)
-        setSessionToken(session.sessionToken)
+        val mbrComponent = ComponentName(this, MediaButtonReceiver::class.java)
         val mediaButtonPendingIntent = PendingIntent.getBroadcast(
             this,
             99,
-            Intent(Intent.ACTION_MEDIA_BUTTON).setComponent(ComponentName(this, MediaButtonReceiver::class.java)),
+            Intent(Intent.ACTION_MEDIA_BUTTON).setComponent(mbrComponent),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        session.setMediaButtonReceiver(mediaButtonPendingIntent)
+        session = MediaSessionCompat(this, "MS PLAYER", mbrComponent, mediaButtonPendingIntent)
+        session.setFlags(
+            MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+        )
+        session.setPlaybackToLocal(AudioManager.STREAM_MUSIC)
+        setSessionToken(session.sessionToken)
         val openActivityIntent = PendingIntent.getActivity(
             this,
             0,
@@ -846,7 +852,7 @@ class PlaybackService : MediaBrowserService() {
         )
         session.setSessionActivity(openActivityIntent)
         session.setCallback(
-            object : MediaSession.Callback() {
+            object : MediaSessionCompat.Callback() {
                 override fun onPlay() = play()
 
                 override fun onPause() = pause()
@@ -1219,7 +1225,7 @@ class PlaybackService : MediaBrowserService() {
 
     override fun onLoadChildren(
         parentId: String,
-        result: Result<MutableList<MediaBrowser.MediaItem>>,
+        result: Result<MutableList<MediaBrowserCompat.MediaItem>>,
     ) {
         result.sendResult(mutableListOf())
     }
@@ -2863,7 +2869,7 @@ class PlaybackService : MediaBrowserService() {
         )
 
     private fun scaleForNotification(source: Bitmap): Bitmap {
-        val maxDim = 512
+        val maxDim = 256
         val w = source.width
         val h = source.height
         if (w <= 0 || h <= 0) return source
@@ -2948,13 +2954,13 @@ class PlaybackService : MediaBrowserService() {
         val title = curItem?.title?.takeIf { it.isNotBlank() } ?: "MS PLAYER"
         val artist = curItem?.artist?.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
             ?: "MS PLAYER"
-        val builder = android.app.Notification.Builder(this, "playback")
+        val builder = NotificationCompat.Builder(this, "playback")
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle(title)
             .setContentText(artist)
             .setSubText("MS PLAYER")
-            .setCategory(android.app.Notification.CATEGORY_TRANSPORT)
-            .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
+            .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setColor(sessionArtworkColor)
             .setColorized(true)
             .setContentIntent(open)
@@ -2962,7 +2968,7 @@ class PlaybackService : MediaBrowserService() {
             .setOnlyAlertOnce(true)
             .setWhen(System.currentTimeMillis())
             .setShowWhen(false)
-            .setSound(null)
+            .setSilent(true)
             .setOngoing(state.value.playing || state.value.buffering)
             .addAction(android.R.drawable.ic_media_previous, "Previous", action("previous"))
             .addAction(
@@ -2974,7 +2980,7 @@ class PlaybackService : MediaBrowserService() {
             .addAction(android.R.drawable.ic_media_next, "Next", action("next"))
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", action("stop"))
             .setStyle(
-                android.app.Notification.MediaStyle()
+                CompatMediaStyle()
                     .setMediaSession(session.sessionToken)
                     .setShowActionsInCompactView(0, 1, 2)
             )
@@ -3092,26 +3098,21 @@ class PlaybackService : MediaBrowserService() {
             sessionArtIdentity != artIdentity
 
         if (curItem != null && metadataChanged) {
-            val metaBuilder = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_MEDIA_ID, curItem.uri)
-                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST, artist)
-                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, artist)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, album)
-                .putLong(MediaMetadata.METADATA_KEY_DURATION, dur)
+            val compactMediaId = "${curItem.uri.hashCode()}_${title.hashCode()}"
+            val metaBuilder = MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_MEDIA_ID, compactMediaId)
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ARTIST, artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album)
+                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, dur)
             if (art != null) {
-                metaBuilder
-                    .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art)
-                    .putBitmap(MediaMetadata.METADATA_KEY_ART, art)
-                    .putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, art)
+                metaBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, art)
             }
             curItem.thumbUri?.takeIf { it.startsWith("http") }?.let { httpArt ->
-                metaBuilder
-                    .putString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI, httpArt)
-                    .putString(MediaMetadata.METADATA_KEY_ART_URI, httpArt)
-                    .putString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI, httpArt)
+                metaBuilder.putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ART_URI, httpArt)
             }
             session.setMetadata(metaBuilder.build())
             sessionMediaKey = curItem.uri
@@ -3121,10 +3122,10 @@ class PlaybackService : MediaBrowserService() {
             sessionArtIdentity = artIdentity
         }
         val status = when {
-            curItem == null -> PlaybackState.STATE_STOPPED
-            value.buffering && !value.playing -> PlaybackState.STATE_BUFFERING
-            value.playing -> PlaybackState.STATE_PLAYING
-            else -> PlaybackState.STATE_PAUSED
+            curItem == null -> PlaybackStateCompat.STATE_STOPPED
+            value.buffering && !value.playing -> PlaybackStateCompat.STATE_BUFFERING
+            value.playing -> PlaybackStateCompat.STATE_PLAYING
+            else -> PlaybackStateCompat.STATE_PAUSED
         }
         val now = SystemClock.elapsedRealtime()
         // Android extrapolates the position from speed and timestamp. Avoid
@@ -3138,17 +3139,22 @@ class PlaybackService : MediaBrowserService() {
         )
             return
         session.setPlaybackState(
-            PlaybackState.Builder()
+            PlaybackStateCompat.Builder()
                 .setActions(
-                    PlaybackState.ACTION_PLAY or
-                        PlaybackState.ACTION_PAUSE or
-                        PlaybackState.ACTION_PLAY_PAUSE or
-                        PlaybackState.ACTION_SEEK_TO or
-                        PlaybackState.ACTION_SKIP_TO_NEXT or
-                        PlaybackState.ACTION_SKIP_TO_PREVIOUS or
-                        PlaybackState.ACTION_STOP
+                    PlaybackStateCompat.ACTION_PLAY or
+                        PlaybackStateCompat.ACTION_PAUSE or
+                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                        PlaybackStateCompat.ACTION_SEEK_TO or
+                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                        PlaybackStateCompat.ACTION_STOP
                 )
-                .setState(status, value.position.coerceAtLeast(0L), if (status == PlaybackState.STATE_PLAYING) value.rate else 0f)
+                .setState(
+                    status,
+                    value.position.coerceAtLeast(0L),
+                    if (status == PlaybackStateCompat.STATE_PLAYING) value.rate else 0f,
+                    now,
+                )
                 .build()
         )
         sessionStatus = status
