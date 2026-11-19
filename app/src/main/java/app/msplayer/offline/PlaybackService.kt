@@ -1301,7 +1301,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
         lastAutoQueueSeedKey = null
         externalSubtitles.clear()
         pendingStyleTracks = null
-        queue = items.ifEmpty { listOf(selected) }
+        val hasSelected = items.any { it.uri == selected.uri }
+        queue = if (hasSelected) items else listOf(selected)
         queueItems.value = queue
         index = queue.indexOfFirst { it.uri == selected.uri }.coerceAtLeast(0)
         retried = false

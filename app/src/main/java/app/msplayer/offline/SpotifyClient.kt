@@ -79,6 +79,47 @@ object SpotifyClient {
                 ?.optJSONObject("entity")
                 ?: return@withContext null
 
+            val entityType = entity.optString("type", "playlist")
+            if (entityType.equals("track", ignoreCase = true)) {
+                val trackTitle = entity.optString("name", "Spotify Track").trim()
+                val artistsArray = entity.optJSONArray("artists")
+                val artistsList = mutableListOf<String>()
+                if (artistsArray != null) {
+                    for (i in 0 until artistsArray.length()) {
+                        val a = artistsArray.optJSONObject(i)?.optString("name")?.trim()
+                        if (!a.isNullOrBlank()) artistsList.add(a)
+                    }
+                }
+                val artist = if (artistsList.isNotEmpty()) artistsList.joinToString(", ") else "Unknown Artist"
+                val duration = entity.optLong("duration", 0L).coerceAtLeast(0L)
+
+                var coverUrl = ""
+                val viImages = entity.optJSONObject("visualIdentity")?.optJSONArray("image")
+                if (viImages != null && viImages.length() > 0) {
+                    coverUrl = viImages.optJSONObject(viImages.length() - 1)?.optString("url", "") ?: ""
+                }
+                if (coverUrl.isBlank()) {
+                    val coverSources = entity.optJSONObject("coverArt")?.optJSONArray("sources")
+                    if (coverSources != null && coverSources.length() > 0) {
+                        coverUrl = coverSources.optJSONObject(coverSources.length() - 1)?.optString("url", "") ?: ""
+                    }
+                }
+
+                val track = SpotifyTrack(
+                    title = trackTitle,
+                    artist = artist,
+                    durationMs = duration,
+                    album = trackTitle,
+                    thumbUrl = coverUrl
+                )
+                return@withContext ImportedSpotify(
+                    title = trackTitle,
+                    author = artist,
+                    thumbUrl = coverUrl,
+                    tracks = listOf(track)
+                )
+            }
+
             val playlistTitle = entity.optString("name", "Spotify Playlist").trim()
             val subtitle = entity.optString("subtitle", "").trim()
             val coverSources = entity.optJSONObject("coverArt")?.optJSONArray("sources")

@@ -75,8 +75,8 @@ fun Modifier.videoGestures(
             var x = 0f; var y = 0f; var mode = 0; var target = baseTime
             var gestureZoom = zoomNow
             var speedStartX = 0f
-            var speedAnchorRate = 2.0f
-            var currentSpeedRate = 2.0f
+            var speedAnchorRate = 1.5f
+            var currentSpeedRate = 1.5f
             var lastSpeedChangeAt = 0L
             val speedDeadZonePx = 12.dp.toPx()
             try {
@@ -87,7 +87,7 @@ fun Modifier.videoGestures(
                         if (service.beginTemporarySpeed()) {
                             mode = 5
                             speedStartX = x
-                            speedAnchorRate = if (baseRate >= 2.0f) (baseRate + 0.5f).coerceAtMost(4.0f) else 2.0f
+                            speedAnchorRate = if (baseRate >= 1.5f) (baseRate + 0.5f).coerceAtMost(4.0f) else 1.5f
                             currentSpeedRate = speedAnchorRate
                             lastSpeedChangeAt = android.os.SystemClock.uptimeMillis()
                             service.temporarySpeed(currentSpeedRate)

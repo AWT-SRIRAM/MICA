@@ -199,7 +199,13 @@ class MainActivity : ComponentActivity() {
                 pendingUri?.let { uri ->
                     pendingUri = null
                     lifecycleScope.launch {
-                        val item = Library.opened(this@MainActivity, uri)
+                        val uriStr = uri.toString()
+                        val item = if (uriStr.startsWith("http://") || uriStr.startsWith("https://") || uriStr.startsWith("rtsp://") || uriStr.startsWith("intent:")) {
+                            val resolved = StreamResolver.resolve(uriStr)
+                            MediaItem(resolved.streamUrl, resolved.title, folder = "Network Streams", size = 0L, audio = !resolved.isVideo)
+                        } else {
+                            Library.opened(this@MainActivity, uri)
+                        }
                         startMedia(listOf(item), item)
                     }
                 }
@@ -599,7 +605,13 @@ class MainActivity : ComponentActivity() {
         }
         if (uriData != null) {
             lifecycleScope.launch {
-                val item = Library.opened(this@MainActivity, uriData)
+                val uriStr = uriData.toString()
+                val item = if (uriStr.startsWith("http://") || uriStr.startsWith("https://") || uriStr.startsWith("rtsp://") || uriStr.startsWith("intent:")) {
+                    val resolved = StreamResolver.resolve(uriStr)
+                    MediaItem(resolved.streamUrl, resolved.title, folder = "Network Streams", size = 0L, audio = !resolved.isVideo)
+                } else {
+                    Library.opened(this@MainActivity, uriData)
+                }
                 startMedia(listOf(item), item)
             }
         } else if (pendingStreamPrompt != null) {
@@ -1254,7 +1266,7 @@ private fun LibraryHome(
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().layerBackdrop(appBackdrop)) {
             LiquidGlassBackdropBackground(glassEnabled, mode = palette.mode)
-            Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+            Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars.only(WindowInsetsSides.Vertical))) {
                 if (tab != "Online") {
                 Row(
                     Modifier.fillMaxWidth().padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 2.dp),
@@ -1867,7 +1879,15 @@ private fun LibraryHome(
                                                                         RoundedCornerShape(16.dp),
                                                                     )
                                                                     .border(1.dp, palette.cardBorder, RoundedCornerShape(16.dp))
-                                                            else -> base
+                                                            else ->
+                                                                base
+                                                                    .padding(horizontal = 12.dp, vertical = 3.5.dp)
+                                                                    .clip(RoundedCornerShape(16.dp))
+                                                                    .background(
+                                                                        if (isCurrentFolder) palette.accent.copy(alpha = 0.18f) else Color(0xFF16181D),
+                                                                        RoundedCornerShape(16.dp),
+                                                                    )
+                                                                    .border(0.8.dp, if (isCurrentFolder) palette.accent.copy(alpha = 0.5f) else Color(0xFF262A34), RoundedCornerShape(16.dp))
                                                         }
                                                     }
                                                     .iosLiquidPress(folderSrc, scaleDown = 0.98f, sheenAlpha = 0.10f)
@@ -1884,8 +1904,8 @@ private fun LibraryHome(
                                                         onLongClick = { folderAction = entry.name },
                                                     )
                                                     .padding(
-                                                        horizontal = if (glassEnabled || palette.isLight) 12.dp else 14.dp,
-                                                        vertical = if (glassEnabled || palette.isLight) 9.dp else 6.dp,
+                                                        horizontal = 12.dp,
+                                                        vertical = 9.dp,
                                                     ),
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
@@ -2521,8 +2541,16 @@ private fun LibraryHome(
                 onStreamDialogChange(false)
                 onStreamUrlChange("")
                 activity.lifecycleScope.launch {
-                    val item = Library.opened(activity, Uri.parse(cleanUrl))
-                    play(item)
+                    val resolved = StreamResolver.resolve(cleanUrl)
+                    val item = MediaItem(
+                        uri = resolved.streamUrl,
+                        title = resolved.title,
+                        folder = "Network Streams",
+                        size = 0L,
+                        audio = !resolved.isVideo
+                    )
+                    play(item, listOf(item))
+                    Store.recordStream(activity, cleanUrl)
                     onRecentStreamsChange(Store.recentStreams(activity))
                 }
             },
@@ -2655,10 +2683,17 @@ private fun StreamUrlDialog(
                             }
                         },
                     )
-                    if (isWebpage) {
+                    val isSupportedPage = normalized.contains("/watch/") || normalized.contains("dpdns.org") || normalized.contains("youtube.com") || normalized.contains("youtu.be")
+                    if (isWebpage && !isSupportedPage) {
                         Text(
                             "Webpage link detected. Enter a direct stream URL.",
                             color = if (useLight) Color(0xFFB45309) else Color(0xFFFFD54F),
+                            fontSize = 12.sp,
+                        )
+                    } else if (isSupportedPage) {
+                        Text(
+                            "Stream and video info will be extracted automatically.",
+                            color = palette.accent,
                             fontSize = 12.sp,
                         )
                     }
@@ -3026,7 +3061,18 @@ fun MediaRow(
                                 RoundedCornerShape(16.dp),
                             )
                             .border(1.dp, palette.cardBorder, RoundedCornerShape(16.dp))
-                    else -> base.background(if (selected) Color(0x55123044) else Color.Black)
+                    else ->
+                        base
+                            .padding(horizontal = 12.dp, vertical = 3.5.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(
+                                when {
+                                    selected || isPlaying -> palette.accent.copy(alpha = 0.18f)
+                                    else -> Color(0xFF16181D)
+                                },
+                                RoundedCornerShape(16.dp),
+                            )
+                            .border(0.8.dp, if (selected || isPlaying) palette.accent.copy(alpha = 0.5f) else Color(0xFF262A34), RoundedCornerShape(16.dp))
                 }
             }
             .iosLiquidPress(pressSrc, scaleDown = 0.98f, sheenAlpha = 0.09f)
@@ -3036,7 +3082,7 @@ fun MediaRow(
                 onClick = onClick,
                 onLongClick = onLong,
             )
-            .padding(start = if (glassEnabled || palette.isLight) 10.dp else 14.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+            .padding(start = 10.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Thumbnail(resolved, if (item.audio) Modifier.size(48.dp) else Modifier.width(84.dp).height(48.dp))
@@ -4476,11 +4522,11 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 exit = slideOutVertically(tween(160)) { -it / 2 },
                             )
                             .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .80f), Color.Black.copy(alpha = .35f), Color.Transparent)))
-                            .safeDrawingPadding()
-                            .padding(bottom = 6.dp)
+                            .windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top).union(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)))
+                            .padding(bottom = 4.dp)
                     ) {
                         Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(top = 10.dp, bottom = 4.dp),
+                            Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(top = 2.dp, bottom = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             IconButton(onClick = { activity.exitPlayer() }) {
@@ -4490,7 +4536,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             Text(
                                 displayTitle,
                                 color = Color.White,
-                                modifier = Modifier.weight(1f).padding(horizontal = 6.dp).padding(top = 4.dp),
+                                modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
                                 fontSize = 17.5.sp,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,

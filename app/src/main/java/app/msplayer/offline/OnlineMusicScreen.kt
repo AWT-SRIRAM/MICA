@@ -280,9 +280,17 @@ fun OnlineMusicScreen(
         }
     }
 
-    fun performSearch(q: String) {
+    fun performSearch(q: String, forceRefresh: Boolean = false) {
         if (q.isBlank()) return
         focusManager.clearFocus()
+        if (activeCategory != "Playlists") {
+            val cached = if (!forceRefresh) OnlineMusicCache.get(context, q) else null
+            if (cached != null && cached.isNotEmpty()) {
+                searchResults = cached
+                isSearching = false
+                return
+            }
+        }
         isSearching = true
         scope.launch {
             if (activeCategory == "Playlists") {
@@ -293,7 +301,11 @@ fun OnlineMusicScreen(
                 searchedPlaylists = (yt + jio).distinctBy { it.title.lowercase() }
             } else {
                 val results = YtMusicClient.searchSongs(q)
-                searchResults = results
+                if (results.isNotEmpty()) {
+                    searchResults = results
+                    OnlineMusicCache.put(context, q, results)
+                    OnlineMusicCache.put(context, activeCategory, results)
+                }
                 // Background pre-fetch playlists for seamless instant filter toggle
                 launch {
                     val jioDef = async { JioSaavnClient.searchPlaylists(q) }
@@ -319,6 +331,12 @@ fun OnlineMusicScreen(
             if (searchQuery.isNotBlank()) {
                 performSearch(searchQuery)
             }
+            return
+        }
+        val cached = OnlineMusicCache.get(context, cat)
+        if (cached != null && cached.isNotEmpty()) {
+            searchResults = cached
+            isSearching = false
             return
         }
         val personalSeed = topPersonalArtists.take(2).joinToString(" ")
@@ -898,17 +916,10 @@ fun OnlineMusicScreen(
                         }
                     }
                 } else if ((activeCategory == "Home" || activeCategory == "Top Hits") && searchQuery.isBlank() && searchResults.isNotEmpty()) {
-                    // Section 1: "Quick Picks & Hits" (Top 8 songs, Theme-Aware & Personalized)
+                    // Section 1: "Quick Picks"
                     item(key = "home_start_listening_hdr") {
                         Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 4.dp)) {
-                            Text(
-                                if (topPersonalArtists.isNotEmpty()) "$themeVibeLabel • ${topPersonalArtists.first()}" else themeVibeLabel,
-                                color = palette.accent,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                            )
-                            Spacer(Modifier.height(2.dp))
-                            Text("Quick Picks & Hits", color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                            Text("Quick Picks", color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                         }
                     }
 

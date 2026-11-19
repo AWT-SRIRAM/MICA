@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
@@ -236,12 +237,14 @@ fun MusicPlayerScreen(
     val dynamicSecondary by animateColorAsState(mood.secondary, MotionSpec.ColorSpring, label = "moodS")
 
     val playerBackgroundBrush = remember(dynamicPrimary) {
+        val topTone = androidx.compose.ui.graphics.lerp(Color(0xFF0E121A), dynamicPrimary.copy(alpha = 1f), 0.45f)
+        val midTone = androidx.compose.ui.graphics.lerp(Color(0xFF0A0D13), dynamicPrimary.copy(alpha = 1f), 0.16f)
         Brush.verticalGradient(
             listOf(
-                dynamicPrimary.copy(alpha = 0.85f),
-                dynamicPrimary.copy(alpha = 0.45f),
-                Color(0xFF141923),
-                Color(0xFF090C10),
+                topTone,
+                midTone,
+                Color(0xFF0A0D13),
+                Color(0xFF05070A),
             )
         )
     }
@@ -639,23 +642,91 @@ fun MusicPlayerScreen(
 
             Spacer(Modifier.height(14.dp))
 
-            // 6. Bottom Utilities Row: Devices [⦾] | Share [🔗] | Queue [☰]
+            // 6. Bottom Utilities Row: Left [Cast + Lyrics] | Right [Download + Share]
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Devices / Audio Output
-                IconButton(onClick = { panel = "Cast" }) {
-                    Icon(
-                        Icons.Rounded.Cast,
-                        "Cast & Output Devices",
-                        tint = Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier.size(22.dp)
-                    )
+                // Left group: Cast & Lyrics
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    IconButton(onClick = { panel = "Cast" }) {
+                        Icon(
+                            Icons.Rounded.Cast,
+                            "Cast & Output Devices",
+                            tint = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    // Lyrics icon on the LEFT
+                    IconButton(onClick = { panel = "Lyrics" }) {
+                        Icon(
+                            Icons.Rounded.Lyrics,
+                            "Lyrics",
+                            tint = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
 
+                // Right group: Download & Share
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val activeDownloads by AudioDownloadManager.activeDownloads.collectAsState()
+                    val isDlDone = AudioDownloadManager.isDownloaded(title, artist)
+                    val dlProgress = activeDownloads[item.sourceVideoId] ?: activeDownloads.values.find { it.title == title }
+                    val isDlActive = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed
+
+                    IconButton(onClick = {
+                        if (isDlDone) {
+                            activity.toast("Already downloaded to storage")
+                        } else if (isDlActive) {
+                            activity.toast("Download in progress...")
+                        } else if (item.sourceVideoId.isNotBlank()) {
+                            AudioDownloadManager.downloadSong(
+                                activity,
+                                scope,
+                                item.sourceVideoId,
+                                title,
+                                artist,
+                                item.thumbUri ?: ""
+                            )
+                        } else if (item.uri.startsWith("http")) {
+                            scope.launch {
+                                val ytMatch = runCatching { YtMusicClient.searchSongs("$title $artist").firstOrNull() }.getOrNull()
+                                if (ytMatch != null) {
+                                    AudioDownloadManager.downloadSong(
+                                        activity,
+                                        scope,
+                                        ytMatch.videoId,
+                                        ytMatch.title,
+                                        ytMatch.artist,
+                                        ytMatch.thumbUrl
+                                    )
+                                } else {
+                                    activity.toast("Cannot download stream directly")
+                                }
+                            }
+                        } else {
+                            activity.toast("Local file already on device")
+                        }
+                    }) {
+                        if (isDlActive) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                if (isDlDone) Icons.Rounded.DownloadDone else Icons.Rounded.Download,
+                                "Download",
+                                tint = Color.White.copy(alpha = 0.85f),
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+
                     // Share icon
                     IconButton(onClick = {
                         val shareLink = if (item.uri.startsWith("http")) {
@@ -681,32 +752,22 @@ fun MusicPlayerScreen(
                             modifier = Modifier.size(22.dp)
                         )
                     }
-
-                    // Lyrics icon
-                    IconButton(onClick = { panel = "Lyrics" }) {
-                        Icon(
-                            Icons.Rounded.Lyrics,
-                            "Lyrics",
-                            tint = if (lyrics.isNotEmpty()) Color(0xFF1DB954) else Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
                 }
             }
 
             Spacer(Modifier.height(8.dp))
 
-            // 7. Bottom Peeking Card: Playing Queue (Spotify Parity)
+            // 7. Bottom Peeking Card: Playing Queue (Oval pill, matching dock bar)
             val currentIndex = queue.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
             val nextSong = if (queue.isNotEmpty() && currentIndex in 0 until queue.lastIndex) queue[currentIndex + 1] else null
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
+                    .clip(RoundedCornerShape(32.dp))
                     .background(Color(0xFF232524))
-                    .border(0.8.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
+                    .border(0.8.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(32.dp))
                     .clickable { panel = "Queue" }
-                    .padding(horizontal = 16.dp, vertical = 14.dp)
+                    .padding(horizontal = 20.dp, vertical = 14.dp)
             ) {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -730,9 +791,9 @@ fun MusicPlayerScreen(
                         )
                     }
                     Icon(
-                        Icons.Rounded.QueueMusic,
+                        Icons.AutoMirrored.Rounded.FormatListBulleted,
                         null,
-                        tint = Color(0xFF1DB954),
+                        tint = Color.White.copy(alpha = 0.85f),
                         modifier = Modifier.size(22.dp)
                     )
                 }

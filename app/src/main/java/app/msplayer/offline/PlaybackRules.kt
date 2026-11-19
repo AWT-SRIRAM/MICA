@@ -282,10 +282,23 @@ object PlaybackRules {
      * Supports raw URLs, shared message text containing an HTTP/RTSP/RTMP URL, and bare domains.
      */
     fun normalizeStreamUrl(raw: String): String {
-        val trimmed = raw.trim()
+        var trimmed = raw.trim()
         if (trimmed.isEmpty()) return ""
+
+        // Handle Android intent: URIs (e.g. intent:https://...#Intent;package=...;end)
+        if (trimmed.startsWith("intent:", ignoreCase = true)) {
+            val stripped = trimmed.substring(7)
+            val beforeIntent = stripped.substringBefore("#Intent")
+            if (beforeIntent.startsWith("http://") || beforeIntent.startsWith("https://") || beforeIntent.startsWith("rtsp://")) {
+                trimmed = beforeIntent
+            }
+        }
+
         val urlRegex = Regex("""(?i)\b(?:https?|rtsp|rtmp|mms|udp)://[^\s<>"']+""")
-        urlRegex.find(trimmed)?.value?.let { return it.trimEnd('.', ',', ';', ')', ']', '!') }
+        urlRegex.find(trimmed)?.value?.let {
+            val urlOnly = it.substringBefore("#Intent")
+            return urlOnly.trimEnd('.', ',', ';', ')', ']', '!')
+        }
         val lower = trimmed.lowercase(java.util.Locale.ROOT)
         if (!trimmed.contains(' ') && (trimmed.contains('.') || lower.startsWith("localhost"))) {
             if (isStreamUrl(trimmed)) return trimmed
