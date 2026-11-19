@@ -69,7 +69,18 @@ object OnlineSubtitlesClient {
         val openSubtitlesCandidate: OpenSubtitlesClient.SubtitleCandidate? = null,
         val season: Int? = null,
         val episode: Int? = null,
+        val rating: Double = 0.0,
+        val isBestMatch: Boolean = false,
     )
+
+    fun formatDownloadCount(count: Int): String {
+        return when {
+            count >= 1_000_000 -> String.format(Locale.US, "↓ %.1fM", count / 1_000_000.0)
+            count >= 1_000 -> "↓ ${count / 1_000}K"
+            count > 0 -> "↓ $count"
+            else -> ""
+        }
+    }
 
     data class SearchSummary(
         val candidates: List<OnlineSubtitleCandidate>,
@@ -690,7 +701,7 @@ object OnlineSubtitlesClient {
             return hits.coerceAtMost(80)
         }
 
-        return candidates
+        val sorted = candidates
             .distinctBy { it.id }
             .sortedWith(
                 compareByDescending<OnlineSubtitleCandidate> { candidate ->
@@ -702,6 +713,10 @@ object OnlineSubtitlesClient {
                     score
                 }.thenBy { it.provider.ordinal }
             )
+        val bestId = sorted.firstOrNull { it.hashMatch }?.id ?: sorted.firstOrNull()?.id
+        return sorted.map { cand ->
+            if (cand.id == bestId) cand.copy(isBestMatch = true) else cand
+        }
     }
 
     fun downloadCandidate(

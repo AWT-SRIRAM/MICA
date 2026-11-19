@@ -620,19 +620,24 @@ class PlaybackService : MediaBrowserServiceCompat() {
         }
 
         val holder = videoSurface?.holder
-        if (videoSurface != null && holder != null && holder.surface?.isValid != true) {
-            val cb = object : android.view.SurfaceHolder.Callback {
-                override fun surfaceCreated(h: android.view.SurfaceHolder) {
-                    clearSurfaceCallback()
-                    layout.post { performAttachAndRedraw() }
-                }
-                override fun surfaceChanged(h: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {}
-                override fun surfaceDestroyed(h: android.view.SurfaceHolder) {}
+        val cb = object : android.view.SurfaceHolder.Callback {
+            override fun surfaceCreated(h: android.view.SurfaceHolder) {
+                layout.post { performAttachAndRedraw() }
             }
-            pendingSurfaceView = videoSurface
-            surfaceHolderCallback = cb
-            holder.addCallback(cb)
-        } else {
+            override fun surfaceChanged(h: android.view.SurfaceHolder, format: Int, width: Int, height: Int) {
+                if (width > 0 && height > 0) {
+                    runCatching {
+                        player.vlcVout.setWindowSize(width, height)
+                        enforceCenterGravity(layout)
+                    }
+                }
+            }
+            override fun surfaceDestroyed(h: android.view.SurfaceHolder) {}
+        }
+        pendingSurfaceView = videoSurface
+        surfaceHolderCallback = cb
+        holder?.addCallback(cb)
+        if (holder?.surface?.isValid == true) {
             performAttachAndRedraw()
         }
     }
@@ -682,8 +687,15 @@ class PlaybackService : MediaBrowserServiceCompat() {
         val videoSurface = l.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_video)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R && videoSurface != null) {
             runCatching {
-                val targetFps = 60.0f
-                activeDisplayFps.value = 60
+                val wm = getSystemService(android.content.Context.WINDOW_SERVICE) as? android.view.WindowManager
+                val maxRate = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    val d = runCatching { display }.getOrNull() ?: @Suppress("DEPRECATION") wm?.defaultDisplay
+                    d?.supportedModes?.maxOfOrNull { it.refreshRate } ?: 120.0f
+                } else {
+                    120.0f
+                }
+                val targetFps = if (maxRate >= 118.0f) maxRate else 60.0f
+                activeDisplayFps.value = targetFps.toInt()
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                     videoSurface.holder.surface?.setFrameRate(
                         targetFps,
@@ -988,6 +1000,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         arrayListOf(
             "--no-video-title-show",
             "--audio-time-stretch",
+            "--aout=android_audiotrack",
             "--file-caching=1500",
             "--network-caching=2000",
             "--no-drop-late-frames",
@@ -1765,16 +1778,18 @@ class PlaybackService : MediaBrowserServiceCompat() {
         seekTarget = target
         seekStarted = SystemClock.elapsedRealtime()
         // Accurate seeking may decode a whole HEVC GOP before displaying a frame.
-        // User scrubbing uses the engine's keyframe-friendly fast path.
-        val result = player.setTime(target, fast)
+        // For audio files, keyframe snapping causes 5-10s jumps, so enforce fast=false.
+        val isAudio = state.value.item?.audio == true
+        val actualFast = if (isAudio) false else fast
+        val result = player.setTime(target, actualFast)
         if (result < 0) { clearSeek(); return false }
         state.value = state.value.copy(position = target)
         timeline.value = PlaybackTimeline(target, player.length, true, true)
         if (parsedCues.isNotEmpty() || selectedSubTracks.isNotEmpty()) {
             updateSubtitleTextAt(target)
         }
-        diagnostics.event("seek-request from=$seekOrigin target=$target fast=$fast")
-        if (fast) seekCorrection = scope.launch {
+        diagnostics.event("seek-request from=$seekOrigin target=$target fast=$actualFast")
+        if (actualFast) seekCorrection = scope.launch {
             delay(900)
             if (!released && seekTarget == target) {
                 val actual = player.time
@@ -2814,7 +2829,14 @@ class PlaybackService : MediaBrowserServiceCompat() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        stopPlayback()
+        val isAudio = state.value.item?.audio == true
+        val isPlaying = state.value.playing
+        if (isAudio && isPlaying) {
+            // Keep music playing in background foreground service just like Spotify
+            updateNotification()
+        } else {
+            stopPlayback()
+        }
         super.onTaskRemoved(rootIntent)
     }
 

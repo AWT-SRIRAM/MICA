@@ -830,7 +830,8 @@ object Library {
         withContext(Dispatchers.IO) {
             if (uri.scheme in listOf("http", "https", "rtsp", "rtmp", "mms", "udp")) {
                 val title = uri.lastPathSegment?.substringBefore('?')?.takeIf { it.isNotBlank() } ?: uri.host ?: uri.toString()
-                return@withContext MediaItem(uri.toString(), title, folder = "Network Streams", size = 0L, audio = false)
+                val isAudioStream = uri.toString().contains(".mp3") || uri.toString().contains(".m4a") || uri.toString().contains(".aac") || uri.toString().contains(".flac") || uri.toString().contains(".ogg") || uri.toString().contains("saavn") || uri.toString().contains("audio") || uri.toString().contains("spotify")
+                return@withContext MediaItem(uri.toString(), title, folder = "Network Streams", size = 0L, audio = isAudioStream)
             }
             var name = uri.lastPathSegment ?: "Media"
             var size = 0L

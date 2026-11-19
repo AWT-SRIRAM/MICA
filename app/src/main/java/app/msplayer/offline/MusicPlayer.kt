@@ -17,6 +17,7 @@ import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -343,25 +344,30 @@ fun MusicPlayerScreen(
                 }
             }
 
-            // 2. Large Centered Square Album Artwork Card (Matching Screenshot_20261117_104419.jpg)
+            val dragX = remember(item.uri) { Animatable(0f) }
+
+            // 2. Large Centered Square Album Artwork Card with Spotify-style horizontal swipe
             Box(
                 Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
                     .padding(vertical = 10.dp)
-                    .pointerInput(Unit) {
-                        detectVerticalDragGestures(
+                    .pointerInput(item.uri) {
+                        detectHorizontalDragGestures(
                             onDragEnd = {
                                 scope.launch {
-                                    if (dragY.value > 100.dp.toPx()) activity.exitPlayer()
-                                    else dragY.animateTo(0f, MotionSpec.PressSpring)
+                                    val currentX = dragX.value
+                                    if (currentX < -70.dp.toPx()) {
+                                        service.next()
+                                    } else if (currentX > 70.dp.toPx()) {
+                                        service.previous()
+                                    }
+                                    dragX.animateTo(0f, MotionSpec.PressSpring)
                                 }
                             },
-                            onDragCancel = { scope.launch { dragY.animateTo(0f, MotionSpec.PressSpring) } },
-                            onVerticalDrag = { _, dragAmount ->
-                                if (dragAmount > 0f || dragY.value > 0f) {
-                                    scope.launch { dragY.snapTo((dragY.value + dragAmount).coerceAtLeast(0f)) }
-                                }
+                            onDragCancel = { scope.launch { dragX.animateTo(0f, MotionSpec.PressSpring) } },
+                            onHorizontalDrag = { _, dragAmount ->
+                                scope.launch { dragX.snapTo(dragX.value + dragAmount) }
                             },
                         )
                     },
@@ -371,6 +377,10 @@ fun MusicPlayerScreen(
                 Box(
                     Modifier
                         .fillMaxSize()
+                        .graphicsLayer {
+                            translationX = dragX.value
+                            rotationZ = (dragX.value / 25f).coerceIn(-8f, 8f)
+                        }
                         .shadow(
                             elevation = 28.dp,
                             shape = artShape,
@@ -431,43 +441,38 @@ fun MusicPlayerScreen(
 
                 Spacer(Modifier.width(12.dp))
 
-                // Green Circular Checkmark (✓) Favorite Button matching reference screenshot
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(if (favourite) Color(0xFF1DB954) else Color.White.copy(alpha = 0.12f))
-                        .border(1.2.dp, if (favourite) Color(0xFF1DB954) else Color.White.copy(alpha = 0.45f), CircleShape)
-                        .clickable {
-                            favourite = !favourite
-                            val liked = favourite
-                            scope.launch(Dispatchers.IO) {
-                                val dao = Store.db(activity).dao()
-                                if (liked) {
-                                    dao.add(PlaylistEntry().apply {
-                                        playlist = "Favorites"
-                                        uri = item.uri
-                                        this.title = title.ifBlank { item.title }
-                                        added = System.currentTimeMillis()
-                                    })
-                                    val bmp = artwork
-                                    if (bmp != null) {
-                                        TrackArtworkStore.saveBitmap(activity, item.uri, title.ifBlank { item.title }, artist, bmp, item.thumbUri ?: "")
-                                    } else {
-                                        TrackArtworkStore.saveMeta(activity, item.uri, title.ifBlank { item.title }, artist, item.thumbUri ?: "")
-                                    }
+                // Spotify Heart Favorite Button (Favorite / FavoriteBorder)
+                IconButton(
+                    onClick = {
+                        favourite = !favourite
+                        val liked = favourite
+                        scope.launch(Dispatchers.IO) {
+                            val dao = Store.db(activity).dao()
+                            if (liked) {
+                                dao.add(PlaylistEntry().apply {
+                                    playlist = "Favorites"
+                                    uri = item.uri
+                                    this.title = title.ifBlank { item.title }
+                                    added = System.currentTimeMillis()
+                                })
+                                val bmp = artwork
+                                if (bmp != null) {
+                                    TrackArtworkStore.saveBitmap(activity, item.uri, title.ifBlank { item.title }, artist, bmp, item.thumbUri ?: "")
                                 } else {
-                                    dao.remove("Favorites", item.uri)
+                                    TrackArtworkStore.saveMeta(activity, item.uri, title.ifBlank { item.title }, artist, item.thumbUri ?: "")
                                 }
+                            } else {
+                                dao.remove("Favorites", item.uri)
                             }
-                        },
-                    contentAlignment = Alignment.Center
+                        }
+                    },
+                    modifier = Modifier.size(38.dp)
                 ) {
                     Icon(
-                        Icons.Rounded.Check,
-                        contentDescription = if (favourite) "Favorited" else "Add to Favorites",
-                        tint = if (favourite) Color.Black else Color.White,
-                        modifier = Modifier.size(20.dp)
+                        if (favourite) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                        contentDescription = if (favourite) "Favorited" else "Favorite",
+                        tint = if (favourite) Color(0xFF1DB954) else Color.White.copy(alpha = 0.80f),
+                        modifier = Modifier.size(26.dp)
                     )
                 }
             }
@@ -523,13 +528,19 @@ fun MusicPlayerScreen(
                     }
                 }
 
-                // Interactive slider
+                // Interactive slider with 400ms seek-latch to prevent jump-back
                 Slider(
                     value = currentPos.toFloat(),
                     onValueChange = { targetSeek = it.toLong() },
                     onValueChangeFinished = {
-                        targetSeek?.let { service.seek(it) }
-                        targetSeek = null
+                        val seekTo = targetSeek
+                        if (seekTo != null) {
+                            service.seek(seekTo)
+                            scope.launch {
+                                delay(400)
+                                if (targetSeek == seekTo) targetSeek = null
+                            }
+                        }
                     },
                     valueRange = 0f..totalDur.toFloat(),
                     colors = SliderDefaults.colors(
@@ -671,12 +682,12 @@ fun MusicPlayerScreen(
                         )
                     }
 
-                    // Queue icon
-                    IconButton(onClick = { panel = "Queue" }) {
+                    // Lyrics icon
+                    IconButton(onClick = { panel = "Lyrics" }) {
                         Icon(
-                            Icons.Rounded.QueueMusic,
-                            "Queue",
-                            tint = Color.White.copy(alpha = 0.85f),
+                            Icons.Rounded.Lyrics,
+                            "Lyrics",
+                            tint = if (lyrics.isNotEmpty()) Color(0xFF1DB954) else Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(22.dp)
                         )
                     }
@@ -685,14 +696,16 @@ fun MusicPlayerScreen(
 
             Spacer(Modifier.height(8.dp))
 
-            // 7. Bottom Peeking Card: "About the artist" / Synced Lyrics (Matching Screenshot_20261117_104419.jpg)
+            // 7. Bottom Peeking Card: Playing Queue (Spotify Parity)
+            val currentIndex = queue.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
+            val nextSong = if (queue.isNotEmpty() && currentIndex in 0 until queue.lastIndex) queue[currentIndex + 1] else null
             Box(
                 Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
                     .background(Color(0xFF232524))
                     .border(0.8.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
-                    .clickable { panel = "Lyrics" }
+                    .clickable { panel = "Queue" }
                     .padding(horizontal = 16.dp, vertical = 14.dp)
             ) {
                 Row(
@@ -702,20 +715,22 @@ fun MusicPlayerScreen(
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(
-                            "About the artist • $artist",
+                            if (queue.isNotEmpty()) "Queue • ${queue.size} songs" else "Queue",
                             color = Color.White,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(Modifier.height(3.dp))
                         Text(
-                            if (lyrics.isNotEmpty()) "Tap to view synchronized lyrics" else "Tap for lyrics & audio equalizer",
+                            if (nextSong != null) "Next: ${nextSong.title}" else "End of queue",
                             color = Color.White.copy(alpha = 0.65f),
-                            fontSize = 12.sp
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                     Icon(
-                        Icons.Rounded.Lyrics,
+                        Icons.Rounded.QueueMusic,
                         null,
                         tint = Color(0xFF1DB954),
                         modifier = Modifier.size(22.dp)
@@ -929,6 +944,36 @@ fun MusicPlayerScreen(
                 item.uri.contains("_320.mp4") || item.uri.contains("saavn") -> "320 kbps (High Fidelity)"
                 item.uri.contains("googlevideo") -> "160 kbps Opus (Studio Audio)"
                 else -> "320 kbps High Fidelity"
+            }
+            if (artist.isNotBlank() && artist != "Unknown Artist") {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.White.copy(alpha = 0.08f))
+                        .border(1.dp, Brush.linearGradient(listOf(Color.White.copy(alpha = 0.25f), Color.White.copy(alpha = 0.06f))), RoundedCornerShape(16.dp))
+                        .padding(14.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF1DB954).copy(alpha = 0.20f))
+                                .border(1.dp, Color(0xFF1DB954).copy(alpha = 0.40f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Rounded.Person, null, tint = Color(0xFF1DB954), modifier = Modifier.size(24.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text("Artist", color = Color.White.copy(alpha = 0.70f), fontSize = 11.5.sp)
+                            Spacer(Modifier.height(2.dp))
+                            Text(artist, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
             }
             // Audiophile Fidelity Header Card
             Box(

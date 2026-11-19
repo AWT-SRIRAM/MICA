@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.os.Build
 import android.text.Html
 import android.text.Layout
 import android.text.SpannableStringBuilder
@@ -110,10 +111,16 @@ class StrokeView(context: Context) : View(context) {
         val baseResolved = SubtitleFonts.resolve(style.font)
         val resolved = style.legacyFontFamily?.let { baseResolved.copy(family = it) } ?: baseResolved
         val wantBold = style.bold || resolved.forceBold
-        val tf = if (resolved.family.isNotBlank()) {
-            Typeface.create(resolved.family, if (wantBold) Typeface.BOLD else Typeface.NORMAL)
+        val tf = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val baseTf = if (resolved.family.isNotBlank()) Typeface.create(resolved.family, Typeface.NORMAL) else Typeface.DEFAULT
+            val weight = if (wantBold) 700 else 500
+            Typeface.create(baseTf, weight, false)
         } else {
-            if (wantBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            if (resolved.family.isNotBlank()) {
+                Typeface.create(resolved.family, if (wantBold) Typeface.BOLD else Typeface.NORMAL)
+            } else {
+                if (wantBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            }
         }
         textPaint.typeface = tf
         secondaryTextPaint.typeface = tf

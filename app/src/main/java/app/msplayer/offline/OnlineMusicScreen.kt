@@ -138,11 +138,11 @@ fun OnlineMusicScreen(
                 val dao = Store.db(activity).dao()
                 val allMedia = activity.audios
                 val favUris = dao.entries("Favorites").map { it.uri }.toSet()
-                val histUris = dao.history().take(20).map { it.uri }
+                val histUris = dao.history().take(50).map { it.uri }
                 (allMedia.filter { it.uri in favUris } + histUris.mapNotNull { u -> allMedia.find { it.uri == u } })
-                    .mapNotNull { it.artist.substringBefore(",").trim().takeIf { a -> a.length > 2 && !a.equals("Unknown", true) && !a.equals("Unknown Artist", true) } }
+                    .mapNotNull { it.artist.substringBefore(",").substringBefore("&").substringBefore("•").trim().takeIf { a -> a.length > 2 && !a.equals("Unknown", true) && !a.equals("Unknown Artist", true) } }
             }.getOrDefault(emptyList())
-            val merged = (savedArtists + historyArtists).distinct().take(4)
+            val merged = (savedArtists + historyArtists).distinct().take(10)
             withContext(Dispatchers.Main) { topPersonalArtists = merged }
         }
     }
@@ -156,10 +156,10 @@ fun OnlineMusicScreen(
 
     val categories = remember(palette.mode) {
         when (palette.mode) {
-            AppThemeMode.WHITE_LIQUID_GLASS -> listOf("✨ For You", "☀️ Crystal Pop", "🎸 Acoustic Glass", "🌿 Fresh Morning", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Bollywood")
-            AppThemeMode.LIGHT -> listOf("✨ For You", "☀️ Daylight Hits", "🎵 Feel Good", "🎸 Acoustic", "Popular Artists", "Tamil Hits", "English Pop", "Trending", "Kollywood")
-            AppThemeMode.DARK_LIQUID_GLASS -> listOf("✨ For You", "🌙 Midnight Glass", "🌌 Lo-Fi Chill", "🔊 Deep Bass", "Popular Artists", "Tamil OST & BGM", "Trending", "Kollywood", "EDM")
-            AppThemeMode.DARK -> listOf("✨ For You", "🖤 Night Drive", "🔥 Mass BGM", "🎧 Hip-Hop & EDM", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Lo-Fi")
+            AppThemeMode.WHITE_LIQUID_GLASS -> listOf("✨ For You", "Spotify", "☀️ Crystal Pop", "🎸 Acoustic Glass", "🌿 Fresh Morning", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Bollywood")
+            AppThemeMode.LIGHT -> listOf("✨ For You", "Spotify", "☀️ Daylight Hits", "🎵 Feel Good", "🎸 Acoustic", "Popular Artists", "Tamil Hits", "English Pop", "Trending", "Kollywood")
+            AppThemeMode.DARK_LIQUID_GLASS -> listOf("✨ For You", "Spotify", "🌙 Midnight Glass", "🌌 Lo-Fi Chill", "🔊 Deep Bass", "Popular Artists", "Tamil OST & BGM", "Trending", "Kollywood", "EDM")
+            AppThemeMode.DARK -> listOf("✨ For You", "Spotify", "🖤 Night Drive", "🔥 Mass BGM", "🎧 Hip-Hop & EDM", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Lo-Fi")
         }
     }
 
@@ -337,9 +337,13 @@ fun OnlineMusicScreen(
                 else "Top Global Hits 2026"
             }
             "✨ For You" -> {
-                if (personalSeed.isNotBlank()) "$personalSeed $themeHint Mix"
-                else "$langHint $themeHint 2026"
+                val discoverySeeds = listOf("Melody Hits", "Radio Mix", "Unplugged", "Chill Vibes", "Acoustic Hits", "Essentials", "Top Tracks")
+                val seedVibe = discoverySeeds.random()
+                val pickedArtists = if (topPersonalArtists.isNotEmpty()) topPersonalArtists.shuffled().take(2).joinToString(" ") else ""
+                if (pickedArtists.isNotBlank()) "$pickedArtists $seedVibe"
+                else "$langHint $themeHint $seedVibe 2026"
             }
+            "Spotify" -> "Spotify Global Top Hits 2026 Viral"
             "☀️ Crystal Pop", "☀️ Daylight Hits" -> "$langHint Bright Pop Feel Good Songs 2026"
             "🎸 Acoustic Glass", "🎸 Acoustic" -> "$langHint Acoustic Unplugged Melody Hits"
             "🌿 Fresh Morning" -> "$langHint Fresh Morning Chill Melodies"
@@ -1087,7 +1091,24 @@ fun OnlineMusicScreen(
                         }
                     }
                 } else {
-                    // Normal Results List
+                    // Category / Search Results List
+                    if (activeCategory == "✨ For You" && searchQuery.isBlank()) {
+                        item(key = "for_you_hdr") {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("For You", color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                    Text("Fresh mix based on your listening", color = palette.textSecondary, fontSize = 12.sp)
+                                }
+                                IconButton(onClick = { loadCategoryTracks("✨ For You") }) {
+                                    Icon(Icons.Rounded.Refresh, "Refresh", tint = palette.accent, modifier = Modifier.size(22.dp))
+                                }
+                            }
+                        }
+                    }
                     items(searchResults, key = { it.videoId }) { track ->
                         val dlProgress = activeDownloads[track.videoId]
                         val isPlaying = playerState.playing && playerState.item?.title == track.title

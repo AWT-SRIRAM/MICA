@@ -63,6 +63,10 @@ fun YourLibraryScreen(
     var likedTracks by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var downloadedTracks by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var top50Tracks by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var showImportSpotifyDialog by remember { mutableStateOf(false) }
+    var importSpotifyUrl by remember { mutableStateOf("") }
+    var isImportingSpotify by remember { mutableStateOf(false) }
+    var importError by remember { mutableStateOf<String?>(null) }
 
     // Load library content
     LaunchedEffect(Unit) {
@@ -263,13 +267,35 @@ fun YourLibraryScreen(
                     // All / Playlists View (Matching Spotify Screenshot_20261117_061007.jpg)
                     if (activeFilter in listOf("All", "Playlists")) {
                         item {
-                            Text(
-                                "Your Playlists",
-                                color = palette.textPrimary,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-                            )
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Your Playlists",
+                                    color = palette.textPrimary,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                                Box(
+                                    Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .background(palette.accent.copy(alpha = 0.15f))
+                                        .clickable {
+                                            importSpotifyUrl = ""
+                                            importError = null
+                                            showImportSpotifyDialog = true
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Rounded.Add, null, tint = palette.accent, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Import Spotify", color = palette.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                            }
                         }
 
                         // Liked Songs row pinned to top of playlists
@@ -300,6 +326,104 @@ fun YourLibraryScreen(
                 }
             }
         }
+    }
+
+    if (showImportSpotifyDialog) {
+        AlertDialog(
+            onDismissRequest = { if (!isImportingSpotify) showImportSpotifyDialog = false },
+            title = { Text("Import Spotify", color = palette.textPrimary, fontWeight = FontWeight.Bold) },
+            text = {
+                Column(Modifier.fillMaxWidth()) {
+                    Text(
+                        "Paste a Spotify playlist or album link to import it into your library.",
+                        color = palette.textSecondary,
+                        fontSize = 13.sp,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = importSpotifyUrl,
+                        onValueChange = { importSpotifyUrl = it; importError = null },
+                        placeholder = { Text("https://open.spotify.com/playlist/...", fontSize = 12.5.sp, color = palette.textSecondary.copy(alpha = 0.6f)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = palette.accent,
+                            unfocusedBorderColor = palette.textSecondary.copy(alpha = 0.3f),
+                            focusedTextColor = palette.textPrimary,
+                            unfocusedTextColor = palette.textPrimary,
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                    if (importError != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(importError ?: "", color = Color(0xFFE53935), fontSize = 12.sp)
+                    }
+                    if (isImportingSpotify) {
+                        Spacer(Modifier.height(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = palette.accent, strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Fetching playlist tracks...", color = palette.textSecondary, fontSize = 12.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val url = importSpotifyUrl.trim()
+                        if (url.isBlank()) {
+                            importError = "Please enter a valid Spotify link"
+                            return@TextButton
+                        }
+                        isImportingSpotify = true
+                        importError = null
+                        scope.launch(Dispatchers.IO) {
+                            val result = SpotifyClient.importUrl(url)
+                            if (result == null || result.tracks.isEmpty()) {
+                                withContext(Dispatchers.Main) {
+                                    isImportingSpotify = false
+                                    importError = "Could not load Spotify playlist. Check the link."
+                                }
+                                return@launch
+                            }
+                            val dao = Store.db(context).dao()
+                            val now = System.currentTimeMillis()
+                            result.tracks.forEach { tr ->
+                                val lazyUri = "resolve://spotify/${tr.title}::${tr.artist}"
+                                dao.add(PlaylistEntry().apply {
+                                    playlist = result.title
+                                    uri = lazyUri
+                                    this.title = "${tr.title} • ${tr.artist}"
+                                    added = now
+                                })
+                                if (tr.thumbUrl.isNotBlank()) {
+                                    TrackArtworkStore.saveMeta(context, lazyUri, tr.title, tr.artist, tr.thumbUrl)
+                                }
+                            }
+                            val updatedPlaylists = dao.playlists().filter { it != "Favorites" }
+                            withContext(Dispatchers.Main) {
+                                playlists = updatedPlaylists
+                                isImportingSpotify = false
+                                showImportSpotifyDialog = false
+                                android.widget.Toast.makeText(context, "Imported ${result.tracks.size} tracks into \"${result.title}\"", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    enabled = !isImportingSpotify
+                ) {
+                    Text("Import", color = palette.accent, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                if (!isImportingSpotify) {
+                    TextButton(onClick = { showImportSpotifyDialog = false }) {
+                        Text("Cancel", color = palette.textSecondary)
+                    }
+                }
+            },
+            containerColor = palette.surface
+        )
     }
 }
 

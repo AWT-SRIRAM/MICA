@@ -10,7 +10,10 @@ import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.util.Base64
 import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
@@ -37,7 +40,9 @@ object SpeechToTextClient {
 
     const val PROVIDER_GROQ = "groq"
     const val PROVIDER_DEEPGRAM = "deepgram"
+    const val PROVIDER_GEMINI = "gemini"
 
+    val DEFAULT_GEMINI_KEY: String get() = BuildConfig.DEFAULT_GEMINI_KEY
     val DEFAULT_GROQ_KEY: String get() = BuildConfig.DEFAULT_GROQ_KEY
     val DEFAULT_DEEPGRAM_KEY: String get() = BuildConfig.DEFAULT_DEEPGRAM_KEY
     val DEFAULT_CLOUDFLARE_TOKEN: String get() = BuildConfig.DEFAULT_CLOUDFLARE_TOKEN
@@ -76,6 +81,9 @@ object SpeechToTextClient {
 
     fun activeDeepgramKey(context: Context): String =
         Store.prefs(context).getString("deepgram_api_key", null)?.takeIf { it.isNotBlank() } ?: DEFAULT_DEEPGRAM_KEY
+
+    fun activeGeminiKey(context: Context): String =
+        Store.prefs(context).getString("gemini_api_key", null)?.takeIf { it.isNotBlank() } ?: DEFAULT_GEMINI_KEY
 
     fun generateMultipartBoundary(seed: Long = System.currentTimeMillis()): String =
         "MSPlayerBoundary$seed"
@@ -939,12 +947,106 @@ object SpeechToTextClient {
             .replace(Regex("""\bgroq(\s+cloud)?\b|\bdeepgram\b""", RegexOption.IGNORE_CASE), "AI Subtitles")
     }
 
+    fun transcribeWithGemini(
+        audioFile: File,
+        apiKey: String,
+        translateToEnglish: Boolean = false,
+        languageHint: String? = null,
+    ): List<AutoSubEngine.WordInfo> {
+        val audioBytes = audioFile.readBytes()
+        val base64Data = Base64.encodeToString(audioBytes, Base64.NO_WRAP)
+        val prompt = buildString {
+            append("Transcribe speech in this audio chunk with accurate timestamps. ")
+            if (translateToEnglish) append("Translate spoken dialogue into English. ")
+            if (!languageHint.isNullOrBlank()) append("Spoken language is approximately: $languageHint. ")
+            append("Preserve proper nouns, anime character names, and terminology accurately in Romaji or English. ")
+            append("Return STRICT JSON in format: {\"words\": [{\"word\": \"hello\", \"start\": 0.0, \"end\": 0.4}]}")
+        }
+
+        val models = listOf("gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash")
+        var lastErr: Exception? = null
+
+        for (m in models) {
+            try {
+                val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent?key=$apiKey")
+                val conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 12000
+                    readTimeout = 18000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                }
+
+                val payload = JSONObject().apply {
+                    put("contents", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("parts", JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("inline_data", JSONObject().apply {
+                                        put("mime_type", "audio/mp4")
+                                        put("data", base64Data)
+                                    })
+                                })
+                                put(JSONObject().apply {
+                                    put("text", prompt)
+                                })
+                            })
+                        })
+                    })
+                    put("generationConfig", JSONObject().apply {
+                        put("response_mime_type", "application/json")
+                    })
+                }
+
+                conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                if (code == 200) {
+                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                    val words = parseGeminiWordsJson(resp)
+                    if (words.isNotEmpty()) return words
+                } else {
+                    val err = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: "HTTP $code"
+                    if (code == 429) throw RuntimeException("HTTP 429 Gemini rate limit: $err")
+                }
+            } catch (e: Exception) {
+                lastErr = e
+                if (e.message?.contains("429") == true) throw e
+            }
+        }
+        throw lastErr ?: RuntimeException("Gemini transcription failed")
+    }
+
+    private fun parseGeminiWordsJson(jsonStr: String): List<AutoSubEngine.WordInfo> {
+        val root = runCatching { JSONObject(jsonStr) }.getOrNull() ?: return emptyList()
+        val text = root.optJSONArray("candidates")
+            ?.optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts")
+            ?.optJSONObject(0)
+            ?.optString("text", "") ?: return emptyList()
+
+        val parsed = runCatching { JSONObject(text.trim()) }.getOrNull() ?: return emptyList()
+        val wordsArray = parsed.optJSONArray("words") ?: return emptyList()
+        val result = mutableListOf<AutoSubEngine.WordInfo>()
+        for (i in 0 until wordsArray.length()) {
+            val w = wordsArray.optJSONObject(i) ?: continue
+            val word = w.optString("word", "").trim()
+            val start = w.optDouble("start", 0.0)
+            val end = w.optDouble("end", start + 0.3)
+            if (word.isNotBlank()) {
+                result.add(AutoSubEngine.WordInfo(word, start, end))
+            }
+        }
+        return result
+    }
+
     private fun isRateLimit(message: String?): Boolean =
         message?.contains("HTTP 429", ignoreCase = true) == true
 
     private fun transcribeSingleChunkCascade(
         chunk: ExtractedChunk,
         chunkIndex: Int,
+        geminiKeys: List<String>,
         primaryKeys: List<String>,
         backupKeys: List<String>,
         disabledPrimaryKeys: MutableSet<String>,
@@ -955,6 +1057,43 @@ object SpeechToTextClient {
         languageHint: String? = null,
     ): List<AutoSubEngine.WordInfo> {
         var lastErr: String? = null
+
+        // 1. Try Gemini (Strict Primary policy: Primary key first, secondary auto-scale)
+        val candidateGemini = geminiKeys.filter { it !in disabledPrimaryKeys }
+        if (candidateGemini.isNotEmpty()) {
+            val primaryKey = candidateGemini.first()
+            try {
+                val words = transcribeWithGemini(
+                    audioFile = chunk.file,
+                    apiKey = primaryKey,
+                    translateToEnglish = translateToEnglish,
+                    languageHint = languageHint
+                )
+                if (words.isNotEmpty()) return words
+            } catch (e: Exception) {
+                val msg = e.message ?: e::class.java.simpleName
+                lastErr = msg
+                if (isAuthFailure(msg)) disabledPrimaryKeys.add(primaryKey)
+                if (candidateGemini.size > 1) {
+                    val secondaryKey = candidateGemini[1]
+                    try {
+                        val words = transcribeWithGemini(
+                            audioFile = chunk.file,
+                            apiKey = secondaryKey,
+                            translateToEnglish = translateToEnglish,
+                            languageHint = languageHint
+                        )
+                        if (words.isNotEmpty()) return words
+                    } catch (e2: Exception) {
+                        val msg2 = e2.message ?: e2::class.java.simpleName
+                        lastErr = msg2
+                        if (isAuthFailure(msg2)) disabledPrimaryKeys.add(secondaryKey)
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback to Groq pool
         val candidatePrimary = primaryKeys.filter { it !in disabledPrimaryKeys }
         if (candidatePrimary.isNotEmpty()) {
             val startIdx = chunkIndex % candidatePrimary.size
@@ -962,6 +1101,7 @@ object SpeechToTextClient {
                 val key = candidatePrimary[(startIdx + offset) % candidatePrimary.size]
                 if (key in disabledPrimaryKeys) continue
                 try {
+                    hadBackupFallback.set(true)
                     return transcribeWithGroq(
                         audioFile = chunk.file,
                         apiKey = key,
@@ -988,7 +1128,7 @@ object SpeechToTextClient {
                     }
                 }
             }
-        } else if (primaryKeys.isEmpty()) {
+        } else if (primaryKeys.isEmpty() && geminiKeys.isEmpty()) {
             lastErr = "Primary AI Subtitles API key not configured"
         }
 
@@ -1024,6 +1164,7 @@ object SpeechToTextClient {
         cacheDir: File,
         preferredAudioOrdinal: Int = -1,
         preferEnglishFirst: Boolean = true,
+        geminiKey: String = activeGeminiKey(context),
         groqKey: String = DEFAULT_GROQ_KEY,
         deepgramKey: String = DEFAULT_DEEPGRAM_KEY,
         translateToEnglish: Boolean = false,
@@ -1033,9 +1174,10 @@ object SpeechToTextClient {
         onStageProgress: ((String, Int) -> Unit)? = null,
         onPartialCues: ((List<PlaybackRules.SubtitleCue>) -> Unit)? = null,
     ): TranscriptionResult {
+        val geminiKeys = parseApiKeys(geminiKey)
         val primaryKeys = parseApiKeys(groqKey)
         val backupKeys = parseApiKeys(deepgramKey)
-        if (primaryKeys.isEmpty() && backupKeys.isEmpty()) {
+        if (geminiKeys.isEmpty() && primaryKeys.isEmpty() && backupKeys.isEmpty()) {
             throw RuntimeException("Configure an AI Subtitles API key in Settings or AI Subtitles")
         }
 
@@ -1090,6 +1232,7 @@ object SpeechToTextClient {
                     val rawWords = transcribeSingleChunkCascade(
                         chunk = chunk,
                         chunkIndex = idx,
+                        geminiKeys = geminiKeys,
                         primaryKeys = primaryKeys,
                         backupKeys = backupKeys,
                         disabledPrimaryKeys = disabledPrimaryKeys,
@@ -1194,19 +1337,21 @@ object SpeechToTextClient {
      */
     fun transcribeChunksCascade(
         chunks: List<ExtractedChunk>,
+        geminiKey: String = DEFAULT_GEMINI_KEY,
         groqKey: String = DEFAULT_GROQ_KEY,
         deepgramKey: String = DEFAULT_DEEPGRAM_KEY,
         onProgress: ((Int) -> Unit)? = null
     ): TranscriptionResult {
         if (chunks.isEmpty()) throw RuntimeException("No audio chunks available")
 
+        val geminiKeys = parseApiKeys(geminiKey)
         val primaryKeys = parseApiKeys(groqKey)
         val backupKeys = parseApiKeys(deepgramKey)
-        if (primaryKeys.isEmpty() && backupKeys.isEmpty()) {
+        if (geminiKeys.isEmpty() && primaryKeys.isEmpty() && backupKeys.isEmpty()) {
             throw RuntimeException("Primary AI Subtitles API key not configured")
         }
 
-        val workerThreads = minOf(chunks.size, if (primaryKeys.size >= 2) 3 else 2).coerceAtLeast(1)
+        val workerThreads = minOf(chunks.size, if (primaryKeys.size >= 2 || geminiKeys.size >= 2) 3 else 2).coerceAtLeast(1)
         val executor = Executors.newFixedThreadPool(workerThreads)
         val wordsByChunk = ConcurrentHashMap<Int, List<AutoSubEngine.WordInfo>>()
         val disabledPrimaryKeys = ConcurrentHashMap.newKeySet<String>()
@@ -1224,6 +1369,7 @@ object SpeechToTextClient {
                         val rawWords = transcribeSingleChunkCascade(
                             chunk = chunk,
                             chunkIndex = idx,
+                            geminiKeys = geminiKeys,
                             primaryKeys = primaryKeys,
                             backupKeys = backupKeys,
                             disabledPrimaryKeys = disabledPrimaryKeys,
@@ -1266,15 +1412,17 @@ object SpeechToTextClient {
      */
     fun transcribeCascade(
         audioFile: File,
+        geminiKey: String = DEFAULT_GEMINI_KEY,
         groqKey: String = DEFAULT_GROQ_KEY,
         deepgramKey: String = DEFAULT_DEEPGRAM_KEY,
         onProgress: ((Int) -> Unit)? = null
     ): List<AutoSubEngine.WordInfo> =
         transcribeChunksCascade(
-            listOf(ExtractedChunk(audioFile, 0L, mimeForExtension(audioFile.extension))),
-            groqKey,
-            deepgramKey,
-            onProgress
+            chunks = listOf(ExtractedChunk(audioFile, 0L, mimeForExtension(audioFile.extension))),
+            geminiKey = geminiKey,
+            groqKey = groqKey,
+            deepgramKey = deepgramKey,
+            onProgress = onProgress
         ).words
 
     fun toSrt(cues: List<PlaybackRules.SubtitleCue>): String {

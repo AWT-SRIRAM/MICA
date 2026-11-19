@@ -118,7 +118,7 @@ class DynamicIslandController(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(context) else true
 
     fun isEnabledByUser(): Boolean =
-        Store.prefs(context).getBoolean("dynamic_island_overlay", true)
+        Store.prefs(context).getBoolean("dynamic_island_overlay", false)
 
     fun update(snapshot: Snapshot?, appInForeground: Boolean) {
         mainHandler.post {

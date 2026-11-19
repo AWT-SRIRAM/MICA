@@ -406,8 +406,16 @@ class MainActivity : ComponentActivity() {
     fun closeApp() {
         if (closing) return
         closing = true
-        service?.stopPlayback()
-        finishAndRemoveTask()
+        val isAudio = service?.state?.value?.item?.audio == true
+        val isPlaying = service?.state?.value?.playing == true
+        if (!isAudio || !isPlaying) {
+            service?.stopPlayback()
+            finishAndRemoveTask()
+        } else {
+            // Keep playing audio in foreground service just like Spotify
+            moveTaskToBack(true)
+            closing = false
+        }
     }
 
     fun restoreSystemOrientation() {
@@ -667,7 +675,13 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        if (isFinishing) service?.stopPlayback()
+        if (isFinishing) {
+            val isAudio = service?.state?.value?.item?.audio == true
+            val isPlaying = service?.state?.value?.playing == true
+            if (!isAudio || !isPlaying) {
+                service?.stopPlayback()
+            }
+        }
         contentResolver.unregisterContentObserver(mediaObserver)
         mainHandler.removeCallbacks(rescanRunnable)
         if (bound) { unbindService(connection); bound = false }
@@ -987,13 +1001,48 @@ fun App(activity: MainActivity) {
                 AppScreenMode.MUSIC -> {
                     val activeService = activity.service
                     if (activeService != null && state.item != null) {
-                        MusicPlayerScreen(
-                            activity = activity,
-                            service = activeService,
-                            state = state,
-                            sharedTransitionScope = this@SharedTransitionLayout,
-                            animatedVisibilityScope = this@AnimatedContent,
-                        )
+                        Box(Modifier.fillMaxSize()) {
+                            // Underlying library screen visible during drag-down (Spotify Parity)
+                            LibraryHome(
+                                activity = activity,
+                                service = service,
+                                state = state,
+                                tab = tab,
+                                onTabChange = { tab = it },
+                                folder = folder,
+                                onFolderChange = { folder = it },
+                                search = search,
+                                onSearchChange = { search = it },
+                                searching = searching,
+                                onSearchingChange = { searching = it },
+                                grid = grid,
+                                onGridChange = { grid = it },
+                                sort = sort,
+                                onSortChange = { sort = it },
+                                refresh = refresh,
+                                onBumpRefresh = { refresh++ },
+                                activePlaylist = activePlaylist,
+                                onActivePlaylistChange = { activePlaylist = it },
+                                streamDialog = streamDialog,
+                                onStreamDialogChange = { streamDialog = it },
+                                streamUrl = streamUrl,
+                                onStreamUrlChange = { streamUrl = it },
+                                recentStreams = recentStreams,
+                                onRecentStreamsChange = { recentStreams = it },
+                                sharedTransitionScope = this@SharedTransitionLayout,
+                                animatedVisibilityScope = this@AnimatedContent,
+                            )
+                            // Dimming scrim behind sliding music player
+                            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.40f)))
+                            // Full-screen Music Player sliding down
+                            MusicPlayerScreen(
+                                activity = activity,
+                                service = activeService,
+                                state = state,
+                                sharedTransitionScope = this@SharedTransitionLayout,
+                                animatedVisibilityScope = this@AnimatedContent,
+                            )
+                        }
                     }
                 }
                 AppScreenMode.LIBRARY -> {
@@ -1105,7 +1154,7 @@ private fun LibraryHome(
             }
         }
     }
-    BackHandler(folder != null || activePlaylist != null || searching || selected.isNotEmpty()) {
+    BackHandler(folder != null || activePlaylist != null || searching || selected.isNotEmpty() || tab != "Folders") {
         when {
             selected.isNotEmpty() -> selected = emptySet()
             searching -> {
@@ -1116,9 +1165,12 @@ private fun LibraryHome(
                 lastFolderNavTime = android.os.SystemClock.uptimeMillis()
                 onFolderChange(null)
             }
-            else -> {
+            activePlaylist != null -> {
                 lastFolderNavTime = android.os.SystemClock.uptimeMillis()
                 onActivePlaylistChange(null)
+            }
+            tab != "Folders" -> {
+                onTabChange("Folders")
             }
         }
     }
@@ -2849,18 +2901,23 @@ fun Thumbnail(item: MediaItem, modifier: Modifier, showDuration: Boolean = true)
                 tint = if (loading) palette.textSecondary.copy(alpha = 0.45f) else palette.textSecondary,
                 modifier = Modifier.size(32.dp),
             )
-        if (showDuration && item.duration > 0)
-            Text(
-                durationText(item.duration),
-                color = Color.White,
-                fontSize = 12.sp,
-                lineHeight = 14.sp,
-                modifier =
-                    Modifier.align(Alignment.BottomEnd)
-                        .padding(3.dp)
-                        .background(Color.Black.copy(alpha = .68f))
-                        .padding(horizontal = 3.dp),
-            )
+        if (showDuration && item.duration > 0 && !item.audio)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(3.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.Black.copy(alpha = 0.75f))
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    durationText(item.duration),
+                    color = Color.White,
+                    fontSize = 10.5.sp,
+                    lineHeight = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
     }
 }
 
@@ -3007,6 +3064,7 @@ fun MediaRow(
                 if (PlaybackRules.isStreamUrl(item.uri)) Badge("STREAM", Color(0xFF00838F))
                 info?.subtitles?.firstOrNull()?.let { Badge(it, Color(0xFF00BE81)) }
                 if (resolved.height > 0) Badge("${resolved.height}p", palette.chipBackground, palette.chipText)
+                if (item.audio && item.duration > 0) Badge(durationText(item.duration), palette.chipBackground, palette.chipText)
                 if (item.size > 0) Badge(sizeText(item.size), palette.chipBackground, palette.chipText)
             }
         }
@@ -3172,6 +3230,10 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
     var showFavAudioLangs by remember { mutableStateOf(false) }
     var showFavSubLangs by remember { mutableStateOf(false) }
     var pendingGithubRedirect by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var showUpdateDialog by remember { mutableStateOf(false) }
     var notifTick by remember { mutableIntStateOf(0) }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -3324,17 +3386,17 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                         }
                     } else {
                         var islandOn by remember(notifTick, epoch) {
-                            mutableStateOf(prefs.getBoolean("dynamic_island_overlay", true))
+                            mutableStateOf(prefs.getBoolean("dynamic_island_overlay", false))
                         }
                         Row(
                             Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                                Text("Liquid Glass Dynamic Island", color = palette.textPrimary, fontSize = 14.5.sp)
+                                Text("Camera pill overlay", color = palette.textPrimary, fontSize = 14.5.sp)
                                 Text(
-                                    if (islandOn) "Active — album thumbnail pill & expandable player (single notification)"
-                                    else "Off — Control Center card only",
+                                    if (islandOn) "Enabled — floating mini player"
+                                    else "Disabled — uses native system capsule",
                                     color = if (islandOn) palette.accentSecondary else palette.textSecondary,
                                     fontSize = 12.sp,
                                     maxLines = 2,
@@ -3446,6 +3508,38 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                     )
                     Text("LibVLC 3.7.7", color = palette.textSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
                     HorizontalDivider(Modifier.padding(vertical = 10.dp), color = palette.divider)
+                    val updateSrc = remember { MutableInteractionSource() }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .iosLiquidPress(updateSrc, scaleDown = 0.98f)
+                            .clickable(interactionSource = updateSrc, indication = ripple(), enabled = !checkingUpdate) {
+                                checkingUpdate = true
+                                scope.launch(Dispatchers.IO) {
+                                    val info = UpdateChecker.check("0.7.0")
+                                    withContext(Dispatchers.Main) {
+                                        checkingUpdate = false
+                                        updateInfo = info
+                                        showUpdateDialog = true
+                                    }
+                                }
+                            }
+                            .padding(vertical = 8.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (checkingUpdate) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp), color = palette.accent, strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Default.SystemUpdate, null, tint = palette.accent, modifier = Modifier.size(20.dp))
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Check for updates", color = palette.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text(if (checkingUpdate) "Checking releases..." else "Version 0.7.0", color = palette.accentSecondary, fontSize = 11.5.sp)
+                        }
+                        Icon(Icons.Default.ChevronRight, null, tint = palette.textSecondary, modifier = Modifier.size(18.dp))
+                    }
                     val ghSrc = remember { MutableInteractionSource() }
                     Row(
                         Modifier
@@ -3541,6 +3635,64 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             dismissButton = {
                 TextButton(onClick = { pendingGithubRedirect = false }) {
                     Text("Cancel", color = palette.textSecondary)
+                }
+            },
+            containerColor = palette.surface,
+        )
+    }
+    if (showUpdateDialog) {
+        val info = updateInfo
+        AlertDialog(
+            modifier = Modifier.fillMaxWidth(0.92f),
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+            onDismissRequest = { showUpdateDialog = false },
+            title = {
+                Text(
+                    if (info?.isAvailable == true) "Update Available" else "MS PLAYER is up to date",
+                    color = palette.textPrimary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 17.sp,
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (info?.isAvailable == true) {
+                        Text("A new release (${info.latestVersion}) is available on GitHub.", color = palette.textSecondary, fontSize = 13.5.sp)
+                        if (info.changelog.isNotBlank()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(info.changelog.take(300), color = palette.textSecondary.copy(alpha = 0.8f), fontSize = 12.sp)
+                        }
+                    } else {
+                        Text("MS PLAYER v0.7.0 is the latest version.", color = palette.textSecondary, fontSize = 13.5.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                if (info?.isAvailable == true) {
+                    val targetUrl = info.downloadUrl.takeIf { it.isNotBlank() } ?: info.releasePageUrl.takeIf { it.isNotBlank() } ?: "https://github.com/AWT-SRIRAM/MSPLAYER/releases"
+                    Button(
+                        onClick = {
+                            showUpdateDialog = false
+                            runCatching {
+                                val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl))
+                                activity.startActivity(browserIntent)
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = Color.White),
+                    ) {
+                        Text("Download", fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    TextButton(onClick = { showUpdateDialog = false }) {
+                        Text("OK", color = palette.accent)
+                    }
+                }
+            },
+            dismissButton = {
+                if (info?.isAvailable == true) {
+                    TextButton(onClick = { showUpdateDialog = false }) {
+                        Text("Later", color = palette.textSecondary)
+                    }
                 }
             },
             containerColor = palette.surface,
@@ -4113,6 +4265,16 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
         activity.updatePipParams()
     }
     LaunchedEffect(controls, state.subtitleTrack, state.plainSubtitle, subtitleStyle) { service.updateSubtitlePlacement(controls && !activity.inPip) }
+    // Reveal top system status bar (clock, battery %, notifications) on screen tap & pause; hide when controls fade out
+    val showStatusBar = (controls || !state.playing) && !activity.inPip
+    LaunchedEffect(showStatusBar) {
+        val insetsController = WindowInsetsControllerCompat(activity.window, activity.window.decorView)
+        if (showStatusBar) {
+            insetsController.show(WindowInsetsCompat.Type.statusBars())
+        } else {
+            insetsController.hide(WindowInsetsCompat.Type.statusBars())
+        }
+    }
     val audioManager = remember { activity.getSystemService(AudioManager::class.java) }
     val scope = rememberCoroutineScope()
     var feedbackJob by remember { mutableStateOf<Job?>(null) }
@@ -4168,6 +4330,8 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
             service.endTemporarySpeed()
             service.detachVideo(attachedLayout)
             activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            val insetsController = WindowInsetsControllerCompat(activity.window, activity.window.decorView)
+            insetsController.show(WindowInsetsCompat.Type.systemBars())
             activity.restoreSystemOrientation()
         }
     }
@@ -5546,73 +5710,77 @@ fun OnlineSubtitlesDialog(
                     }
                 }
 
-                // Dedicated Scrollable Candidate List
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
+                // 120fps Fluid Virtualized Subtitle Candidate List
+                LazyColumn(
+                    Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     errorMsg?.let { err ->
-                        Text(err, color = Color(0xFFFF8A80), fontSize = 12.sp)
+                        item(key = "err_notice") {
+                            Text(err, color = Color(0xFFFF8A80), fontSize = 12.sp)
+                        }
                     }
 
                     if (searching) {
-                        Row(
-                            Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Accent)
-                            Text("Searching subtitle providers...", color = Color.White, fontSize = 13.sp)
+                        item(key = "searching_indicator") {
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Accent)
+                                Text("Searching subtitle providers...", color = Color.White, fontSize = 13.sp)
+                            }
                         }
                     }
 
                     if (!searching && visibleCandidates.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Color.White.copy(alpha = 0.05f))
-                                .border(0.8.dp, Cyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
-                                .padding(12.dp),
-                        ) {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Icon(Icons.Default.OpenInBrowser, null, tint = Cyan, modifier = Modifier.size(20.dp))
-                                    Text("Open External Subtitles", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp)
-                                }
-                                Text("Online search returned no files or requires API keys. Open pre-filled web search or community repositories directly.", color = Muted, fontSize = 11.5.sp)
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Button(
-                                        onClick = {
-                                            pendingExternalUrl = OpenSubtitlesClient.browserSearchUrl(query, selectedLang.code3)
-                                        },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Cyan.copy(alpha = 0.22f), contentColor = Cyan),
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("OpenSubtitles Web", fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
+                        item(key = "empty_box") {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color.White.copy(alpha = 0.05f))
+                                    .border(0.8.dp, Cyan.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                                    .padding(12.dp),
+                            ) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Icon(Icons.Default.OpenInBrowser, null, tint = Cyan, modifier = Modifier.size(20.dp))
+                                        Text("Open External Subtitles", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.5.sp)
                                     }
-                                    Button(
-                                        onClick = {
-                                            val q = java.net.URLEncoder.encode("$query subtitles", "UTF-8")
-                                            pendingExternalUrl = "https://github.com/search?q=$q&type=repositories"
-                                        },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.12f), contentColor = Color.White),
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("GitHub Search", fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
+                                    Text("Online search returned no files or requires API keys. Open pre-filled web search or community repositories directly.", color = Muted, fontSize = 11.5.sp)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(
+                                            onClick = {
+                                                pendingExternalUrl = OpenSubtitlesClient.browserSearchUrl(query, selectedLang.code3)
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Cyan.copy(alpha = 0.22f), contentColor = Cyan),
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Text("OpenSubtitles Web", fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
+                                        }
+                                        Button(
+                                            onClick = {
+                                                val q = java.net.URLEncoder.encode("$query subtitles", "UTF-8")
+                                                pendingExternalUrl = "https://github.com/search?q=$q&type=repositories"
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.12f), contentColor = Color.White),
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                            modifier = Modifier.weight(1f),
+                                        ) {
+                                            Text("GitHub Search", fontSize = 11.5.sp, fontWeight = FontWeight.Medium)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
 
-                    visibleCandidates.forEach { cand ->
+                    items(visibleCandidates, key = { it.id }) { cand ->
                         val itemSrc = remember(cand.id) { MutableInteractionSource() }
                         val isBusy = downloadingId == cand.id
                         fun triggerDownload() {
@@ -5663,7 +5831,7 @@ fun OnlineSubtitlesDialog(
                                 .background(Color.White.copy(alpha = 0.06f))
                                 .border(
                                     0.7.dp,
-                                    Color.White.copy(alpha = if (cand.hashMatch) 0.55f else 0.14f),
+                                    Color.White.copy(alpha = if (cand.isBestMatch || cand.hashMatch) 0.55f else 0.14f),
                                     RoundedCornerShape(10.dp),
                                 )
                                 .iosLiquidPress(itemSrc, enabled = downloadingId == null, scaleDown = 0.98f)
@@ -5688,25 +5856,31 @@ fun OnlineSubtitlesDialog(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    if (cand.hashMatch) Badge("Exact Match", color = Color(0xFF00796B))
+                                    if (cand.isBestMatch) Badge("Best match", color = Color(0xFF00897B))
+                                    else if (cand.hashMatch) Badge("Exact Match", color = Color(0xFF00796B))
                                     Badge(cand.provider.badge, color = Color(0xFF283546))
                                     if (cand.language.isNotBlank()) Badge(cand.language, color = Color(0xFF1976D2))
                                     if (cand.hearingImpaired) Badge("HI")
-                                    if (cand.downloadCount > 0) Text("${cand.downloadCount} dl", color = Muted, fontSize = 11.sp)
+                                    if (cand.rating > 0.0) {
+                                        Text("★ ${String.format(java.util.Locale.US, "%.1f", cand.rating)}", color = Color(0xFFFFD54F), fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                    if (cand.downloadCount > 0) {
+                                        Text(OnlineSubtitlesClient.formatDownloadCount(cand.downloadCount), color = Muted, fontSize = 11.sp)
+                                    }
                                 }
                             }
                             Button(
                                 onClick = { triggerDownload() },
                                 enabled = downloadingId == null,
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (cand.hashMatch) Cyan else Cyan.copy(alpha = 0.22f),
-                                    contentColor = if (cand.hashMatch) Color.Black else Cyan,
+                                    containerColor = if (cand.isBestMatch || cand.hashMatch) Cyan else Cyan.copy(alpha = 0.22f),
+                                    contentColor = if (cand.isBestMatch || cand.hashMatch) Color.Black else Cyan,
                                 ),
                                 shape = RoundedCornerShape(8.dp),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                             ) {
                                 if (isBusy) {
-                                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = if (cand.hashMatch) Color.Black else Cyan)
+                                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = if (cand.isBestMatch || cand.hashMatch) Color.Black else Cyan)
                                 } else {
                                     Icon(Icons.Default.Download, null, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(4.dp))
