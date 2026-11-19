@@ -1262,7 +1262,7 @@ private fun LibraryHome(
     val glassEnabled = palette.isGlass
     val showContinueWatching = remember(refresh, palette.mode) { Store.continueWatchingEnabled(activity) }
     val appBackdrop = rememberLayerBackdrop()
-    val listBottomPad = if (glassEnabled) 124.dp else 88.dp
+    val listBottomPad = 124.dp
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().layerBackdrop(appBackdrop)) {
             LiquidGlassBackdropBackground(glassEnabled, mode = palette.mode)
@@ -2026,45 +2026,6 @@ private fun LibraryHome(
                         )
                     }
                 }
-                if (!glassEnabled) {
-                    NavigationBar(containerColor = palette.navContainer, tonalElevation = 0.dp) {
-                        listOf(
-                                Triple("Folders", Icons.Rounded.PlayCircleOutline, "Video"),
-                                Triple("Audio", Icons.Rounded.Headphones, "Music"),
-                                Triple("Online", Icons.Rounded.Search, "Search"),
-                                Triple("Library", Icons.Rounded.VideoLibrary, "Library"),
-                            )
-                            .forEach { (name, icon, label) ->
-                                NavigationBarItem(
-                                    selected = tab == name,
-                                    onClick = {
-                                        onTabChange(name)
-                                        onFolderChange(null)
-                                        onActivePlaylistChange(null)
-                                        onSearchChange("")
-                                        onSearchingChange(false)
-                                        selected = emptySet()
-                                        if (name == "Online") {
-                                            activity.onlineResetTrigger++
-                                        }
-                                        if (name == "Library") {
-                                            activity.libraryResetTrigger++
-                                        }
-                                    },
-                                    icon = { Icon(icon, label) },
-                                    label = { Text(label) },
-                                    colors =
-                                        NavigationBarItemDefaults.colors(
-                                            selectedIconColor = palette.accent,
-                                            selectedTextColor = palette.accent,
-                                            indicatorColor = if (palette.isLight) palette.accent.copy(alpha = 0.14f) else Color.Transparent,
-                                            unselectedIconColor = palette.textSecondary,
-                                            unselectedTextColor = palette.textSecondary,
-                                        ),
-                                )
-                            }
-                    }
-                }
             }
         }
         val showResumeFab = (folder != null || activePlaylist != null) && state.item?.audio != true && tab != "Settings" && tab != "Online" && tab != "Library" &&
@@ -2146,8 +2107,8 @@ private fun LibraryHome(
             Row(
                 Modifier.align(Alignment.BottomCenter)
                     .safeDrawingPadding()
-                    .padding(horizontal = if (glassEnabled || palette.isLight) 16.dp else 0.dp)
-                    .padding(bottom = if (glassEnabled) 82.dp else 72.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 82.dp)
                     .fillMaxWidth()
                     .then(morphModifier)
                     .iosLiquidPress(miniSrc, scaleDown = 0.96f, sheenAlpha = 0.14f)
@@ -2170,7 +2131,11 @@ private fun LibraryHome(
                                     .clip(RoundedCornerShape(18.dp))
                                     .background(palette.surface, RoundedCornerShape(18.dp))
                                     .border(1.dp, palette.cardBorder, RoundedCornerShape(18.dp))
-                            else -> it.background(Panel)
+                            else ->
+                                it
+                                    .clip(RoundedCornerShape(18.dp))
+                                    .background(Color(0xFF16181D), RoundedCornerShape(18.dp))
+                                    .border(0.8.dp, Color(0xFF262A34), RoundedCornerShape(18.dp))
                         }
                     }
                     .clickable(interactionSource = miniSrc, indication = ripple()) {
@@ -2223,50 +2188,63 @@ private fun LibraryHome(
                 }
             }
         }
-        if (glassEnabled) {
-            val dockTabs = listOf(
-                Triple("Folders", Icons.Rounded.PlayCircleOutline, "Video"),
-                Triple("Audio", Icons.Rounded.Headphones, "Music"),
-                Triple("Online", Icons.Rounded.Search, "Search"),
-                Triple("Library", Icons.Rounded.VideoLibrary, "Library"),
-            )
-            val activeIdx = dockTabs.indexOfFirst { it.first == tab }.coerceAtLeast(0)
-            val density = LocalDensity.current
-            val haptics = LocalHapticFeedback.current
-            fun switchDockTab(name: String) {
-                onTabChange(name)
-                onFolderChange(null)
-                onActivePlaylistChange(null)
-                onSearchChange("")
-                onSearchingChange(false)
-                selected = emptySet()
-                if (name == "Online") {
-                    activity.onlineResetTrigger++
-                }
-                if (name == "Library") {
-                    activity.libraryResetTrigger++
-                }
+        val dockTabs = listOf(
+            Triple("Folders", Icons.Rounded.PlayCircleOutline, "Video"),
+            Triple("Audio", Icons.Rounded.Headphones, "Music"),
+            Triple("Online", Icons.Rounded.Search, "Search"),
+            Triple("Library", Icons.Rounded.VideoLibrary, "Library"),
+        )
+        val activeIdx = dockTabs.indexOfFirst { it.first == tab }.coerceAtLeast(0)
+        val density = LocalDensity.current
+        val haptics = LocalHapticFeedback.current
+        fun switchDockTab(name: String) {
+            onTabChange(name)
+            onFolderChange(null)
+            onActivePlaylistChange(null)
+            onSearchChange("")
+            onSearchingChange(false)
+            selected = emptySet()
+            if (name == "Online") {
+                activity.onlineResetTrigger++
             }
-            BoxWithConstraints(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .safeDrawingPadding()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .fillMaxWidth()
-                    .height(62.dp)
-                    .liquidGlassSurface(
-                        backdrop = appBackdrop,
-                        enabled = true,
-                        shape = CircleShape,
-                        tint = if (palette.isLight) Color(0xB8FFFFFF) else Color(0x420C1524),
-                        blurRadius = 16.dp,
-                        refractionHeight = 16.dp,
-                        refractionAmount = 26.dp,
-                        chromaticAberration = true,
-                        isLight = palette.isLight,
-                    )
-                    .padding(horizontal = 4.dp, vertical = 4.dp),
-            ) {
+            if (name == "Library") {
+                activity.libraryResetTrigger++
+            }
+        }
+        BoxWithConstraints(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .safeDrawingPadding()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .fillMaxWidth()
+                .height(62.dp)
+                .let { base ->
+                    if (glassEnabled) {
+                        base.liquidGlassSurface(
+                            backdrop = appBackdrop,
+                            enabled = true,
+                            shape = CircleShape,
+                            tint = if (palette.isLight) Color(0xB8FFFFFF) else Color(0x420C1524),
+                            blurRadius = 16.dp,
+                            refractionHeight = 16.dp,
+                            refractionAmount = 26.dp,
+                            chromaticAberration = true,
+                            isLight = palette.isLight,
+                        )
+                    } else if (palette.isLight) {
+                        base
+                            .clip(CircleShape)
+                            .background(Color.White.copy(alpha = 0.94f))
+                            .border(1.dp, palette.cardBorder, CircleShape)
+                    } else {
+                        base
+                            .clip(CircleShape)
+                            .background(Color(0xFF141923).copy(alpha = 0.96f))
+                            .border(0.9.dp, Color.White.copy(alpha = 0.16f), CircleShape)
+                    }
+                }
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+        ) {
                 val tabWidth = maxWidth / dockTabs.size
                 val tabWidthPx = with(density) { tabWidth.toPx().coerceAtLeast(1f) }
                 var dragSlot by remember { mutableStateOf<Float?>(null) }
@@ -2374,7 +2352,6 @@ private fun LibraryHome(
                 }
             }
         }
-    }
     folderAction?.let { name ->
         LiquidGlassAlertDialog(
             onDismissRequest = { folderAction = null },

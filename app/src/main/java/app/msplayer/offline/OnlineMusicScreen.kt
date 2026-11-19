@@ -403,9 +403,7 @@ fun OnlineMusicScreen(
     }
 
     Column(
-        Modifier
-            .fillMaxSize()
-            .padding(bottom = bottomPadding)
+        Modifier.fillMaxSize()
     ) {
         // Clean, Full-Width Liquid Glass Search Bar
         Row(
@@ -729,7 +727,7 @@ fun OnlineMusicScreen(
 
         // Loading or Results
         if (isSearching && searchResults.isEmpty() && searchedPlaylists.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Box(Modifier.fillMaxSize().padding(bottom = bottomPadding), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(
                         color = palette.accent,
@@ -747,7 +745,7 @@ fun OnlineMusicScreen(
         } else {
             LazyColumn(
                 Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = bottomPadding),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 if (selectedPlaylist != null) {

@@ -123,9 +123,7 @@ fun YourLibraryScreen(
     }
 
     Column(
-        Modifier
-            .fillMaxSize()
-            .padding(bottom = bottomPadding)
+        Modifier.fillMaxSize()
     ) {
         // Filter Chips Row (Matching Screenshot_20261117_061007.jpg)
         LazyRow(
@@ -171,7 +169,7 @@ fun YourLibraryScreen(
 
         LazyColumn(
             Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+            contentPadding = PaddingValues(start = 16.dp, top = 4.dp, end = 16.dp, bottom = bottomPadding),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // 4 Quick Navigation Tiles (Matching Screenshot_20261117_055403.jpg and 061007.jpg)
