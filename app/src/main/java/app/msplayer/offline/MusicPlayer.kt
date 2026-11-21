@@ -414,7 +414,7 @@ fun MusicPlayerScreen(
                     )
                     Spacer(Modifier.height(1.dp))
                     val headerTitle = when {
-                        item.folder.isNotBlank() && item.folder != "Storage" -> item.folder.uppercase()
+                        item.folder.isNotBlank() && item.folder != "Storage" && !item.folder.equals("Playlists", ignoreCase = true) -> item.folder.uppercase()
                         item.uri.startsWith("content://") || item.uri.startsWith("file://") -> "LOCAL TRACKS"
                         else -> "MICA MUSIC"
                     }
@@ -820,29 +820,42 @@ fun MusicPlayerScreen(
 
             Spacer(Modifier.height(10.dp))
 
-            // 5. Playback Controls Row: Shuffle | Prev | BIG CIRCULAR WHITE PLAY/PAUSE (64dp) | Next | Timer
+            // 5. Playback Controls Row: Shuffle/Loop Toggle | Prev | BIG CIRCULAR WHITE PLAY/PAUSE (64dp) | Next | Sleep Timer
             Row(
                 Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Shuffle (Green when active)
-                IconButton(onClick = { service.toggleShuffle() }) {
+                // Left Button: Shuffle by default, single tap toggles to Loop
+                IconButton(onClick = {
+                    if (shuffle) {
+                        service.toggleShuffle()
+                        service.toggleRepeat()
+                    } else if (repeat != "off") {
+                        service.toggleRepeat()
+                        service.toggleShuffle()
+                    } else {
+                        service.toggleShuffle()
+                    }
+                }) {
+                    val isLoopActive = repeat != "off"
+                    val icon = if (isLoopActive) (if (repeat == "one") Icons.Default.RepeatOne else Icons.Default.Repeat) else Icons.Default.Shuffle
+                    val tint = if (shuffle || isLoopActive) Color(0xFF1DB954) else Color.White.copy(alpha = 0.85f)
                     Icon(
-                        Icons.Rounded.Shuffle,
-                        "Shuffle",
-                        tint = if (shuffle) Color(0xFF1DB954) else Color.White.copy(alpha = 0.75f),
-                        modifier = Modifier.size(24.dp)
+                        icon,
+                        contentDescription = "Shuffle / Loop",
+                        tint = tint,
+                        modifier = Modifier.size(26.dp)
                     )
                 }
 
-                // Skip Previous (Symmetric 32dp Material 3 icon)
+                // Skip Previous (Standard crisp default icon)
                 IconButton(onClick = { service.previous() }) {
                     Icon(
-                        Icons.Rounded.SkipPrevious,
+                        Icons.Default.SkipPrevious,
                         contentDescription = "Previous",
                         tint = Color.White,
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(34.dp)
                     )
                 }
 
@@ -865,108 +878,102 @@ fun MusicPlayerScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        if (optimisticPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        if (optimisticPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = if (optimisticPlaying) "Pause" else "Play",
                         tint = Color.Black,
                         modifier = Modifier.size(36.dp)
                     )
                 }
 
-                // Skip Next (Symmetric 32dp Material 3 icon)
+                // Skip Next (Standard crisp default icon)
                 IconButton(onClick = { service.next() }) {
                     Icon(
-                        Icons.Rounded.SkipNext,
+                        Icons.Default.SkipNext,
                         contentDescription = "Next",
                         tint = Color.White,
-                        modifier = Modifier.size(32.dp)
+                        modifier = Modifier.size(34.dp)
                     )
                 }
 
-                // Loop / Repeat (Repeat All / Repeat One / Off)
-                IconButton(onClick = { service.toggleRepeat() }) {
-                    val repeatIcon = if (repeat == "one") Icons.Rounded.RepeatOne else Icons.Rounded.Repeat
-                    val repeatTint = if (repeat != "off") Color(0xFF1DB954) else Color.White.copy(alpha = 0.75f)
+                // Right Button: Sleep Timer Crescent Moon (Screenshot_20261119_132518.jpg)
+                IconButton(onClick = { panel = "Sleep" }) {
                     Icon(
-                        repeatIcon,
-                        contentDescription = "Repeat",
-                        tint = repeatTint,
-                        modifier = Modifier.size(26.dp)
+                        painter = painterResource(R.drawable.ic_timer_moon),
+                        contentDescription = "Sleep Timer",
+                        tint = if (sleepMode != "Off") Color(0xFF1DB954) else Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
 
             Spacer(Modifier.height(14.dp))
 
-            // 6. Bottom Utilities Row: Left [Cast + Lyrics + Jam + Sleep] | Right [Download + Share]
+            // 6. Bottom Utilities Row: Cast | Lyrics | Jam | Download | Share (SpaceEvenly, Zero Overflow)
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Left group: Cast & Lyrics & Jam & Sleep Timer
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    IconButton(onClick = { panel = "Cast" }) {
+                // Cast
+                IconButton(
+                    onClick = { panel = "Cast" },
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_cast_flaticon),
+                        contentDescription = "Cast & Output Devices",
+                        tint = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                // Karaoke Lyrics
+                val hasLyrics = lyrics.isNotEmpty()
+                IconButton(
+                    onClick = { panel = "Lyrics" },
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_lyrics_flaticon),
+                        contentDescription = "Lyrics",
+                        tint = if (panel == "Lyrics" || hasLyrics) Accent else Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                // Mica Jam
+                val jamState by JamSyncController.sessionState.collectAsState()
+                val isJamActive = jamState.role != JamRole.NONE && jamState.isConnected
+                IconButton(
+                    onClick = { panel = "Jam" },
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            painter = painterResource(R.drawable.ic_cast_flaticon),
-                            contentDescription = "Cast & Output Devices",
-                            tint = Color.White.copy(alpha = 0.85f),
+                            Icons.Rounded.SpeakerGroup,
+                            "Mica Jam — Listen Together",
+                            tint = if (isJamActive) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(22.dp)
                         )
-                    }
-
-                    // Modern Karaoke Lyrics button on the LEFT (Flaticon custom vector)
-                    val hasLyrics = lyrics.isNotEmpty()
-                    IconButton(onClick = { panel = "Lyrics" }) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_lyrics_flaticon),
-                            contentDescription = "Lyrics",
-                            tint = if (panel == "Lyrics" || hasLyrics) Accent else Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-
-                    // Modern Spotify-style Jam Social Listening icon with active indicator
-                    val jamState by JamSyncController.sessionState.collectAsState()
-                    val isJamActive = jamState.role != JamRole.NONE && jamState.isConnected
-                    IconButton(onClick = { panel = "Jam" }) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                Icons.Rounded.SpeakerGroup,
-                                "Mica Jam — Listen Together",
-                                tint = if (isJamActive) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
-                                modifier = Modifier.size(24.dp)
+                        if (isJamActive) {
+                            Box(
+                                Modifier
+                                    .size(6.dp)
+                                    .align(Alignment.TopEnd)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF10B981))
                             )
-                            if (isJamActive) {
-                                Box(
-                                    Modifier
-                                        .size(6.dp)
-                                        .align(Alignment.TopEnd)
-                                        .clip(CircleShape)
-                                        .background(Color(0xFF10B981))
-                                )
-                            }
                         }
-                    }
-
-                    // Sleep Timer
-                    IconButton(onClick = { panel = "Sleep" }) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_timer_moon),
-                            contentDescription = "Sleep Timer",
-                            tint = if (sleepMode != "Off") Color(0xFF1DB954) else Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(22.dp)
-                        )
                     }
                 }
 
-                // Right group: Download & Share
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    val activeDownloads by AudioDownloadManager.activeDownloads.collectAsState()
-                    val isDlDone = AudioDownloadManager.isDownloaded(title, artist)
-                    val dlProgress = activeDownloads[item.sourceVideoId] ?: activeDownloads.values.find { it.title == title }
-                    val isDlActive = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed
-
-                    IconButton(onClick = {
+                // Download
+                val activeDownloads by AudioDownloadManager.activeDownloads.collectAsState()
+                val isDlDone = AudioDownloadManager.isDownloaded(title, artist)
+                val dlProgress = activeDownloads[item.sourceVideoId] ?: activeDownloads.values.find { it.title == title }
+                val isDlActive = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed
+                IconButton(
+                    onClick = {
                         if (isDlDone) {
                             activity.toast("Already downloaded to storage")
                         } else if (isDlActive) {
@@ -999,25 +1006,28 @@ fun MusicPlayerScreen(
                         } else {
                             activity.toast("Local file already on device")
                         }
-                    }) {
-                        if (isDlActive) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                color = Color.White,
-                                strokeWidth = 2.dp
-                            )
-                        } else {
-                            Icon(
-                                painter = painterResource(if (isDlDone) R.drawable.ic_download_flaticon else R.drawable.ic_download_flaticon),
-                                contentDescription = "Download",
-                                tint = if (isDlDone) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
+                    },
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    if (isDlActive) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_download_flaticon),
+                            contentDescription = "Download",
+                            tint = if (isDlDone) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(22.dp)
+                        )
                     }
+                }
 
-                    // Share icon
-                    IconButton(onClick = {
+                // Share
+                IconButton(
+                    onClick = {
                         val shareLink = if (item.uri.startsWith("http")) {
                             if (item.uri.contains("googlevideo") || item.uri.contains("youtube")) {
                                 "https://music.youtube.com/search?q=" + java.net.URLEncoder.encode("$title $artist", "UTF-8")
@@ -1025,22 +1035,23 @@ fun MusicPlayerScreen(
                                 item.uri
                             }
                         } else {
-                            "https://music.youtube.com/search?q=" + java.net.URLEncoder.encode("$title $artist", "UTF-8")
+                            "Track: $title by $artist (Playing in MICA)"
                         }
-                        val send = Intent(Intent.ACTION_SEND).apply {
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
                             type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "$title - $artist")
-                            putExtra(Intent.EXTRA_TEXT, "$title - $artist\nListen here: $shareLink")
+                            putExtra(Intent.EXTRA_SUBJECT, "Listening to $title on MICA")
+                            putExtra(Intent.EXTRA_TEXT, "Now playing: $title - $artist\n$shareLink")
                         }
-                        activity.startActivity(Intent.createChooser(send, "Share Song"))
-                    }) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_share_flaticon),
-                            contentDescription = "Share",
-                            tint = Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
+                        activity.startActivity(Intent.createChooser(shareIntent, "Share Track via"))
+                    },
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_share_flaticon),
+                        contentDescription = "Share",
+                        tint = Color.White.copy(alpha = 0.85f),
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
             }
 
@@ -1223,29 +1234,7 @@ fun MusicPlayerScreen(
         }
         "Options" -> PlayerSidePanel("Track Options", { panel = null }) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // 1. Open Local Audio File
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color.White.copy(alpha = 0.10f))
-                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
-                        .clickable {
-                            panel = null
-                            activity.openFile.launch(arrayOf("audio/*"))
-                        }
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Rounded.FolderOpen, null, tint = Accent, modifier = Modifier.size(26.dp))
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text("Open Local Audio File", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Play MP3, FLAC, WAV, M4A from storage", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
-                    }
-                }
-
-                // 2. Track Details & Codec Info
+                // 1. Track Details & Codec Info
                 Row(
                     Modifier
                         .fillMaxWidth()

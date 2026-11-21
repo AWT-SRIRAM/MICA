@@ -4,9 +4,11 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,7 +39,11 @@ import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Tv
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
@@ -79,6 +85,7 @@ data class SearchCategoryTile(
     val gradientColors: List<Color>,
 )
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SearchHubScreen(
     activity: MainActivity,
@@ -99,6 +106,8 @@ fun SearchHubScreen(
     var showSuggestions by remember { mutableStateOf(false) }
     var searchResults by remember { mutableStateOf<List<YtTrack>>(emptyList()) }
     var isLoadingResults by remember { mutableStateOf(false) }
+    var editingUrlTile by remember { mutableStateOf<SearchCategoryTile?>(null) }
+    var editingUrlText by remember { mutableStateOf("") }
 
     // Preloaded feeds from FeedCacheManager
     val cachedTopHits by FeedCacheManager.cachedTopHits.collectAsState()
@@ -317,7 +326,16 @@ fun SearchHubScreen(
                                     .height(98.dp)
                                     .clip(RoundedCornerShape(16.dp))
                                     .background(Brush.linearGradient(tile.gradientColors))
-                                    .clickable { handleCategoryClick(tile) }
+                                    .combinedClickable(
+                                        onClick = { handleCategoryClick(tile) },
+                                        onLongClick = {
+                                            if (tile.id == "anime" || tile.id == "tamilcartoons") {
+                                                val def = if (tile.id == "anime") "https://myanimes.in/" else "https://tamilcartoonsrare.in/"
+                                                editingUrlTile = tile
+                                                editingUrlText = Store.prefs(context).getString("mica_${tile.id}_url", def) ?: def
+                                            }
+                                        }
+                                    )
                                     .padding(14.dp)
                             ) {
                                 Text(
@@ -504,5 +522,50 @@ fun SearchHubScreen(
                 }
             }
         }
+    }
+
+    if (editingUrlTile != null) {
+        val targetTile = editingUrlTile!!
+        val defaultUrl = if (targetTile.id == "anime") "https://myanimes.in/" else "https://tamilcartoonsrare.in/"
+        AlertDialog(
+            onDismissRequest = { editingUrlTile = null },
+            title = { Text("Edit ${targetTile.title} URL") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Enter website URL to stream ${targetTile.title} directly into MICA:", fontSize = 13.sp)
+                    OutlinedTextField(
+                        value = editingUrlText,
+                        onValueChange = { editingUrlText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = { Text(defaultUrl) }
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val clean = editingUrlText.trim().ifBlank { defaultUrl }
+                    Store.prefs(context).edit().putString("mica_${targetTile.id}_url", clean).apply()
+                    Toast.makeText(context, "${targetTile.title} URL updated", Toast.LENGTH_SHORT).show()
+                    editingUrlTile = null
+                }) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        Store.prefs(context).edit().putString("mica_${targetTile.id}_url", defaultUrl).apply()
+                        Toast.makeText(context, "Reset to default URL", Toast.LENGTH_SHORT).show()
+                        editingUrlTile = null
+                    }) {
+                        Text("Reset Default")
+                    }
+                    TextButton(onClick = { editingUrlTile = null }) {
+                        Text("Cancel")
+                    }
+                }
+            }
+        )
     }
 }

@@ -1058,14 +1058,13 @@ fun App(activity: MainActivity) {
         else -> AppScreenMode.LIBRARY
     }
 
-    if (activity.activeBrowserUrl != null) {
+    if (!activity.showPlayer && activity.activeBrowserUrl != null) {
         val (bUrl, bTitle) = activity.activeBrowserUrl!!
         MicaShieldBrowserScreen(
             initialUrl = bUrl,
             title = bTitle,
             onBack = { activity.activeBrowserUrl = null },
             onPlayInMica = { item ->
-                activity.activeBrowserUrl = null
                 activity.startMedia(listOf(item), item)
             }
         )
@@ -1271,7 +1270,7 @@ private fun LibraryHome(
                             val openedItem = Library.opened(activity, Uri.parse(row.uri))
                             val cleanTitle = if (row.title.contains(" • ")) row.title.substringBefore(" • ") else row.title
                             val cleanArtist = if (row.title.contains(" • ")) row.title.substringAfter(" • ") else openedItem.artist
-                            openedItem.copy(title = cleanTitle, artist = cleanArtist)
+                            openedItem.copy(title = cleanTitle, artist = cleanArtist, folder = plName)
                         }
                         // Background scrubber: resolve authentic individual song covers for imported playlists
                         val plCover = Store.prefs(activity).getString("playlist_cover_$plName", null)
@@ -1341,7 +1340,7 @@ private fun LibraryHome(
     val hidden = Store.prefs(activity).getStringSet("hidden", emptySet()).orEmpty()
     val raw =
         when (tab) {
-            "Audio" -> activity.audios.filter { !it.folder.contains("MSPlayer", ignoreCase = true) && !it.uri.contains("MSPlayer", ignoreCase = true) }
+            "Audio" -> activity.audios.filter { !it.folder.contains("MSPlayer", ignoreCase = true) && !it.uri.contains("MSPlayer", ignoreCase = true) && !it.folder.contains("Mica", ignoreCase = true) && !it.uri.contains("Mica", ignoreCase = true) && !it.uri.startsWith(AudioDownloadManager.getDownloadDir().absolutePath) }
             "History" -> history.map { saved ->
                 (activity.audios + activity.videos).firstOrNull { it.uri == saved.uri }
                     ?: run {
@@ -1389,7 +1388,9 @@ private fun LibraryHome(
                 activity.showPlayer = true
                 return
             }
-            activity.startMedia(playQueue, item)
+            val finalItem = if (activePlaylist != null && item.folder != activePlaylist) item.copy(folder = activePlaylist) else item
+            val finalQueue = if (activePlaylist != null) playQueue.map { if (it.folder != activePlaylist) it.copy(folder = activePlaylist) else it } else playQueue
+            activity.startMedia(finalQueue, finalItem)
         }
     }
     fun overflow(item: MediaItem, action: String) {
@@ -1611,7 +1612,7 @@ private fun LibraryHome(
                         label = "libraryContentTransition",
                     ) { (curTab, curFolder, curPlaylist) ->
                         val curRaw = when (curTab) {
-                            "Audio" -> activity.audios.filter { !it.folder.contains("MSPlayer", ignoreCase = true) && !it.uri.contains("MSPlayer", ignoreCase = true) }
+                            "Audio" -> activity.audios.filter { !it.folder.contains("MSPlayer", ignoreCase = true) && !it.uri.contains("MSPlayer", ignoreCase = true) && !it.folder.contains("Mica", ignoreCase = true) && !it.uri.contains("Mica", ignoreCase = true) && !it.uri.startsWith(AudioDownloadManager.getDownloadDir().absolutePath) }
                             "History" -> history.map { saved ->
                                 (activity.audios + activity.videos).firstOrNull { it.uri == saved.uri }
                                     ?: run {
@@ -3622,7 +3623,7 @@ private fun SettingsGlassCard(
     )
 }
 
-private const val MSPLAYER_GITHUB_URL = "https://github.com/AWT-SRIRAM/MSPLAYER"
+private const val MSPLAYER_GITHUB_URL = "https://github.com/AWT-SRIRAM/MICA"
 
 @Composable
 fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
@@ -4490,7 +4491,7 @@ private fun OpenSourceLicensesDialog(
                     Icon(Icons.Default.OpenInBrowser, null, tint = palette.accent, modifier = Modifier.size(18.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Source Code on GitHub", color = palette.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text("github.com/AWT-SRIRAM/MSPLAYER", color = palette.textPrimary, fontSize = 11.5.sp)
+                        Text("github.com/AWT-SRIRAM/MICA", color = palette.textPrimary, fontSize = 11.5.sp)
                     }
                     Icon(Icons.Default.ChevronRight, null, tint = palette.accent, modifier = Modifier.size(16.dp))
                 }
@@ -4773,6 +4774,12 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
             controls = false
         }
     }
+    LaunchedEffect(state.playing, state.position, state.duration) {
+        if (!state.playing && state.duration > 0 && state.position >= state.duration - 800L && state.item?.audio == false) {
+            delay(350)
+            activity.exitPlayer()
+        }
+    }
     BackHandler(!activity.inPip) {
         if (menu != null) { closePlayerMenu() } else if (locked) {
             locked = false
@@ -4988,11 +4995,28 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             }
                             IconButton(
                                 onClick = {
-                                    service.refreshTracks()
-                                    openPlayerMenu("Subtitles")
+                                    if (!service.areSubtitlesEnabled()) {
+                                        service.toggleSubtitlesMaster()
+                                    }
+                                    val currentScale = subtitleStyle.scale
+                                    val nextScale = when {
+                                        currentScale < 90 -> 100
+                                        currentScale in 90..115 -> 125
+                                        currentScale in 116..140 -> 150
+                                        currentScale in 141..165 -> 175
+                                        currentScale in 166..190 -> 200
+                                        else -> 75
+                                    }
+                                    val updatedStyle = subtitleStyle.copy(scale = nextScale)
+                                    updatedStyle.save(activity)
+                                    service.subtitleStyle(updatedStyle)
+                                    subtitleStyle = updatedStyle
+                                    touch()
+                                    hint(PlayerFeedback.SubtitleScale(nextScale))
+                                    activity.toast("Subtitle Size: $nextScale%")
                                 }
                             ) {
-                                Icon(Icons.Default.Subtitles, "Subtitles", tint = Color.White)
+                                Icon(Icons.Default.Subtitles, "Subtitle Size (HUD)", tint = Color.White)
                             }
                             val decoderTag = if (state.decoder == "Software") "SW" else if (state.decoder == "Hardware") "HW" else "HW+"
                             TextButton(

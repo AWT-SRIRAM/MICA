@@ -16,25 +16,38 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
         const val ACTION_WIDGET_TOGGLE = "app.mica.ACTION_WIDGET_TOGGLE"
         const val ACTION_WIDGET_PREV = "app.mica.ACTION_WIDGET_PREV"
         const val ACTION_WIDGET_NEXT = "app.mica.ACTION_WIDGET_NEXT"
-        const val ACTION_WIDGET_PLAY_PICK = "app.mica.ACTION_WIDGET_PLAY_PICK"
+        const val ACTION_WIDGET_LIKE = "app.mica.ACTION_WIDGET_LIKE"
+        const val ACTION_WIDGET_REPEAT = "app.mica.ACTION_WIDGET_REPEAT"
         const val EXTRA_PICK_INDEX = "pick_index"
 
         private var lastIsPlaying = false
         private var lastTitle = "MICA"
         private var lastArtist = "The Universe of Entertainment"
         private var lastArt: Bitmap? = null
+        private var lastPosMs = 0L
+        private var lastDurMs = 0L
+        private var lastIsLiked = false
+        private var lastIsRepeat = false
 
         fun updateWidget(
             context: Context,
             isPlaying: Boolean,
             title: String,
             artist: String,
-            artBitmap: Bitmap?
+            artBitmap: Bitmap?,
+            posMs: Long = 0L,
+            durMs: Long = 0L,
+            isLiked: Boolean = false,
+            isRepeat: Boolean = false
         ) {
             lastIsPlaying = isPlaying
             lastTitle = title.ifBlank { "MICA" }
             lastArtist = artist.ifBlank { "The Universe of Entertainment" }
             lastArt = artBitmap
+            lastPosMs = posMs
+            lastDurMs = durMs
+            lastIsLiked = isLiked
+            lastIsRepeat = isRepeat
 
             val appWidgetManager = AppWidgetManager.getInstance(context) ?: return
             val componentName = ComponentName(context, MicaMusicWidgetProvider::class.java)
@@ -42,17 +55,32 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             if (widgetIds == null || widgetIds.isEmpty()) return
 
             for (widgetId in widgetIds) {
-                val views = buildRemoteViews(context, isPlaying, lastTitle, lastArtist, artBitmap)
+                val views = buildRemoteViews(
+                    context, isPlaying, lastTitle, lastArtist, artBitmap,
+                    lastPosMs, lastDurMs, lastIsLiked, lastIsRepeat
+                )
                 appWidgetManager.updateAppWidget(widgetId, views)
             }
         }
 
-        private fun buildRemoteViews(
+        private fun formatDuration(ms: Long): String {
+            if (ms <= 0L) return "00:00"
+            val totalSec = ms / 1000
+            val min = totalSec / 60
+            val sec = totalSec % 60
+            return "%02d:%02d".format(min, sec)
+        }
+
+        fun buildRemoteViews(
             context: Context,
             isPlaying: Boolean,
             title: String,
             artist: String,
-            artBitmap: Bitmap?
+            artBitmap: Bitmap?,
+            posMs: Long = 0L,
+            durMs: Long = 0L,
+            isLiked: Boolean = false,
+            isRepeat: Boolean = false
         ): RemoteViews {
             val views = RemoteViews(context.packageName, R.layout.widget_mica_music)
 
@@ -60,9 +88,24 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             views.setTextViewText(R.id.widget_track_title, title)
             views.setTextViewText(R.id.widget_track_artist, artist)
 
+            // Timeline & Progress Bar
+            val safeDur = durMs.coerceAtLeast(1L)
+            val progressPercent = ((posMs.coerceAtLeast(0L).toDouble() / safeDur.toDouble()) * 100).toInt().coerceIn(0, 100)
+            views.setProgressBar(R.id.widget_progress_bar, 100, progressPercent, false)
+            views.setTextViewText(R.id.widget_time_elapsed, formatDuration(posMs))
+            views.setTextViewText(R.id.widget_time_total, if (durMs > 0L) formatDuration(durMs) else "03:30")
+
             // Play/Pause icon state
-            val playPauseRes = if (isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play
+            val playPauseRes = if (isPlaying) R.drawable.ic_notif_pause else R.drawable.ic_widget_play
             views.setImageViewResource(R.id.widget_btn_play_pause, playPauseRes)
+
+            // Like / Favorite icon state
+            val likeRes = if (isLiked) R.drawable.ic_notif_liked else R.drawable.ic_notif_like_add
+            views.setImageViewResource(R.id.widget_btn_like, likeRes)
+
+            // Repeat / Shuffle icon state
+            val repeatRes = if (isRepeat) R.drawable.ic_notif_repeat else R.drawable.ic_notif_shuffle
+            views.setImageViewResource(R.id.widget_btn_shuffle_repeat, repeatRes)
 
             // Album artwork
             if (artBitmap != null && !artBitmap.isRecycled) {
@@ -83,78 +126,34 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             )
             views.setOnClickPendingIntent(R.id.widget_top_section, openAppPi)
 
-            // Control Buttons
+            // 5 Symmetric Control Buttons
             views.setOnClickPendingIntent(
-                R.id.widget_btn_prev,
-                getServicePendingIntent(context, "previous", 101)
+                R.id.widget_btn_like_container,
+                getBroadcastPendingIntent(context, ACTION_WIDGET_LIKE, 101)
+            )
+            views.setOnClickPendingIntent(
+                R.id.widget_btn_prev_container,
+                getBroadcastPendingIntent(context, ACTION_WIDGET_PREV, 102)
             )
             views.setOnClickPendingIntent(
                 R.id.widget_btn_play_pause_container,
-                getServicePendingIntent(context, "toggle", 102)
+                getBroadcastPendingIntent(context, ACTION_WIDGET_TOGGLE, 103)
             )
             views.setOnClickPendingIntent(
-                R.id.widget_btn_next,
-                getServicePendingIntent(context, "next", 103)
+                R.id.widget_btn_next_container,
+                getBroadcastPendingIntent(context, ACTION_WIDGET_NEXT, 104)
             )
-
-            // Quick Picks (4 Spotify-style recommendations)
-            val picks = FeedCacheManager.cachedTopHits.value.ifEmpty { FeedCacheManager.defaultCuratedHits() }
-            val quickTitles = listOf(
-                picks.getOrNull(0)?.title ?: "Tamil Hits",
-                picks.getOrNull(1)?.title ?: "Top Hits",
-                picks.getOrNull(2)?.title ?: "Lofi Beats",
-                picks.getOrNull(3)?.title ?: "Discover"
+            views.setOnClickPendingIntent(
+                R.id.widget_btn_shuffle_repeat_container,
+                getBroadcastPendingIntent(context, ACTION_WIDGET_REPEAT, 105)
             )
-
-            val titleViews = listOf(
-                R.id.widget_quick_title_1,
-                R.id.widget_quick_title_2,
-                R.id.widget_quick_title_3,
-                R.id.widget_quick_title_4
-            )
-            val cardViews = listOf(
-                R.id.widget_quick_card_1,
-                R.id.widget_quick_card_2,
-                R.id.widget_quick_card_3,
-                R.id.widget_quick_card_4
-            )
-
-            for (i in 0 until 4) {
-                views.setTextViewText(titleViews[i], quickTitles[i])
-                views.setOnClickPendingIntent(
-                    cardViews[i],
-                    getQuickPickPendingIntent(context, i, 200 + i)
-                )
-            }
 
             return views
         }
 
-        private fun getServicePendingIntent(context: Context, action: String, requestCode: Int): PendingIntent {
-            val intent = Intent(context, PlaybackService::class.java).apply {
-                this.action = action
-            }
-            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                PendingIntent.getForegroundService(
-                    context,
-                    requestCode,
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-            } else {
-                PendingIntent.getService(
-                    context,
-                    requestCode,
-                    intent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-            }
-        }
-
-        private fun getQuickPickPendingIntent(context: Context, pickIndex: Int, requestCode: Int): PendingIntent {
+        private fun getBroadcastPendingIntent(context: Context, actionStr: String, requestCode: Int): PendingIntent {
             val intent = Intent(context, MicaMusicWidgetProvider::class.java).apply {
-                action = ACTION_WIDGET_PLAY_PICK
-                putExtra(EXTRA_PICK_INDEX, pickIndex)
+                action = actionStr
             }
             return PendingIntent.getBroadcast(
                 context,
@@ -172,24 +171,38 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
     ) {
         super.onUpdate(context, appWidgetManager, appWidgetIds)
         for (widgetId in appWidgetIds) {
-            val views = buildRemoteViews(context, lastIsPlaying, lastTitle, lastArtist, lastArt)
+            val views = buildRemoteViews(
+                context, lastIsPlaying, lastTitle, lastArtist, lastArt,
+                lastPosMs, lastDurMs, lastIsLiked, lastIsRepeat
+            )
             appWidgetManager.updateAppWidget(widgetId, views)
         }
     }
 
     override fun onReceive(context: Context, intent: Intent?) {
         super.onReceive(context, intent)
-        if (intent?.action == ACTION_WIDGET_PLAY_PICK) {
-            val pickIndex = intent.getIntExtra(EXTRA_PICK_INDEX, 0)
+        val action = intent?.action ?: return
+        val serviceAction = when (action) {
+            ACTION_WIDGET_TOGGLE -> "toggle"
+            ACTION_WIDGET_PREV -> "previous"
+            ACTION_WIDGET_NEXT -> "next"
+            ACTION_WIDGET_LIKE -> "toggle_like"
+            ACTION_WIDGET_REPEAT -> "toggle_repeat"
+            else -> return
+        }
+
+        if (PlaybackService.isServiceRunning) {
             val serviceIntent = Intent(context, PlaybackService::class.java).apply {
-                action = "widget_play_pick"
-                putExtra(EXTRA_PICK_INDEX, pickIndex)
+                this.action = serviceAction
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent)
-            } else {
-                context.startService(serviceIntent)
+            context.startService(serviceIntent)
+        } else {
+            // When service isn't active yet, launch MainActivity to safely bring app to foreground
+            val openIntent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("auto_play", true)
             }
+            context.startActivity(openIntent)
         }
     }
 }

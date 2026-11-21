@@ -165,7 +165,7 @@ object JamSyncController {
         val ip = getLocalIpAddress()
         val randomSuffix = (1000..9999).random().toString()
         val roomCode = "JAM-$randomSuffix"
-        val topic = "msplayer/jam/$randomSuffix"
+        val topic = "mica/jam/$randomSuffix"
 
         _sessionState.value = JamSessionState(
             role = JamRole.HOST,
@@ -179,7 +179,7 @@ object JamSyncController {
         serverJob = scope.launch(Dispatchers.IO) {
             var mqttClient: MinimalMqttClient? = null
             try {
-                val mqtt = MinimalMqttClient(clientId = "msplayer_host_$randomSuffix")
+                val mqtt = MinimalMqttClient(clientId = "mica_host_$randomSuffix")
                 if (mqtt.connect()) {
                     mqttClient = mqtt
                 }
@@ -279,7 +279,7 @@ object JamSyncController {
         val cleanInput = hostInput.trim().uppercase()
         val isDirectIp = cleanInput.contains(".")
         val cleanSuffix = cleanInput.removePrefix("JAM-").removePrefix("#").lowercase()
-        val topic = "msplayer/jam/$cleanSuffix"
+        val topic = "mica/jam/$cleanSuffix"
 
         _sessionState.value = JamSessionState(
             role = JamRole.LISTENER,
@@ -292,7 +292,7 @@ object JamSyncController {
         clientJob = scope.launch(Dispatchers.IO) {
             // Path A: Global Internet Relay via MQTT (Covai <-> Madurai worldwide)
             if (!isDirectIp) {
-                val mqtt = MinimalMqttClient(clientId = "msplayer_listener_${System.currentTimeMillis()}")
+                val mqtt = MinimalMqttClient(clientId = "mica_listener_${System.currentTimeMillis()}")
                 if (mqtt.connect() && mqtt.subscribe(topic)) {
                     _sessionState.value = _sessionState.value.copy(
                         isConnected = true,
@@ -775,7 +775,7 @@ fun JamSyncDialog(
 class MinimalMqttClient(
     val host: String = "broker.hivemq.com",
     val port: Int = 1883,
-    val clientId: String = "msplayer_" + System.currentTimeMillis()
+    val clientId: String = "mica_" + System.currentTimeMillis()
 ) {
     private var socket: Socket? = null
     private var outStream: java.io.OutputStream? = null

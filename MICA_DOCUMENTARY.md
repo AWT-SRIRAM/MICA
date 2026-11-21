@@ -6,7 +6,7 @@
 **Repository**: [https://github.com/AWT-SRIRAM/MICA](https://github.com/AWT-SRIRAM/MICA)  
 **Authors**: **SRIRAM S & ANTIGRAVITY**  
 **Target Architecture**: Android (ARM64-v8a / Android 8.0+ API 26–36)  
-**Current Version**: `0.8.2` (VersionCode `29`)  
+**Current Version**: `0.8.3` (VersionCode `31`)  
 
 ---
 

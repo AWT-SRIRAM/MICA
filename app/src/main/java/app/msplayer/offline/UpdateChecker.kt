@@ -17,7 +17,7 @@ data class UpdateInfo(
 
 object UpdateChecker {
 
-    private const val GITHUB_RELEASES_URL = "https://api.github.com/repos/AWT-SRIRAM/MSPLAYER/releases/latest"
+    private const val GITHUB_RELEASES_URL = "https://api.github.com/repos/AWT-SRIRAM/MICA/releases/latest"
 
     fun isNewerVersion(remoteTag: String, currentVer: String): Boolean {
         val cleanRemote = remoteTag.trim().removePrefix("v").removePrefix("V")
@@ -55,7 +55,7 @@ object UpdateChecker {
             val tagName = json.optString("tag_name", "").trim()
             val releaseTitle = json.optString("name", tagName).trim()
             val changelog = json.optString("body", "").trim()
-            val htmlUrl = json.optString("html_url", "https://github.com/AWT-SRIRAM/MSPLAYER/releases").trim()
+            val htmlUrl = json.optString("html_url", "https://github.com/AWT-SRIRAM/MICA/releases").trim()
 
             var apkDownloadUrl = ""
             val assets = json.optJSONArray("assets")

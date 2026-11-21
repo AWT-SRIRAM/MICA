@@ -1013,10 +1013,10 @@ object YtMusicClient {
 
     fun fetchVideoStreamFromPiped(videoId: String): YtResolvedStream? {
         val pipedEndpoints = listOf(
-            "https://piped-api.garudalinux.org/streams/",
+            "https://pipedapi.adminforge.de/streams/",
+            "https://piped-api.lunar.icu/streams/",
             "https://api.piped.yt/streams/",
-            "https://cf.piped.video/streams/",
-            "https://pipedapi.tokhmi.xyz/streams/"
+            "https://cf.piped.video/streams/"
         )
         for (base in pipedEndpoints) {
             try {
@@ -1058,7 +1058,8 @@ object YtMusicClient {
 
     fun fetchAudioStreamFromPiped(videoId: String): YtResolvedStream? {
         val pipedEndpoints = listOf(
-            "https://pipedapi.kavin.rocks/streams/",
+            "https://pipedapi.adminforge.de/streams/",
+            "https://piped-api.lunar.icu/streams/",
             "https://api.piped.yt/streams/",
             "https://cf.piped.video/streams/"
         )

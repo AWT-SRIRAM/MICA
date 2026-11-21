@@ -183,18 +183,61 @@ object PlaybackRules {
 
     fun parseSubtitleCues(raw: String): List<SubtitleCue> {
         val cues = ArrayList<SubtitleCue>()
+
+        // 1. YouTube / Streaming XML TimedText support (<transcript><text start="1.5" dur="2.0">...</text>)
+        if (raw.contains("<text start=") || raw.contains("<transcript>")) {
+            val xmlRegex = Regex("""<text\s+start="([\d\.]+)"(?:\s+dur="([\d\.]+)")?[^>]*>([\s\S]*?)<\/text>""")
+            for (match in xmlRegex.findAll(raw)) {
+                val (startStr, durStr, textContent) = match.destructured
+                val startSec = startStr.toDoubleOrNull() ?: 0.0
+                val durSec = durStr.toDoubleOrNull() ?: 2.5
+                val startMs = (startSec * 1000.0).toLong()
+                val endMs = ((startSec + durSec) * 1000.0).toLong()
+                val clean = textContent
+                    .replace("&amp;", "&")
+                    .replace("&quot;", "\"")
+                    .replace("&#39;", "'")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace(Regex("""<[^>]+>"""), "")
+                    .trim()
+                if (clean.isNotEmpty()) {
+                    cues += SubtitleCue(startMs, endMs, clean)
+                }
+            }
+            if (cues.isNotEmpty()) return cues.sortedBy { it.startMs }
+        }
+
         val lines = raw.lines()
         var i = 0
-        val timeRegex = Regex("""(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{3})\s*-->\s*(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{3})""")
+        // Universal WebVTT & SRT timestamp regex supporting mm:ss.ms, hh:mm:ss.ms, and comma/period decimals
+        val timeRegex = Regex("""((?:\d{1,2}:)?\d{1,2}:\d{2}[,.]\d{2,3})\s*-->\s*((?:\d{1,2}:)?\d{1,2}:\d{2}[,.]\d{2,3})""")
         val ssaRegex = Regex("""^Dialogue:\s*\d+,(\d+):(\d{2}):(\d{2})\.(\d{2}),(\d+):(\d{2}):(\d{2})\.(\d{2}),[^,]*?,[^,]*?,[^,]*?,[^,]*?,[^,]*?,[^,]*?,(.*)$""")
+
+        fun parseTimestamp(str: String): Long {
+            val s = str.trim()
+            val parts = s.split(':', '.', ',')
+            return if (parts.size >= 4) {
+                val h = parts[0].toLongOrNull() ?: 0L
+                val m = parts[1].toLongOrNull() ?: 0L
+                val sec = parts[2].toLongOrNull() ?: 0L
+                val ms = parts[3].padEnd(3, '0').take(3).toLongOrNull() ?: 0L
+                h * 3600000L + m * 60000L + sec * 1000L + ms
+            } else if (parts.size == 3) {
+                val m = parts[0].toLongOrNull() ?: 0L
+                val sec = parts[1].toLongOrNull() ?: 0L
+                val ms = parts[2].padEnd(3, '0').take(3).toLongOrNull() ?: 0L
+                m * 60000L + sec * 1000L + ms
+            } else 0L
+        }
 
         while (i < lines.size) {
             val line = lines[i].trim()
             val match = timeRegex.find(line)
             if (match != null) {
-                val (h1, m1, s1, ms1, h2, m2, s2, ms2) = match.destructured
-                val startMs = (h1.toLongOrNull() ?: 0L) * 3600000L + m1.toLong() * 60000L + s1.toLong() * 1000L + ms1.toLong()
-                val endMs = (h2.toLongOrNull() ?: 0L) * 3600000L + m2.toLong() * 60000L + s2.toLong() * 1000L + ms2.toLong()
+                val (t1, t2) = match.destructured
+                val startMs = parseTimestamp(t1)
+                val endMs = parseTimestamp(t2)
                 i++
                 val textBuilder = StringBuilder()
                 while (i < lines.size && lines[i].trim().isNotEmpty()) {

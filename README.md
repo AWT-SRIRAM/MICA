@@ -5,7 +5,7 @@
   <h3>ONE APP. EVERY EXPERIENCE.</h3>
   <p><strong>The Universe of Entertainment — Music • Movies • Streaming • AI Subtitles • Beyond</strong></p>
   <p>
-    <a href="https://github.com/AWT-SRIRAM/MICA/releases"><img src="https://img.shields.io/badge/Release-v0.8.2-blue?style=for-the-badge" alt="Release v0.8.2" /></a>
+    <a href="https://github.com/AWT-SRIRAM/MICA/releases"><img src="https://img.shields.io/badge/Release-v0.8.3-blue?style=for-the-badge" alt="Release v0.8.3" /></a>
     <img src="https://img.shields.io/badge/Platform-Android%208.0+-green?style=for-the-badge" alt="Android 8.0+" />
     <img src="https://img.shields.io/badge/Architecture-ARM64--v8a-orange?style=for-the-badge" alt="ARM64-v8a" />
     <img src="https://img.shields.io/badge/License-MIT-purple?style=for-the-badge" alt="License MIT" />
@@ -18,10 +18,10 @@
 
 **MICA** is a flagship, offline-first, privacy-respecting multimedia entertainment platform built natively with **Kotlin**, **Jetpack Compose**, and hardware-accelerated **LibVLC Android 3.7.7**. 
 
-MICA unites a **Spotify-grade Lossless Music Hub**, a **4K/8K HDR Video Cinema**, a **Brave-style Ad-Shield Browser with direct stream sniffing for anime & cartoons**, an **interactive Android Home Screen Widget**, and **MICA JAM social listening** into one cohesive, buttery-smooth Liquid Glass interface.
+MICA unites a **Spotify-grade Lossless Music Hub**, a **4K/8K HDR Video Cinema**, a **Brave-style Ad-Shield Browser with direct stream sniffing for anime & cartoons**, an **interactive Android Home Screen Widget (Style 1 Control Center Glass)**, and **MICA JAM social listening** into one cohesive, buttery-smooth Liquid Glass interface.
 
 - **Package ID**: `app.mica`
-- **Current Version**: `0.8.2` (Build Code `29`)
+- **Current Version**: `0.8.3` (Build Code `31`)
 - **Creators**: **SRIRAM S & ANTIGRAVITY**
 - **Repository**: [github.com/AWT-SRIRAM/MICA](https://github.com/AWT-SRIRAM/MICA)
 - **Target Device Profile**: iQOO Neo 10R / All Android 8.0+ (API 26–36) devices
@@ -76,12 +76,12 @@ MICA unites a **Spotify-grade Lossless Music Hub**, a **4K/8K HDR Video Cinema**
 
 | Release File | Version | Target ABI | Download Link |
 | :--- | :--- | :--- | :--- |
-| **`MICA-PLAYER-0.8.2-arm64.apk`** | `v0.8.2` | ARM64 (`arm64-v8a`) | [Direct Download](https://github.com/AWT-SRIRAM/MICA/releases) |
+| **`MICA-PLAYER-0.8.3-arm64.apk`** | `v0.8.3` | ARM64 (`arm64-v8a`) | [Direct Download](https://github.com/AWT-SRIRAM/MICA/releases) |
 
 ### SHA-256 Checksum:
 Verify package integrity before installation:
 ```bash
-sha256sum MICA-PLAYER-0.8.2-arm64.apk
+sha256sum MICA-PLAYER-0.8.3-arm64.apk
 ```
 
 ---

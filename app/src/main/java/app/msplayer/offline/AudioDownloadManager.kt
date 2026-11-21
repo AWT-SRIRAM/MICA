@@ -294,7 +294,7 @@ object AudioDownloadManager {
 
     fun getDownloadDir(): File {
         val base = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC)
-        val dir = File(base, "MSPlayer")
+        val dir = File(base, "MICA")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
@@ -413,7 +413,7 @@ object AudioDownloadManager {
 
                     withContext(Dispatchers.Main) {
                         _activeDownloads.value = _activeDownloads.value + (videoId to DownloadProgress(videoId, title, 1f, isComplete = true))
-                        Toast.makeText(context, "Saved to Music/MSPlayer: $title", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "Saved to Music/MICA: $title", Toast.LENGTH_LONG).show()
                     }
                 } else {
                     tempFile.delete()

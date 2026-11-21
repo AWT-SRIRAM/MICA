@@ -63,6 +63,7 @@ fun YourLibraryScreen(
     var likedTracks by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var downloadedTracks by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var top50Tracks by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var localAudios by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var showImportSpotifyDialog by remember { mutableStateOf(false) }
     var importSpotifyUrl by remember { mutableStateOf("") }
     var isImportingSpotify by remember { mutableStateOf(false) }
@@ -76,6 +77,13 @@ fun YourLibraryScreen(
             val p = dao.playlists().filter { it != "Favorites" }
             val favEntries = dao.entries("Favorites").filter { it.title.isNotBlank() && it.title != "Opened files" }
             val allMedia = activity.videos + activity.audios
+            val localOnlyAudios = activity.audios.filter { song ->
+                !song.folder.contains("MSPlayer", ignoreCase = true) &&
+                !song.folder.contains("Mica", ignoreCase = true) &&
+                !song.uri.contains("MSPlayer", ignoreCase = true) &&
+                !song.uri.contains("Mica", ignoreCase = true) &&
+                !song.uri.startsWith(AudioDownloadManager.getDownloadDir().absolutePath)
+            }
             fun enrich(base: MediaItem): MediaItem {
                 val meta = TrackArtworkStore.findMeta(activity, base.uri, base.title) ?: return base
                 val bestThumb = meta.localCoverPath.takeIf { it.isNotBlank() && File(it).exists() }?.let { "file://$it" }
@@ -119,6 +127,7 @@ fun YourLibraryScreen(
                 likedTracks = favItems
                 downloadedTracks = dlItems
                 top50Tracks = topItems
+                localAudios = localOnlyAudios
             }
         }
     }
@@ -229,11 +238,11 @@ fun YourLibraryScreen(
             // Display Tracks depending on Selected Section or Filter
             when (selectedSection) {
                 "Songs", "LocalAudio" -> {
-                    item { SectionHeader("All Device Songs (${activity.audios.size})", palette) { selectedSection = null } }
-                    if (activity.audios.isEmpty()) {
+                    item { SectionHeader("All Device Songs (${localAudios.size})", palette) { selectedSection = null } }
+                    if (localAudios.isEmpty()) {
                         item { EmptyNotice("No local audio files found on device.", palette) }
                     } else {
-                        items(activity.audios, key = { it.uri }) { song ->
+                        items(localAudios, key = { it.uri }) { song ->
                             MediaRow(song, palette, glassEnabled) { onOpenMedia(song) }
                         }
                     }
@@ -341,7 +350,7 @@ fun YourLibraryScreen(
                                         Icon(Icons.Rounded.Headphones, null, tint = Color.White, modifier = Modifier.size(24.dp))
                                         Spacer(Modifier.height(8.dp))
                                         Text("Local Audio", color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
-                                        Text("${activity.audios.size} device songs", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 1)
+                                        Text("${localAudios.size} device songs", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 1)
                                     }
                                 }
                             }

@@ -223,10 +223,10 @@ fun OnlineMusicScreen(
 
     val categories = remember(palette.mode) {
         when (palette.mode) {
-            AppThemeMode.WHITE_LIQUID_GLASS -> listOf("✨ For You", "💎 Hi-Res FLAC", "Spotify", "☀️ Crystal Pop", "🎸 Acoustic Glass", "🌿 Fresh Morning", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Bollywood")
-            AppThemeMode.LIGHT -> listOf("✨ For You", "💎 Hi-Res FLAC", "Spotify", "☀️ Daylight Hits", "🎵 Feel Good", "🎸 Acoustic", "Popular Artists", "Tamil Hits", "English Pop", "Trending", "Kollywood")
-            AppThemeMode.DARK_LIQUID_GLASS -> listOf("✨ For You", "💎 Hi-Res FLAC", "Spotify", "🌙 Midnight Glass", "🌌 Lo-Fi Chill", "🔊 Deep Bass", "Popular Artists", "Tamil OST & BGM", "Trending", "Kollywood", "EDM")
-            AppThemeMode.DARK -> listOf("✨ For You", "💎 Hi-Res FLAC", "Spotify", "🖤 Night Drive", "🔥 Mass BGM", "🎧 Hip-Hop & EDM", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Lo-Fi")
+            AppThemeMode.WHITE_LIQUID_GLASS -> listOf("✨ For You", "🎬 Videos", "💎 Hi-Res FLAC", "Spotify", "☀️ Crystal Pop", "🎸 Acoustic Glass", "🌿 Fresh Morning", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Bollywood")
+            AppThemeMode.LIGHT -> listOf("✨ For You", "🎬 Videos", "💎 Hi-Res FLAC", "Spotify", "☀️ Daylight Hits", "🎵 Feel Good", "🎸 Acoustic", "Popular Artists", "Tamil Hits", "English Pop", "Trending", "Kollywood")
+            AppThemeMode.DARK_LIQUID_GLASS -> listOf("✨ For You", "🎬 Videos", "💎 Hi-Res FLAC", "Spotify", "🌙 Midnight Glass", "🌌 Lo-Fi Chill", "🔊 Deep Bass", "Popular Artists", "Tamil OST & BGM", "Trending", "Kollywood", "EDM")
+            AppThemeMode.DARK -> listOf("✨ For You", "🎬 Videos", "💎 Hi-Res FLAC", "Spotify", "🖤 Night Drive", "🔥 Mass BGM", "🎧 Hip-Hop & EDM", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Lo-Fi")
         }
     }
 
@@ -956,10 +956,14 @@ fun OnlineMusicScreen(
                             shape = chipShape
                         )
                         .clickable(interactionSource = chipSrc, indication = null) {
-                            activeCategory = cat
-                            searchQuery = ""
-                            selectedPlaylist = null
-                            loadCategoryTracks(cat)
+                            if (cat == "🎬 Videos") {
+                                activity.activeBrowserUrl = Pair("https://m.youtube.com", "YouTube")
+                            } else {
+                                activeCategory = cat
+                                searchQuery = ""
+                                selectedPlaylist = null
+                                loadCategoryTracks(cat)
+                            }
                         }
                         .padding(horizontal = 14.dp, vertical = 7.dp)
                 ) {

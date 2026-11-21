@@ -392,6 +392,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
         }
 
     companion object {
+        @Volatile var isServiceRunning = false
+
         fun normalizeSongTitle(title: String): String {
             if (title.isBlank()) return ""
             var t = title.lowercase()
@@ -909,6 +911,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     override fun onCreate() {
         super.onCreate()
+        isServiceRunning = true
         val nm = getSystemService(NotificationManager::class.java)
         val playbackChannel = NotificationChannel("playback", "Media Playback", NotificationManager.IMPORTANCE_LOW).apply {
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
@@ -1370,6 +1373,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
             "previous" -> previous()
             "stop" -> stopPlayback()
             "shuffle", "toggle_shuffle" -> toggleShuffle()
+            "repeat", "toggle_repeat" -> toggleRepeat()
+            "like", "toggle_like" -> toggleCurrentTrackLike()
             "widget_play_pick" -> {
                 val pickIndex = intent.getIntExtra(MicaMusicWidgetProvider.EXTRA_PICK_INDEX, 0)
                 val hits = FeedCacheManager.cachedTopHits.value.ifEmpty { FeedCacheManager.defaultCuratedHits() }
@@ -1726,8 +1731,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     } else Media(vlc, uri)
                     media.setHWDecoderEnabled(decoderMode != "Software", decoderMode == "Hardware")
                     if (PlaybackRules.isStreamUrl(activeItem.uri)) {
-                        media.addOption(":network-caching=1500")
-                        media.addOption(":live-caching=1500")
+                        media.addOption(":network-caching=400")
+                        media.addOption(":live-caching=400")
+                        media.addOption(":clock-jitter=0")
+                        media.addOption(":clock-synchro=0")
                         media.addOption(":http-reconnect=1")
                         media.addOption(":http-forward-cookies")
                         val isYtStream = activeItem.uri.contains("googlevideo.com") || activeItem.uri.contains("youtube.com")
@@ -3308,6 +3315,11 @@ class PlaybackService : MediaBrowserServiceCompat() {
             .setShowWhen(false)
             .setSilent(true)
             .setOngoing(state.value.playing || state.value.buffering)
+            .addAction(
+                if (shuffleEnabled.value) R.drawable.ic_notif_shuffle else R.drawable.ic_notif_repeat,
+                if (shuffleEnabled.value) "Shuffle" else "Repeat",
+                action(if (shuffleEnabled.value) "toggle_repeat" else "toggle_shuffle")
+            )
             .addAction(R.drawable.ic_notif_prev, "Previous", action("previous"))
             .addAction(
                 if (state.value.playing) R.drawable.ic_notif_pause
@@ -3316,11 +3328,15 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 action(if (state.value.playing) "pause" else "play"),
             )
             .addAction(R.drawable.ic_notif_next, "Next", action("next"))
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", action("stop"))
+            .addAction(
+                if (currentTrackLiked) R.drawable.ic_notif_liked else R.drawable.ic_notif_like_add,
+                if (currentTrackLiked) "Unlike" else "Like",
+                action("toggle_like")
+            )
             .setStyle(
                 CompatMediaStyle()
                     .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2)
+                    .setShowActionsInCompactView(1, 2, 3)
             )
         sessionArtworkBitmap?.let { builder.setLargeIcon(it) }
         return builder.build()
@@ -3511,7 +3527,11 @@ class PlaybackService : MediaBrowserServiceCompat() {
             state.value.playing,
             curItem?.title ?: "MICA",
             curItem?.artist ?: "The Universe of Entertainment",
-            sessionArtworkBitmap
+            sessionArtworkBitmap,
+            posMs = state.value.position,
+            durMs = state.value.duration,
+            isLiked = currentTrackLiked,
+            isRepeat = repeatMode.value != "off"
         )
     }
 
@@ -3619,6 +3639,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
     }
 
     override fun onDestroy() {
+        isServiceRunning = false
         demuxJob?.cancel()
         if (!released) {
             saveFinalPosition()

@@ -45,7 +45,7 @@ data class VersionLockState(
     val isLocked: Boolean = false,
     val minRequiredVersion: String = "",
     val latestVersion: String = "",
-    val downloadUrl: String = "https://github.com/AWT-SRIRAM/MSPLAYER/releases/latest",
+    val downloadUrl: String = "https://github.com/AWT-SRIRAM/MICA/releases/latest",
     val message: String = "This build has expired or is deprecated. Please update to continue enjoying lossless music and video playback.",
 )
 
