@@ -67,6 +67,7 @@ fun YourLibraryScreen(
     var importSpotifyUrl by remember { mutableStateOf("") }
     var isImportingSpotify by remember { mutableStateOf(false) }
     var importError by remember { mutableStateOf<String?>(null) }
+    var showJamDialog by remember { mutableStateOf(false) }
 
     // Load library content
     LaunchedEffect(Unit) {
@@ -227,6 +228,16 @@ fun YourLibraryScreen(
 
             // Display Tracks depending on Selected Section or Filter
             when (selectedSection) {
+                "Songs", "LocalAudio" -> {
+                    item { SectionHeader("All Device Songs (${activity.audios.size})", palette) { selectedSection = null } }
+                    if (activity.audios.isEmpty()) {
+                        item { EmptyNotice("No local audio files found on device.", palette) }
+                    } else {
+                        items(activity.audios, key = { it.uri }) { song ->
+                            MediaRow(song, palette, glassEnabled) { onOpenMedia(song) }
+                        }
+                    }
+                }
                 "Liked" -> {
                     item { SectionHeader("Liked Songs (${likedTracks.size})", palette) { selectedSection = null } }
                     if (likedTracks.isEmpty()) {
@@ -291,6 +302,46 @@ fun YourLibraryScreen(
                                         Icon(Icons.Rounded.Add, null, tint = palette.accent, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(4.dp))
                                         Text("Import Spotify", color = palette.accent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                }
+                            }
+                        }
+
+                        item(key = "quick_library_tiles") {
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                // Emerald Mica Jam Tile
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .background(Brush.linearGradient(listOf(Color(0xFF059669), Color(0xFF10B981))))
+                                        .clickable { showJamDialog = true }
+                                        .padding(14.dp)
+                                ) {
+                                    Column {
+                                        Icon(Icons.Rounded.SpeakerGroup, null, tint = Color.White, modifier = Modifier.size(24.dp))
+                                        Spacer(Modifier.height(8.dp))
+                                        Text("Mica Jam", color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
+                                        Text("Listen together worldwide", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 1)
+                                    }
+                                }
+                                // Deep Cobalt Local Audio Tile
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .background(Brush.linearGradient(listOf(Color(0xFF1E3A8A), Color(0xFF2563EB))))
+                                        .clickable { selectedSection = "LocalAudio" }
+                                        .padding(14.dp)
+                                ) {
+                                    Column {
+                                        Icon(Icons.Rounded.Headphones, null, tint = Color.White, modifier = Modifier.size(24.dp))
+                                        Spacer(Modifier.height(8.dp))
+                                        Text("Local Audio", color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
+                                        Text("${activity.audios.size} device songs", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 1)
                                     }
                                 }
                             }
@@ -387,17 +438,37 @@ fun YourLibraryScreen(
                             }
                             val dao = Store.db(context).dao()
                             val now = System.currentTimeMillis()
+                            if (result.thumbUrl.isNotBlank()) {
+                                Store.prefs(context).edit().putString("playlist_cover_${result.title}", result.thumbUrl).apply()
+                                TrackArtworkStore.downloadAndCacheCover(context, "playlist://${result.title}", result.title, "Spotify Playlist", result.thumbUrl)
+                            }
                             result.tracks.forEach { tr ->
-                                val lazyUri = "resolve://spotify/${tr.title}::${tr.artist}"
+                                val trId = tr.trackId
+                                val lazyUri = if (trId.isNotBlank()) "resolve://spotify/${trId}::${tr.title}::${tr.artist}" else "resolve://spotify/${tr.title}::${tr.artist}"
+                                val specificThumb = if (trId.isNotBlank()) "spotify_track://$trId" else tr.thumbUrl
                                 dao.add(PlaylistEntry().apply {
                                     playlist = result.title
                                     uri = lazyUri
                                     this.title = "${tr.title} • ${tr.artist}"
                                     added = now
                                 })
-                                if (tr.thumbUrl.isNotBlank()) {
-                                    TrackArtworkStore.saveMeta(context, lazyUri, tr.title, tr.artist, tr.thumbUrl)
+                                if (specificThumb.isNotBlank()) {
+                                    TrackArtworkStore.saveMeta(context, lazyUri, tr.title, tr.artist, specificThumb)
                                 }
+                            }
+                            // Asynchronously prefetch authentic oEmbed track artwork in the background
+                            scope.launch(Dispatchers.IO) {
+                                result.tracks.forEach { tr ->
+                                    if (tr.trackId.isNotBlank()) {
+                                        val resolvedUrl = SpotifyClient.resolveTrackThumbnail(tr.trackId)
+                                        if (!resolvedUrl.isNullOrBlank()) {
+                                            val uriStr = "resolve://spotify/${tr.trackId}::${tr.title}::${tr.artist}"
+                                            TrackArtworkStore.saveMeta(context, uriStr, tr.title, tr.artist, resolvedUrl)
+                                            TrackArtworkStore.downloadAndCacheCover(context, uriStr, tr.title, tr.artist, resolvedUrl, forceOverwrite = true)
+                                        }
+                                    }
+                                }
+                                Library.bumpThumbnailRevision()
                             }
                             val updatedPlaylists = dao.playlists().filter { it != "Favorites" }
                             withContext(Dispatchers.Main) {
@@ -422,6 +493,10 @@ fun YourLibraryScreen(
             },
             containerColor = palette.surface
         )
+    }
+
+    if (showJamDialog) {
+        JamSyncDialog(service = service, onDismiss = { showJamDialog = false })
     }
 }
 
@@ -481,6 +556,26 @@ fun PlaylistRow(
     glassEnabled: Boolean,
     onClick: () -> Unit,
 ) {
+    val context = LocalContext.current
+    var coverBitmap by remember(title, isLikedPin) {
+        mutableStateOf(if (isLikedPin) null else OnlineImageCache.get("playlist_art::$title".lowercase()))
+    }
+    LaunchedEffect(title, isLikedPin) {
+        if (!isLikedPin && coverBitmap == null) {
+            val savedCover = Store.prefs(context).getString("playlist_cover_$title", null)
+            val bmp = TrackArtworkStore.resolveAndCacheCover(
+                context = context,
+                uri = "playlist://$title",
+                title = title,
+                artist = "Playlist",
+                existingThumbUri = savedCover
+            )
+            if (bmp != null) {
+                OnlineImageCache.put("playlist_art::$title".lowercase(), bmp)
+                coverBitmap = bmp
+            }
+        }
+    }
     val rowBg = when {
         glassEnabled && palette.isLight -> Color.White.copy(alpha = 0.72f)
         glassEnabled -> Color.White.copy(alpha = 0.05f)
@@ -503,12 +598,25 @@ fun PlaylistRow(
     ) {
         Box(
             Modifier
-                .size(50.dp)
+                .size(52.dp)
                 .clip(RoundedCornerShape(12.dp))
-                .background(if (isLikedPin) Brush.linearGradient(listOf(Color(0xFF5B21B6), Color(0xFF7C3AED))) else Brush.linearGradient(listOf(Color(0xFF0284C7), Color(0xFF38BDF8)))),
+                .background(
+                    if (isLikedPin) Brush.linearGradient(listOf(Color(0xFF5B21B6), Color(0xFF7C3AED)))
+                    else Brush.linearGradient(listOf(Color(0xFF0284C7), Color(0xFF38BDF8)))
+                ),
             contentAlignment = Alignment.Center
         ) {
-            Icon(icon, null, tint = Color.White, modifier = Modifier.size(24.dp))
+            val bmp = coverBitmap
+            if (!isLikedPin && bmp != null) {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = title,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            } else {
+                Icon(icon, null, tint = Color.White, modifier = Modifier.size(24.dp))
+            }
         }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {

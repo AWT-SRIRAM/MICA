@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import android.util.LruCache
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -17,6 +19,11 @@ import java.net.URLEncoder
 data class YtResolvedStream(
     val url: String,
     val userAgent: String,
+    val isVideo: Boolean = false,
+    val title: String = "",
+    val author: String = "",
+    val thumbUrl: String = "",
+    val subtitleUrl: String? = null,
 )
 
 data class YtTrack(
@@ -214,14 +221,57 @@ object YtMusicClient {
                                 }
                             }
 
-                            if (flexCols.length() > 1) {
-                                val col1Runs = flexCols.optJSONObject(1)
+                            val nonBadgeArtists = mutableListOf<String>()
+                            val skipBadges = setOf("song", "video", "single", "album", "ep", "•", "·", "|", "/", "-")
+                            for (fc in 1 until flexCols.length()) {
+                                val colRuns = flexCols.optJSONObject(fc)
                                     ?.optJSONObject("musicResponsiveListItemFlexColumnRenderer")
-                                    ?.optJSONObject("text")?.optJSONArray("runs")
-                                if (col1Runs != null && col1Runs.length() > 0) {
-                                    artistName = col1Runs.optJSONObject(0)?.optString("text", "Unknown") ?: "Unknown"
-                                    if (col1Runs.length() >= 3) {
-                                        dur = col1Runs.optJSONObject(col1Runs.length() - 1)?.optString("text", "") ?: ""
+                                    ?.optJSONObject("text")?.optJSONArray("runs") ?: continue
+                                for (r in 0 until colRuns.length()) {
+                                    val rObj = colRuns.optJSONObject(r) ?: continue
+                                    val rText = rObj.optString("text", "").trim()
+                                    if (rText.isBlank() || rText.lowercase() in skipBadges) continue
+                                    val isDurationOrViews = rText.matches(Regex("""^\d+:\d+$""")) ||
+                                            rText.contains("views", true) ||
+                                            rText.contains("plays", true) ||
+                                            rText.matches(Regex("""^\d{4}$"""))
+                                    if (!isDurationOrViews) {
+                                        nonBadgeArtists.add(rText)
+                                    } else if (rText.matches(Regex("""^\d+:\d+$"""))) {
+                                        dur = rText
+                                    }
+                                }
+                            }
+                            if (nonBadgeArtists.isNotEmpty()) {
+                                artistName = nonBadgeArtists.joinToString(", ")
+                            }
+
+                            if (artistName.equals("Unknown", true) || artistName.equals("Song", true) || artistName.equals("Video", true)) {
+                                val subRuns = item.optJSONObject("subtitle")?.optJSONArray("runs")
+                                if (subRuns != null && subRuns.length() > 0) {
+                                    val subArtists = mutableListOf<String>()
+                                    for (r in 0 until subRuns.length()) {
+                                        val t = subRuns.optJSONObject(r)?.optString("text", "").orEmpty().trim()
+                                        if (t.isNotBlank() && t.lowercase() !in skipBadges) {
+                                            subArtists.add(t)
+                                        }
+                                    }
+                                    if (subArtists.isNotEmpty()) artistName = subArtists.joinToString(", ")
+                                }
+                            }
+
+                            if (artistName.equals("Unknown", true) || artistName.equals("Song", true) || artistName.equals("Video", true)) {
+                                if (trackTitle.contains(" - ")) {
+                                    val parts = trackTitle.split(" - ")
+                                    if (parts.size >= 2) {
+                                        artistName = parts[1].trim()
+                                        trackTitle = parts[0].trim()
+                                    }
+                                } else if (trackTitle.contains(" | ")) {
+                                    val parts = trackTitle.split(" | ")
+                                    if (parts.size >= 2) {
+                                        artistName = parts[1].trim()
+                                        trackTitle = parts[0].trim()
                                     }
                                 }
                             }
@@ -398,7 +448,7 @@ object YtMusicClient {
                         put("gl", "IN")
                     })
                 })
-                put("browseId", if (browseId.startsWith("VL") || browseId.startsWith("MPREb_")) browseId else "VL$browseId")
+                put("browseId", if (browseId.startsWith("VL") || browseId.startsWith("MPREb_") || browseId.startsWith("OLAK")) browseId else "VL$browseId")
             }
 
             OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
@@ -647,10 +697,220 @@ object YtMusicClient {
                 return@withContext resolved
             }
         }
+        val pipedAudio = fetchAudioStreamFromPiped(videoId)
+        if (pipedAudio != null && pipedAudio.url.isNotBlank()) {
+            streamUrlCache.put(videoId, pipedAudio to (now + 2 * 3600 * 1000L))
+            return@withContext pipedAudio
+        }
         null
     }
 
     suspend fun resolveStreamUrl(videoId: String): String? = resolveStreamUrlWithUa(videoId)?.url
+
+    /**
+     * Public, zero-auth YouTube search suggestion predictions.
+     * No Google account or cookies needed.
+     */
+    suspend fun getSearchSuggestions(query: String): List<String> = withContext(Dispatchers.IO) {
+        val q = query.trim()
+        if (q.isBlank()) return@withContext emptyList()
+        runCatching {
+            val enc = java.net.URLEncoder.encode(q, "UTF-8")
+            val url = URL("https://suggestqueries.google.com/complete/search?client=youtube&ds=yt&client=firefox&q=$enc")
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 2500
+                readTimeout = 2500
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (conn.responseCode in 200..299) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                val arr = org.json.JSONArray(json)
+                val suggestions = arr.optJSONArray(1) ?: return@runCatching emptyList<String>()
+                val list = mutableListOf<String>()
+                for (i in 0 until suggestions.length()) {
+                    val s = suggestions.optString(i, "").trim()
+                    if (s.isNotBlank() && !s.equals(q, ignoreCase = true)) {
+                        list.add(s)
+                    }
+                }
+                list.take(7)
+            } else emptyList()
+        }.getOrDefault(emptyList())
+    }
+
+    suspend fun resolveVideoStreamUrlWithUa(videoId: String): YtResolvedStream? = withContext(Dispatchers.IO) {
+        if (videoId.isBlank()) return@withContext null
+        coroutineScope {
+            // Race the top 2 fast clients (ANDROID_VR and IOS) concurrently for instant start
+            val vrDef = async { fetchVideoStreamWithClient(videoId, "ANDROID_VR") }
+            val iosDef = async { fetchVideoStreamWithClient(videoId, "IOS") }
+
+            val vrRes = vrDef.await()
+            if (vrRes != null && vrRes.url.isNotBlank() && vrRes.isVideo) return@coroutineScope vrRes
+
+            val iosRes = iosDef.await()
+            if (iosRes != null && iosRes.url.isNotBlank() && iosRes.isVideo) return@coroutineScope iosRes
+
+            // Fallback to remaining clients if needed
+            val remaining = listOf("TV_EMBEDDED", "ANDROID_TESTSUITE", "ANDROID")
+            for (client in remaining) {
+                val resolved = fetchVideoStreamWithClient(videoId, client)
+                if (resolved != null && resolved.url.isNotBlank() && resolved.isVideo) {
+                    return@coroutineScope resolved
+                }
+            }
+            fetchVideoStreamFromPiped(videoId)
+        }
+    }
+
+    private fun fetchVideoStreamWithClient(videoId: String, clientType: String): YtResolvedStream? {
+        try {
+            val ua = when (clientType) {
+                "TV_EMBEDDED" -> USER_AGENT_WEB
+                "IOS" -> USER_AGENT_IOS
+                "ANDROID_TESTSUITE" -> "com.google.android.youtube/1.9 (Linux; U; Android 11; en_IN)"
+                "ANDROID_VR" -> USER_AGENT_ANDROID_VR
+                else -> USER_AGENT_ANDROID
+            }
+            val url = URL(YT_PLAYER)
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 6000
+                readTimeout = 7000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("User-Agent", ua)
+                setRequestProperty("Connection", "keep-alive")
+                googleAuthCookies?.let { setRequestProperty("Cookie", it) }
+            }
+
+            val payload = JSONObject().apply {
+                put("context", JSONObject().apply {
+                    put("client", JSONObject().apply {
+                        when (clientType) {
+                            "TV_EMBEDDED" -> {
+                                put("clientName", "TVHTML5_SIMPLY_EMBEDDED_PLAYER")
+                                put("clientVersion", "2.0")
+                                put("hl", "en")
+                                put("gl", "IN")
+                            }
+                            "IOS" -> {
+                                put("clientName", "IOS")
+                                put("clientVersion", "19.29.1")
+                                put("deviceMake", "Apple")
+                                put("deviceModel", "iPhone16,2")
+                                put("hl", "en")
+                                put("gl", "IN")
+                            }
+                            "ANDROID_TESTSUITE" -> {
+                                put("clientName", "ANDROID_TESTSUITE")
+                                put("clientVersion", "1.9")
+                                put("androidSdkVersion", 30)
+                                put("hl", "en")
+                                put("gl", "IN")
+                            }
+                            "ANDROID_VR" -> {
+                                put("clientName", "ANDROID_VR")
+                                put("clientVersion", "1.56.21")
+                                put("deviceMake", "Oculus")
+                                put("deviceModel", "Quest 3")
+                                put("androidSdkVersion", 32)
+                                put("osName", "Android")
+                                put("osVersion", "12")
+                                put("hl", "en")
+                                put("gl", "IN")
+                            }
+                            else -> {
+                                put("clientName", "ANDROID")
+                                put("clientVersion", "21.26.364")
+                                put("androidSdkVersion", 30)
+                                put("osName", "Android")
+                                put("osVersion", "11")
+                                put("hl", "en")
+                                put("gl", "IN")
+                            }
+                        }
+                    })
+                    if (clientType == "TV_EMBEDDED") {
+                        put("thirdParty", JSONObject().apply {
+                            put("embedUrl", "https://www.youtube.com")
+                        })
+                    }
+                })
+                put("videoId", videoId)
+            }
+
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload.toString()) }
+
+            if (conn.responseCode in 200..299) {
+                val respText = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { it.readText() }
+                val root = JSONObject(respText)
+                val videoDetails = root.optJSONObject("videoDetails")
+                val videoTitle = videoDetails?.optString("title", "")?.trim().orEmpty()
+                val videoAuthor = videoDetails?.optString("author", "")?.trim().orEmpty()
+                val videoThumb = videoDetails?.optJSONObject("thumbnail")?.optJSONArray("thumbnails")?.let { arr ->
+                    if (arr.length() > 0) arr.optJSONObject(arr.length() - 1)?.optString("url", "") else ""
+                }.orEmpty().ifBlank { "https://img.youtube.com/vi/$videoId/hqdefault.jpg" }
+
+                val streamingData = root.optJSONObject("streamingData") ?: return null
+
+                var subUrl: String? = null
+                val captions = root.optJSONObject("captions")
+                val captionTracks = captions?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
+                if (captionTracks != null && captionTracks.length() > 0) {
+                    val firstTrack = captionTracks.optJSONObject(0)
+                    val rawBase = firstTrack?.optString("baseUrl", "")
+                    if (!rawBase.isNullOrBlank()) {
+                        subUrl = if (rawBase.contains("fmt=")) rawBase else "$rawBase&fmt=vtt"
+                    }
+                }
+
+                // 1. Prefer Apple HLS manifest (multi-resolution 720p/1080p/4K adaptive video + audio in LibVLC)
+                val hlsUrl = streamingData.optString("hlsManifestUrl", "")
+                if (hlsUrl.isNotBlank()) {
+                    return YtResolvedStream(hlsUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
+                }
+
+                // 2. Multiplexed combined formats (itag 22 = 720p, itag 18 = 360p)
+                val formats = streamingData.optJSONArray("formats")
+                if (formats != null) {
+                    var bestVideoUrl: String? = null
+                    var bestHeight = 0
+                    for (i in 0 until formats.length()) {
+                        val f = formats.optJSONObject(i) ?: continue
+                        val directUrl = f.optString("url", "")
+                        val height = f.optInt("height", 0)
+                        if (directUrl.isNotBlank() && height >= bestHeight) {
+                            bestVideoUrl = directUrl
+                            bestHeight = height
+                        }
+                    }
+                    if (bestVideoUrl != null) return YtResolvedStream(bestVideoUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
+                }
+
+                // 3. Adaptive video format fallback
+                val adaptive = streamingData.optJSONArray("adaptiveFormats")
+                if (adaptive != null) {
+                    var bestAdaptiveUrl: String? = null
+                    var bestAdaptHeight = 0
+                    for (i in 0 until adaptive.length()) {
+                        val f = adaptive.optJSONObject(i) ?: continue
+                        val mime = f.optString("mimeType", "")
+                        if (mime.contains("video")) {
+                            val directUrl = f.optString("url", "")
+                            val height = f.optInt("height", 0)
+                            if (directUrl.isNotBlank() && height >= bestAdaptHeight) {
+                                bestAdaptiveUrl = directUrl
+                                bestAdaptHeight = height
+                            }
+                        }
+                    }
+                    if (bestAdaptiveUrl != null) return YtResolvedStream(bestAdaptiveUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb)
+                }
+            }
+        } catch (_: Exception) {}
+        return null
+    }
 
     private fun fetchStreamWithClient(videoId: String, clientType: String): YtResolvedStream? {
         try {
@@ -748,6 +1008,83 @@ object YtMusicClient {
                 }
             }
         } catch (_: Exception) {}
+        return null
+    }
+
+    fun fetchVideoStreamFromPiped(videoId: String): YtResolvedStream? {
+        val pipedEndpoints = listOf(
+            "https://piped-api.garudalinux.org/streams/",
+            "https://api.piped.yt/streams/",
+            "https://cf.piped.video/streams/",
+            "https://pipedapi.tokhmi.xyz/streams/"
+        )
+        for (base in pipedEndpoints) {
+            try {
+                val conn = (URL("$base$videoId").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    setRequestProperty("User-Agent", USER_AGENT_WEB)
+                }
+                if (conn.responseCode in 200..299) {
+                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                    val obj = JSONObject(resp)
+                    val pTitle = obj.optString("title", "").trim()
+                    val pAuthor = obj.optString("uploader", "").trim()
+                    val pThumb = obj.optString("thumbnailUrl", "").trim().ifBlank { "https://img.youtube.com/vi/$videoId/hqdefault.jpg" }
+                    var pSubUrl: String? = null
+                    val subArr = obj.optJSONArray("subtitles")
+                    if (subArr != null && subArr.length() > 0) {
+                        pSubUrl = subArr.optJSONObject(0)?.optString("url", "")?.takeIf { it.isNotBlank() }
+                    }
+                    val hlsUrl = obj.optString("hls", "")
+                    if (hlsUrl.isNotBlank()) {
+                        return YtResolvedStream(hlsUrl, USER_AGENT_WEB, isVideo = true, title = pTitle, author = pAuthor, thumbUrl = pThumb, subtitleUrl = pSubUrl)
+                    }
+                    val videoStreams = obj.optJSONArray("videoStreams")
+                    if (videoStreams != null && videoStreams.length() > 0) {
+                        for (i in videoStreams.length() - 1 downTo 0) {
+                            val v = videoStreams.optJSONObject(i) ?: continue
+                            val streamUrl = v.optString("url", "")
+                            if (streamUrl.isNotBlank()) {
+                                return YtResolvedStream(streamUrl, USER_AGENT_WEB, isVideo = true, title = pTitle, author = pAuthor, thumbUrl = pThumb, subtitleUrl = pSubUrl)
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        return null
+    }
+
+    fun fetchAudioStreamFromPiped(videoId: String): YtResolvedStream? {
+        val pipedEndpoints = listOf(
+            "https://pipedapi.kavin.rocks/streams/",
+            "https://api.piped.yt/streams/",
+            "https://cf.piped.video/streams/"
+        )
+        for (base in pipedEndpoints) {
+            try {
+                val conn = (URL("$base$videoId").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    setRequestProperty("User-Agent", USER_AGENT_WEB)
+                }
+                if (conn.responseCode in 200..299) {
+                    val resp = conn.inputStream.bufferedReader().use { it.readText() }
+                    val obj = JSONObject(resp)
+                    val audioStreams = obj.optJSONArray("audioStreams")
+                    if (audioStreams != null && audioStreams.length() > 0) {
+                        for (i in audioStreams.length() - 1 downTo 0) {
+                            val a = audioStreams.optJSONObject(i) ?: continue
+                            val streamUrl = a.optString("url", "")
+                            if (streamUrl.isNotBlank()) {
+                                return YtResolvedStream(streamUrl, USER_AGENT_WEB, isVideo = false)
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
         return null
     }
 

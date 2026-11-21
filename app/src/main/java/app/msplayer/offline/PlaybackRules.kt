@@ -274,7 +274,8 @@ object PlaybackRules {
         val lower = url.trim().lowercase(java.util.Locale.ROOT)
         return lower.startsWith("http://") || lower.startsWith("https://") ||
                 lower.startsWith("rtsp://") || lower.startsWith("rtmp://") ||
-                lower.startsWith("mms://") || lower.startsWith("udp://")
+                lower.startsWith("mms://") || lower.startsWith("udp://") ||
+                lower.startsWith("resolve://") || lower.startsWith("yt_") || lower.startsWith("saavn_")
     }
 
     /**

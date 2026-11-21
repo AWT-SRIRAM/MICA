@@ -6,6 +6,7 @@ import java.util.List;
     @Query("SELECT * FROM saved_media WHERE uri=:uri") SavedMedia saved(String uri);
     @Insert(onConflict=OnConflictStrategy.REPLACE) void save(SavedMedia item);
     @Query("DELETE FROM saved_media") void clearHistory();
+    @Query("DELETE FROM saved_media WHERE uri=:uri OR uri LIKE '%' || :uri || '%'") void deleteSaved(String uri);
     @Insert(onConflict=OnConflictStrategy.REPLACE) void add(PlaylistEntry item);
     @Query("SELECT DISTINCT playlist FROM playlist_entries ORDER BY playlist") List<String> playlists();
     @Query("SELECT * FROM playlist_entries WHERE playlist=:name ORDER BY added") List<PlaylistEntry> entries(String name);

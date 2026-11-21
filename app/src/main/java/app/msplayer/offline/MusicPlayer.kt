@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.res.painterResource
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
@@ -36,10 +37,15 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -147,19 +153,26 @@ fun MusicPlayerScreen(
     var lyrics by remember(item.uri) { mutableStateOf<List<LocalLyrics.Line>>(emptyList()) }
     var lyricsLoading by remember(item.uri) { mutableStateOf(true) }
     var favourite by remember(item.uri) { mutableStateOf(false) }
+    val likedFromService by service.isCurrentTrackLiked.collectAsState()
+    LaunchedEffect(likedFromService) { favourite = likedFromService }
     val scope = rememberCoroutineScope()
     val dragY = remember { Animatable(0f) }
 
     DisposableEffect(Unit) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, _ -> }
         activity.lifecycle.addObserver(observer)
-        activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        onDispose { activity.lifecycle.removeObserver(observer); service.endTemporarySpeed() }
+        val origOrientation = activity.requestedOrientation
+        activity.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        onDispose {
+            activity.lifecycle.removeObserver(observer)
+            service.endTemporarySpeed()
+            activity.requestedOrientation = origOrientation
+        }
     }
 
     LaunchedEffect(item.uri) {
         withContext(Dispatchers.IO) {
-            val isLocal = item.uri.startsWith("content://") || item.uri.startsWith("file://")
+            val isLocal = item.uri.startsWith("content://") || item.uri.startsWith("file://") || item.uri.startsWith("/")
             var cover: android.graphics.Bitmap? = null
             var t: String? = null
             var a: String? = null
@@ -167,24 +180,34 @@ fun MusicPlayerScreen(
             if (isLocal) {
                 val retriever = MediaMetadataRetriever()
                 try {
-                    activity.contentResolver.openFileDescriptor(Uri.parse(item.uri), "r")?.use { fd ->
-                        retriever.setDataSource(fd.fileDescriptor)
-                        t = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
-                        a = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
-                        cover = retriever.embeddedPicture?.takeIf { it.size <= 8 * 1024 * 1024 }?.let { bytes ->
-                            val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                            val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = (maxOf(bounds.outWidth, bounds.outHeight) / 720).coerceAtLeast(1) }
-                            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                    if (item.uri.startsWith("/") || item.uri.startsWith("file://")) {
+                        val path = if (item.uri.startsWith("file://")) Uri.parse(item.uri).path else item.uri
+                        if (!path.isNullOrBlank()) retriever.setDataSource(path)
+                    } else {
+                        activity.contentResolver.openFileDescriptor(Uri.parse(item.uri), "r")?.use { fd ->
+                            retriever.setDataSource(fd.fileDescriptor)
                         }
+                    }
+                    t = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                    a = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                    cover = retriever.embeddedPicture?.takeIf { it.size <= 8 * 1024 * 1024 }?.let { bytes ->
+                        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                        val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = (maxOf(bounds.outWidth, bounds.outHeight) / 720).coerceAtLeast(1) }
+                        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
                     }
                 } catch (e: CancellationException) { throw e } catch (_: Exception) {} finally { retriever.release() }
             } else {
-                // Online stream
+                // Online stream or lazy resolve track
                 t = item.title
                 a = item.artist.ifBlank { "YouTube Music" }
-                val thumb = item.thumbUri
-                if (!thumb.isNullOrBlank()) {
+                val meta = TrackArtworkStore.findMeta(activity, item.uri, item.title)
+                val thumb = item.thumbUri?.takeIf { it.isNotBlank() } ?: meta?.thumbUrl
+                val localCover = meta?.localCoverPath?.takeIf { it.isNotBlank() && java.io.File(it).exists() }
+                if (localCover != null) {
+                    cover = runCatching { android.graphics.BitmapFactory.decodeFile(localCover) }.getOrNull()
+                }
+                if (cover == null && !thumb.isNullOrBlank()) {
                     cover = runCatching {
                         val conn = java.net.URL(thumb).openConnection() as java.net.HttpURLConnection
                         conn.connectTimeout = 4000
@@ -195,9 +218,21 @@ fun MusicPlayerScreen(
                 }
             }
 
-            val extractedMood = extractAdaptiveMoodColors(cover)
             val resolvedTitle = t?.takeIf { it.isNotBlank() } ?: item.title
             val resolvedArtist = a?.takeIf { it.isNotBlank() } ?: (item.artist.takeIf { it.isNotBlank() } ?: "Unknown artist")
+
+            // Auto-resolve & cache HD artwork if embeddedPicture or direct thumb was missing (e.g. downloaded offline tracks)
+            if (cover == null) {
+                cover = TrackArtworkStore.resolveAndCacheCover(
+                    context = activity,
+                    uri = item.uri,
+                    title = resolvedTitle,
+                    artist = resolvedArtist,
+                    existingThumbUri = item.thumbUri,
+                )
+            }
+
+            val extractedMood = extractAdaptiveMoodColors(cover)
             // Persist track artwork & artist metadata so Liked Songs & My Top 50 always show HD thumbnails
             val coverBmp = cover
             if (coverBmp != null) {
@@ -249,11 +284,80 @@ fun MusicPlayerScreen(
         )
     }
 
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current
+    val dismissThresholdPx = with(density) { 100.dp.toPx() }
+    val minFlingPx = with(density) { 15.dp.toPx() }
+
+    val nestedScrollConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                val delta = available.y
+                if (delta > 0 && scrollState.value == 0) {
+                    scope.launch { dragY.snapTo((dragY.value + delta).coerceAtLeast(0f)) }
+                    return Offset(0f, delta)
+                } else if (delta < 0 && dragY.value > 0f) {
+                    val newDrag = (dragY.value + delta).coerceAtLeast(0f)
+                    val consumed = dragY.value - newDrag
+                    scope.launch { dragY.snapTo(newDrag) }
+                    return Offset(0f, -consumed)
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                val delta = available.y
+                if (delta > 0 && scrollState.value == 0) {
+                    scope.launch { dragY.snapTo((dragY.value + delta).coerceAtLeast(0f)) }
+                    return Offset(0f, delta)
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (dragY.value > dismissThresholdPx || (available.y > 900f && dragY.value > minFlingPx)) {
+                    activity.exitPlayer()
+                    return available
+                } else if (dragY.value > 0f) {
+                    dragY.animateTo(0f, MotionSpec.PressSpring)
+                    return available
+                }
+                return Velocity.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (dragY.value > dismissThresholdPx || (available.y > 900f && dragY.value > minFlingPx)) {
+                    activity.exitPlayer()
+                } else if (dragY.value > 0f) {
+                    dragY.animateTo(0f, MotionSpec.PressSpring)
+                }
+                return Velocity.Zero
+            }
+        }
+    }
+
     Box(
         Modifier
             .fillMaxSize()
             .offset { IntOffset(0, dragY.value.roundToInt()) }
             .background(playerBackgroundBrush)
+            .nestedScroll(nestedScrollConnection)
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragEnd = {
+                        scope.launch {
+                            if (dragY.value > dismissThresholdPx) activity.exitPlayer()
+                            else dragY.animateTo(0f, MotionSpec.PressSpring)
+                        }
+                    },
+                    onDragCancel = { scope.launch { dragY.animateTo(0f, MotionSpec.PressSpring) } },
+                    onVerticalDrag = { _, dragAmount ->
+                        if ((dragAmount > 0f && scrollState.value == 0) || dragY.value > 0f) {
+                            scope.launch { dragY.snapTo((dragY.value + dragAmount).coerceAtLeast(0f)) }
+                        }
+                    },
+                )
+            }
     ) {
         // Soft Luminous Ambient Bloom behind artwork
         Box(
@@ -277,7 +381,7 @@ fun MusicPlayerScreen(
             Modifier
                 .fillMaxSize()
                 .safeDrawingPadding()
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(scrollState)
                 .padding(horizontal = 20.dp, vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -285,23 +389,7 @@ fun MusicPlayerScreen(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(top = 2.dp, bottom = 10.dp)
-                    .pointerInput(Unit) {
-                        detectVerticalDragGestures(
-                            onDragEnd = {
-                                scope.launch {
-                                    if (dragY.value > 100.dp.toPx()) activity.exitPlayer()
-                                    else dragY.animateTo(0f, MotionSpec.PressSpring)
-                                }
-                            },
-                            onDragCancel = { scope.launch { dragY.animateTo(0f, MotionSpec.PressSpring) } },
-                            onVerticalDrag = { _, dragAmount ->
-                                if (dragAmount > 0f || dragY.value > 0f) {
-                                    scope.launch { dragY.snapTo((dragY.value + dragAmount).coerceAtLeast(0f)) }
-                                }
-                            },
-                        )
-                    },
+                    .padding(top = 2.dp, bottom = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
@@ -325,8 +413,13 @@ fun MusicPlayerScreen(
                         fontWeight = FontWeight.Medium,
                     )
                     Spacer(Modifier.height(1.dp))
+                    val headerTitle = when {
+                        item.folder.isNotBlank() && item.folder != "Storage" -> item.folder.uppercase()
+                        item.uri.startsWith("content://") || item.uri.startsWith("file://") -> "LOCAL TRACKS"
+                        else -> "MICA MUSIC"
+                    }
                     Text(
-                        if (item.uri.startsWith("content://") || item.uri.startsWith("file://")) "LOCAL TRACKS" else "GOLD SONGS",
+                        headerTitle,
                         color = Color.White,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
@@ -336,11 +429,11 @@ fun MusicPlayerScreen(
                     )
                 }
 
-                // 3-Dots More Menu (Directly opens Information dialog as requested)
-                IconButton(onClick = { panel = "Information" }) {
+                // 3-Dots More Menu (Opens Track Options: Audio Effects, Equalizer, Details, Sleep Timer)
+                IconButton(onClick = { panel = "Options" }) {
                     Icon(
                         Icons.Rounded.MoreVert,
-                        "Track Information",
+                        "Options & Audio Effects",
                         tint = Color.White,
                         modifier = Modifier.size(24.dp)
                     )
@@ -348,67 +441,207 @@ fun MusicPlayerScreen(
             }
 
             val dragX = remember(item.uri) { Animatable(0f) }
+            val currentQueue by service.queueItems.collectAsState()
+            val currentIndex by service.queueIndex.collectAsState()
+            val nextTrack = currentQueue.getOrNull(currentIndex + 1)
+            val prevTrack = currentQueue.getOrNull(currentIndex - 1)
 
-            // 2. Large Centered Square Album Artwork Card with Spotify-style horizontal swipe
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(1f)
-                    .padding(vertical = 10.dp)
-                    .pointerInput(item.uri) {
-                        detectHorizontalDragGestures(
-                            onDragEnd = {
-                                scope.launch {
-                                    val currentX = dragX.value
-                                    if (currentX < -70.dp.toPx()) {
-                                        service.next()
-                                    } else if (currentX > 70.dp.toPx()) {
-                                        service.previous()
-                                    }
-                                    dragX.animateTo(0f, MotionSpec.PressSpring)
-                                }
-                            },
-                            onDragCancel = { scope.launch { dragX.animateTo(0f, MotionSpec.PressSpring) } },
-                            onHorizontalDrag = { _, dragAmount ->
-                                scope.launch { dragX.snapTo(dragX.value + dragAmount) }
-                            },
-                        )
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                val artShape = RoundedCornerShape(20.dp)
+            if (state.error != null) {
+                // Frosted Glass Error Diagnostics Card (No plain black/white screen)
                 Box(
                     Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            translationX = dragX.value
-                            rotationZ = (dragX.value / 25f).coerceIn(-8f, 8f)
-                        }
-                        .shadow(
-                            elevation = 28.dp,
-                            shape = artShape,
-                            spotColor = dynamicPrimary.copy(alpha = 0.75f),
-                            ambientColor = Color.Black
-                        )
-                        .clip(artShape)
-                        .background(Color(0xFF161F2E))
-                        .border(1.2.dp, Brush.linearGradient(listOf(Color.White.copy(alpha = 0.35f), Color.White.copy(alpha = 0.08f))), artShape),
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .padding(vertical = 10.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color(0xE01E1B26))
+                        .border(1.2.dp, Color(0xFFEF4444).copy(alpha = 0.5f), RoundedCornerShape(24.dp))
+                        .padding(20.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (artwork != null) {
-                        Image(
-                            artwork!!.asImageBitmap(),
-                            "Album Cover",
-                            Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop,
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Box(
+                            Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFEF4444).copy(alpha = 0.16f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Rounded.CloudOff, null, tint = Color(0xFFEF4444), modifier = Modifier.size(32.dp))
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "Playback Interrupted",
+                            color = Color.White,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold
                         )
-                    } else {
-                        Icon(
-                            Icons.Rounded.MusicNote,
-                            null,
-                            tint = Color.White.copy(alpha = 0.40f),
-                            modifier = Modifier.size(90.dp)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            state.error ?: "Unable to stream this audio track.",
+                            color = Color.White.copy(alpha = 0.75f),
+                            fontSize = 12.5.sp,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 8.dp)
                         )
+                        Spacer(Modifier.height(16.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Retry Button
+                            Button(
+                                onClick = {
+                                    service.retryCurrent()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                                shape = RoundedCornerShape(12.dp),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Rounded.Refresh, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Retry", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            // Next Track Button
+                            OutlinedButton(
+                                onClick = { service.next() },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Rounded.SkipNext, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Next", color = Color.White, fontSize = 13.sp)
+                            }
+                            // Play Offline Button
+                            OutlinedButton(
+                                onClick = { activity.exitPlayer() },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.35f)),
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Text("Offline", color = Color.White, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+            } else {
+                // 2. Large Centered Square Album Artwork Card with Spotify-style horizontal swipe & peek preview
+                val peekTrack = if (dragX.value < 0) nextTrack else prevTrack
+                val peekLabel = if (dragX.value < 0) "Up Next" else "Previous"
+                val peekArtwork = rememberRemoteBitmap(peekTrack?.thumbUri)
+
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .padding(vertical = 10.dp)
+                        .pointerInput(item.uri) {
+                            detectHorizontalDragGestures(
+                                onDragEnd = {
+                                    scope.launch {
+                                        val currentX = dragX.value
+                                        if (currentX < -70.dp.toPx()) {
+                                            service.next()
+                                        } else if (currentX > 70.dp.toPx()) {
+                                            service.previous()
+                                        }
+                                        dragX.animateTo(0f, MotionSpec.PressSpring)
+                                    }
+                                },
+                                onDragCancel = { scope.launch { dragX.animateTo(0f, MotionSpec.PressSpring) } },
+                                onHorizontalDrag = { _, dragAmount ->
+                                    scope.launch { dragX.snapTo(dragX.value + dragAmount) }
+                                },
+                            )
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val artShape = RoundedCornerShape(20.dp)
+
+                    // Layer 1: Peeking Preview Layer behind active card
+                    if (kotlin.math.abs(dragX.value) > 4f && peekTrack != null) {
+                        val peekProgress = (kotlin.math.abs(dragX.value) / 180f).coerceIn(0f, 1f)
+                        val peekScale = 0.88f + (peekProgress * 0.12f)
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    scaleX = peekScale
+                                    scaleY = peekScale
+                                    alpha = (peekProgress * 1.2f).coerceIn(0.2f, 1f)
+                                }
+                                .clip(artShape)
+                                .background(Color(0xFF111827))
+                                .border(1.dp, Color.White.copy(alpha = 0.2f), artShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (peekArtwork != null) {
+                                Image(peekArtwork.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                            } else {
+                                Icon(Icons.Rounded.MusicNote, null, tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(80.dp))
+                            }
+                            // Frosted pill badge
+                            Box(
+                                Modifier
+                                    .align(Alignment.TopCenter)
+                                    .padding(top = 16.dp)
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(Color.Black.copy(alpha = 0.72f))
+                                    .border(0.8.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+                                    .padding(horizontal = 14.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    "$peekLabel: ${peekTrack.title}",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    // Layer 2: Active Artwork Card
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                translationX = dragX.value
+                                rotationZ = (dragX.value / 25f).coerceIn(-8f, 8f)
+                            }
+                            .shadow(
+                                elevation = 28.dp,
+                                shape = artShape,
+                                spotColor = dynamicPrimary.copy(alpha = 0.75f),
+                                ambientColor = Color.Black
+                            )
+                            .clip(artShape)
+                            .background(Color(0xFF161F2E))
+                            .border(1.2.dp, Brush.linearGradient(listOf(Color.White.copy(alpha = 0.35f), Color.White.copy(alpha = 0.08f))), artShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (artwork != null) {
+                            Image(
+                                artwork!!.asImageBitmap(),
+                                "Album Cover",
+                                Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop,
+                            )
+                        } else {
+                            Icon(
+                                Icons.Rounded.MusicNote,
+                                null,
+                                tint = Color.White.copy(alpha = 0.40f),
+                                modifier = Modifier.size(90.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -439,6 +672,31 @@ fun MusicPlayerScreen(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
+                        val mediaInfo = remember(item.uri, state.playing) { runCatching { service.currentMediaDetailedInfo() }.getOrNull() }
+                        val audioCodec = mediaInfo?.streams?.firstOrNull { it.type == "Audio" }?.codec.orEmpty().lowercase()
+                        val isFlac = !item.uri.contains("googlevideo") && !item.uri.contains("saavn") &&
+                            (item.uri.endsWith(".flac", ignoreCase = true) || item.uri.contains("flac", ignoreCase = true) || item.uri.contains("motherearth", ignoreCase = true) || audioCodec.contains("flac"))
+                        val isAlac = !item.uri.contains("googlevideo") && !item.uri.contains("saavn") &&
+                            (item.uri.endsWith(".alac", ignoreCase = true) || (item.uri.endsWith(".m4a", ignoreCase = true) && item.title.contains("ALAC", ignoreCase = true)) || audioCodec.contains("alac"))
+                        val badgeText = when {
+                            isFlac -> "LOSSLESS FLAC"
+                            isAlac -> "LOSSLESS ALAC"
+                            else -> null
+                        }
+                        if (badgeText != null) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                badgeText,
+                                color = Color(0xFFFFD54F),
+                                fontSize = 9.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(100.dp))
+                                    .background(Color(0xFFFFD54F).copy(alpha = 0.18f))
+                                    .border(0.5.dp, Color(0xFFFFD54F).copy(alpha = 0.40f), RoundedCornerShape(100.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
                     }
                 }
 
@@ -447,27 +705,7 @@ fun MusicPlayerScreen(
                 // Spotify Heart Favorite Button (Favorite / FavoriteBorder)
                 IconButton(
                     onClick = {
-                        favourite = !favourite
-                        val liked = favourite
-                        scope.launch(Dispatchers.IO) {
-                            val dao = Store.db(activity).dao()
-                            if (liked) {
-                                dao.add(PlaylistEntry().apply {
-                                    playlist = "Favorites"
-                                    uri = item.uri
-                                    this.title = title.ifBlank { item.title }
-                                    added = System.currentTimeMillis()
-                                })
-                                val bmp = artwork
-                                if (bmp != null) {
-                                    TrackArtworkStore.saveBitmap(activity, item.uri, title.ifBlank { item.title }, artist, bmp, item.thumbUri ?: "")
-                                } else {
-                                    TrackArtworkStore.saveMeta(activity, item.uri, title.ifBlank { item.title }, artist, item.thumbUri ?: "")
-                                }
-                            } else {
-                                dao.remove("Favorites", item.uri)
-                            }
-                        }
+                        service.toggleCurrentTrackLike()
                     },
                     modifier = Modifier.size(38.dp)
                 ) {
@@ -512,7 +750,7 @@ fun MusicPlayerScreen(
                         .background(Color.White)
                 )
 
-                // White Circular Thumb Dot (size = 12.dp)
+                // White Circular Thumb Dot with clean accent border (Static, zero blinking)
                 Box(
                     Modifier
                         .fillMaxWidth()
@@ -523,11 +761,17 @@ fun MusicPlayerScreen(
                         Box(
                             Modifier
                                 .align(Alignment.CenterEnd)
-                                .offset(x = 6.dp)
-                                .size(12.dp)
-                                .clip(CircleShape)
-                                .background(Color.White)
-                        )
+                                .offset(x = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(13.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.White)
+                                    .border(1.5.dp, Accent, CircleShape)
+                            )
+                        }
                     }
                 }
 
@@ -592,79 +836,124 @@ fun MusicPlayerScreen(
                     )
                 }
 
-                // Skip Previous
+                // Skip Previous (Symmetric 32dp Material 3 icon)
                 IconButton(onClick = { service.previous() }) {
                     Icon(
                         Icons.Rounded.SkipPrevious,
-                        "Previous",
+                        contentDescription = "Previous",
                         tint = Color.White,
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(32.dp)
                     )
                 }
 
                 // BIG CIRCULAR WHITE PLAY/PAUSE BUTTON (64dp, Black icon)
+                var optimisticPlaying by remember(state.playing) { mutableStateOf(state.playing) }
+                val playPauseSrc = remember { MutableInteractionSource() }
                 Box(
                     Modifier
                         .size(64.dp)
                         .clip(CircleShape)
                         .background(Color.White)
-                        .clickable { service.toggle() },
+                        .iosLiquidPress(playPauseSrc, scaleDown = 0.90f)
+                        .clickable(
+                            interactionSource = playPauseSrc,
+                            indication = ripple(color = Color.Black.copy(alpha = 0.2f))
+                        ) {
+                            optimisticPlaying = !optimisticPlaying
+                            service.toggle()
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        if (state.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = if (state.playing) "Pause" else "Play",
+                        if (optimisticPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = if (optimisticPlaying) "Pause" else "Play",
                         tint = Color.Black,
                         modifier = Modifier.size(36.dp)
                     )
                 }
 
-                // Skip Next
+                // Skip Next (Symmetric 32dp Material 3 icon)
                 IconButton(onClick = { service.next() }) {
                     Icon(
                         Icons.Rounded.SkipNext,
-                        "Next",
+                        contentDescription = "Next",
                         tint = Color.White,
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(32.dp)
                     )
                 }
 
-                // Sleep Timer (Green when active)
-                IconButton(onClick = { panel = "Sleep" }) {
+                // Loop / Repeat (Repeat All / Repeat One / Off)
+                IconButton(onClick = { service.toggleRepeat() }) {
+                    val repeatIcon = if (repeat == "one") Icons.Rounded.RepeatOne else Icons.Rounded.Repeat
+                    val repeatTint = if (repeat != "off") Color(0xFF1DB954) else Color.White.copy(alpha = 0.75f)
                     Icon(
-                        Icons.Rounded.Bedtime,
-                        "Sleep Timer",
-                        tint = if (sleepMode != "Off") Color(0xFF1DB954) else Color.White.copy(alpha = 0.75f),
-                        modifier = Modifier.size(24.dp)
+                        repeatIcon,
+                        contentDescription = "Repeat",
+                        tint = repeatTint,
+                        modifier = Modifier.size(26.dp)
                     )
                 }
             }
 
             Spacer(Modifier.height(14.dp))
 
-            // 6. Bottom Utilities Row: Left [Cast + Lyrics] | Right [Download + Share]
+            // 6. Bottom Utilities Row: Left [Cast + Lyrics + Jam + Sleep] | Right [Download + Share]
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Left group: Cast & Lyrics
+                // Left group: Cast & Lyrics & Jam & Sleep Timer
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     IconButton(onClick = { panel = "Cast" }) {
                         Icon(
-                            Icons.Rounded.Cast,
-                            "Cast & Output Devices",
+                            painter = painterResource(R.drawable.ic_cast_flaticon),
+                            contentDescription = "Cast & Output Devices",
                             tint = Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(22.dp)
                         )
                     }
 
-                    // Lyrics icon on the LEFT
+                    // Modern Karaoke Lyrics button on the LEFT (Flaticon custom vector)
+                    val hasLyrics = lyrics.isNotEmpty()
                     IconButton(onClick = { panel = "Lyrics" }) {
                         Icon(
-                            Icons.Rounded.Lyrics,
-                            "Lyrics",
-                            tint = Color.White.copy(alpha = 0.85f),
+                            painter = painterResource(R.drawable.ic_lyrics_flaticon),
+                            contentDescription = "Lyrics",
+                            tint = if (panel == "Lyrics" || hasLyrics) Accent else Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    // Modern Spotify-style Jam Social Listening icon with active indicator
+                    val jamState by JamSyncController.sessionState.collectAsState()
+                    val isJamActive = jamState.role != JamRole.NONE && jamState.isConnected
+                    IconButton(onClick = { panel = "Jam" }) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Rounded.SpeakerGroup,
+                                "Mica Jam — Listen Together",
+                                tint = if (isJamActive) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            if (isJamActive) {
+                                Box(
+                                    Modifier
+                                        .size(6.dp)
+                                        .align(Alignment.TopEnd)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF10B981))
+                                )
+                            }
+                        }
+                    }
+
+                    // Sleep Timer
+                    IconButton(onClick = { panel = "Sleep" }) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_timer_moon),
+                            contentDescription = "Sleep Timer",
+                            tint = if (sleepMode != "Off") Color(0xFF1DB954) else Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(22.dp)
                         )
                     }
@@ -719,9 +1008,9 @@ fun MusicPlayerScreen(
                             )
                         } else {
                             Icon(
-                                if (isDlDone) Icons.Rounded.DownloadDone else Icons.Rounded.Download,
-                                "Download",
-                                tint = Color.White.copy(alpha = 0.85f),
+                                painter = painterResource(if (isDlDone) R.drawable.ic_download_flaticon else R.drawable.ic_download_flaticon),
+                                contentDescription = "Download",
+                                tint = if (isDlDone) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
                                 modifier = Modifier.size(22.dp)
                             )
                         }
@@ -746,8 +1035,8 @@ fun MusicPlayerScreen(
                         activity.startActivity(Intent.createChooser(send, "Share Song"))
                     }) {
                         Icon(
-                            Icons.Rounded.Share,
-                            "Share",
+                            painter = painterResource(R.drawable.ic_share_flaticon),
+                            contentDescription = "Share",
                             tint = Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(22.dp)
                         )
@@ -758,8 +1047,8 @@ fun MusicPlayerScreen(
             Spacer(Modifier.height(8.dp))
 
             // 7. Bottom Peeking Card: Playing Queue (Oval pill, matching dock bar)
-            val currentIndex = queue.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
-            val nextSong = if (queue.isNotEmpty() && currentIndex in 0 until queue.lastIndex) queue[currentIndex + 1] else null
+            val qIndex = queue.indexOfFirst { it.uri == item.uri }.coerceAtLeast(0)
+            val nextSong = if (queue.isNotEmpty() && qIndex in 0 until queue.lastIndex) queue[qIndex + 1] else null
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -791,8 +1080,8 @@ fun MusicPlayerScreen(
                         )
                     }
                     Icon(
-                        Icons.AutoMirrored.Rounded.FormatListBulleted,
-                        null,
+                        painter = painterResource(R.drawable.ic_queue_flaticon),
+                        contentDescription = "Queue",
                         tint = Color.White.copy(alpha = 0.85f),
                         modifier = Modifier.size(22.dp)
                     )
@@ -886,6 +1175,9 @@ fun MusicPlayerScreen(
         }
         "Sleep" -> PlayerSidePanel("Sleep Timer", { panel = null }) {
             SleepTimerPanelContent(service, onDismiss = { panel = null })
+        }
+        "Jam" -> {
+            JamSyncDialog(service = service, onDismiss = { panel = null })
         }
         "Speed" -> PlayerSpeedBar(
             rate = state.rate,
@@ -992,8 +1284,52 @@ fun MusicPlayerScreen(
                     Icon(Icons.Rounded.GraphicEq, null, tint = Accent, modifier = Modifier.size(26.dp))
                     Spacer(Modifier.width(14.dp))
                     Column {
-                        Text("Audio Equalizer", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Audio Equalizer & Sound Effects", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                         Text("10-band EQ, bass boost, spatializer presets", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
+                    }
+                }
+
+                // 4. Sleep Timer
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.White.copy(alpha = 0.10f))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
+                        .clickable {
+                            panel = null
+                            panel = "Sleep"
+                        }
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Rounded.NightlightRound, null, tint = Accent, modifier = Modifier.size(26.dp))
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text("Sleep Timer", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Set music stop timer with soft audio fade-out", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
+                    }
+                }
+
+                // 5. MICA JAM — Listen Together
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.White.copy(alpha = 0.10f))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
+                        .clickable {
+                            panel = null
+                            panel = "Jam"
+                        }
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Rounded.Groups, null, tint = Accent, modifier = Modifier.size(26.dp))
+                    Spacer(Modifier.width(14.dp))
+                    Column {
+                        Text("MICA JAM — Listen Together", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Sync music with friends in real-time over Hotspot / LAN", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
                     }
                 }
             }
@@ -1146,6 +1482,29 @@ fun MusicPlayerScreen(
                     Column(Modifier.weight(1f)) {
                         Text("Equalizer & Sound Effects", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                         Text("10-band EQ, bass boost, spatializer presets", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
+                    }
+                    Icon(Icons.Rounded.ChevronRight, null, tint = Color.White.copy(alpha = 0.5f))
+                }
+
+                // 4. MICA JAM — Listen Together
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.White.copy(alpha = 0.10f))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
+                        .clickable {
+                            panel = null
+                            panel = "Jam"
+                        }
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Rounded.Groups, null, tint = Accent, modifier = Modifier.size(26.dp))
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("MICA JAM — Listen Together", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Sync playback with friends over Hotspot / LAN", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
                     }
                     Icon(Icons.Rounded.ChevronRight, null, tint = Color.White.copy(alpha = 0.5f))
                 }

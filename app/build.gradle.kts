@@ -21,14 +21,14 @@ android {
     namespace = "app.msplayer.offline"
     compileSdk = 36
     defaultConfig {
-        applicationId = "app.msplayer.offline"
+        applicationId = "app.mica"
         minSdk = 26
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.7.1"
+        versionCode = 29
+        versionName = "0.8.2"
         ndk { abiFilters += (project.findProperty("testAbi")?.toString() ?: "arm64-v8a") }
         testInstrumentationRunner = "app.msplayer.offline.SafeTestRunner"
-        manifestPlaceholders["appLabel"] = "MS PLAYER"
+        manifestPlaceholders["appLabel"] = "Mica"
         buildConfigField("String", "DEFAULT_GEMINI_KEY", "\"${localSecret("MSPLAYER_GEMINI_KEY")}\"")
         buildConfigField("String", "DEFAULT_GROQ_KEY", "\"${localSecret("MSPLAYER_GROQ_KEY")}\"")
         buildConfigField("String", "DEFAULT_DEEPGRAM_KEY", "\"${localSecret("MSPLAYER_DEEPGRAM_KEY")}\"")

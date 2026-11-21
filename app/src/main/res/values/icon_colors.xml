@@ -1,1 +1,4 @@
-<resources><color name="ms_logo_blue">#079AF3</color></resources>
+<resources>
+    <color name="ms_logo_blue">#079AF3</color>
+    <color name="mica_icon_bg">#070A12</color>
+</resources>

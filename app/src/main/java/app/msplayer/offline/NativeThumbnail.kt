@@ -34,7 +34,10 @@ object NativeThumbnail {
     }
 
     suspend fun read(context: Context, item: MediaItem): Bitmap? = slot.withPermit {
-        withContext(Dispatchers.Main) {
+        withContext(Dispatchers.IO) {
+            if (PlaybackRules.isStreamUrl(item.uri) || item.uri.startsWith("resolve://") || item.uri.startsWith("yt_") || item.uri.startsWith("saavn_")) {
+                return@withContext null
+            }
             if (Library.videoPlaybackActive.value) {
                 android.util.Log.i("MSPLAYER_NATIVE", "Skipping thumbnail for ${item.title} because video playback is active")
                 return@withContext null
@@ -153,14 +156,14 @@ object NativeThumbnail {
                 null
             } finally {
                 suspendForPlayback.cancel()
-                player?.setEventListener(null)
-                player?.stop()
-                player?.vlcVout?.detachViews()
-                player?.release()
-                descriptor?.close()
-                reader.setOnImageAvailableListener(null, null)
-                thread.quitSafely()
-                reader.close()
+                runCatching { player?.setEventListener(null) }
+                runCatching { player?.vlcVout?.detachViews() }
+                runCatching { player?.stop() }
+                runCatching { player?.release() }
+                runCatching { descriptor?.close() }
+                runCatching { reader.setOnImageAvailableListener(null, null) }
+                runCatching { thread.quitSafely() }
+                runCatching { reader.close() }
             }
         }
     }

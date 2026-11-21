@@ -2,6 +2,7 @@
     androidx.compose.material3.ExperimentalMaterial3Api::class,
     androidx.compose.foundation.ExperimentalFoundationApi::class,
     androidx.compose.animation.ExperimentalSharedTransitionApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
 )
 
 package app.msplayer.offline
@@ -67,6 +68,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -105,11 +107,14 @@ class MainActivity : ComponentActivity() {
     var inPip by mutableStateOf(false)
     var onlineResetTrigger by mutableIntStateOf(0)
     var libraryResetTrigger by mutableIntStateOf(0)
+    var savedOnlineCategory by mutableStateOf("Home")
     var videos by mutableStateOf<List<MediaItem>>(emptyList())
     var audios by mutableStateOf<List<MediaItem>>(emptyList())
     var scanning by mutableStateOf(false)
     var libraryError by mutableStateOf<String?>(null)
     var pendingStreamPrompt by mutableStateOf<String?>(null)
+    var showIntroScreen by mutableStateOf(false)
+    var activeBrowserUrl by mutableStateOf<Pair<String, String>?>(null)
     private var bound = false
     var scanJob: Job? = null
     private var externalQueue = emptyList<MediaItem>()
@@ -202,7 +207,15 @@ class MainActivity : ComponentActivity() {
                         val uriStr = uri.toString()
                         val item = if (uriStr.startsWith("http://") || uriStr.startsWith("https://") || uriStr.startsWith("rtsp://") || uriStr.startsWith("intent:")) {
                             val resolved = StreamResolver.resolve(uriStr)
-                            MediaItem(resolved.streamUrl, resolved.title, folder = "Network Streams", size = 0L, audio = !resolved.isVideo)
+                            if (resolved.streamUrl.isBlank()) {
+                                toast("Unable to resolve playable stream")
+                                return@launch
+                            }
+                            Store.recordStream(this@MainActivity, uriStr)
+                            val isYouTube = uriStr.contains("youtube.com") || uriStr.contains("youtu.be") || resolved.streamUrl.contains("googlevideo.com")
+                            val isAudio = if (isYouTube) false else !resolved.isVideo
+                            loadStreamSubtitlesAsync(resolved.subtitleUrl)
+                            MediaItem(resolved.streamUrl, resolved.title, folder = "Network Streams", size = 0L, audio = isAudio, streamUserAgent = resolved.userAgent)
                         } else {
                             Library.opened(this@MainActivity, uri)
                         }
@@ -490,6 +503,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        FeedCacheManager.preloadAll(this)
         volumeControlStream = AudioManager.STREAM_MUSIC
         GlassTheme.init(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -499,6 +513,7 @@ class MainActivity : ComponentActivity() {
         if (cachedA.isNotEmpty()) audios = cachedA
         showPlayer =
             savedInstanceState?.getBoolean("player") ?: intent.getBooleanExtra("show_player", false)
+        showIntroScreen = !IntroManager.isIntroCompleted(this)
         extractIncomingMedia(intent)
         startService(Intent(this, PlaybackService::class.java))
         bindService(Intent(this, PlaybackService::class.java), connection, BIND_AUTO_CREATE)
@@ -608,7 +623,15 @@ class MainActivity : ComponentActivity() {
                 val uriStr = uriData.toString()
                 val item = if (uriStr.startsWith("http://") || uriStr.startsWith("https://") || uriStr.startsWith("rtsp://") || uriStr.startsWith("intent:")) {
                     val resolved = StreamResolver.resolve(uriStr)
-                    MediaItem(resolved.streamUrl, resolved.title, folder = "Network Streams", size = 0L, audio = !resolved.isVideo)
+                    if (resolved.streamUrl.isBlank()) {
+                        toast("Unable to resolve playable stream")
+                        return@launch
+                    }
+                    Store.recordStream(this@MainActivity, uriStr)
+                    val isYouTube = uriStr.contains("youtube.com") || uriStr.contains("youtu.be") || resolved.streamUrl.contains("googlevideo.com")
+                    val isAudio = if (isYouTube) false else !resolved.isVideo
+                    loadStreamSubtitlesAsync(resolved.subtitleUrl)
+                    MediaItem(resolved.streamUrl, resolved.title, folder = "Network Streams", size = 0L, audio = isAudio, streamUserAgent = resolved.userAgent)
                 } else {
                     Library.opened(this@MainActivity, uriData)
                 }
@@ -637,7 +660,7 @@ class MainActivity : ComponentActivity() {
             runCatching {
                 startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             }.onFailure {
-                toast("Open Settings -> Apps -> MS PLAYER -> Permissions to allow all files access.")
+                toast("Open Settings -> Apps -> MICA -> Permissions to allow all files access.")
             }
         }
     }
@@ -654,7 +677,8 @@ class MainActivity : ComponentActivity() {
         if (nowAllFiles != wasAllFilesGranted) reload(forceScan = true)
         wasRestricted = !hasLibraryPermission()
         wasAllFilesGranted = nowAllFiles
-        immersive(showPlayer)
+        val isVideoPlaying = showPlayer && service?.state?.value?.item?.audio != true
+        immersive(isVideoPlaying)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -792,7 +816,40 @@ class MainActivity : ComponentActivity() {
         manualOrientationFor = null
         svc.open(items, item)
         showPlayer = true
-        immersive(true)
+        immersive(!item.audio)
+    }
+
+    fun playStream(url: String, title: String, thumbUrl: String = "", isVideo: Boolean = true) {
+        val item = MediaItem(
+            uri = url,
+            title = title,
+            audio = !isVideo,
+            folder = "Network Streams",
+            thumbUri = thumbUrl.ifBlank { null }
+        )
+        startMedia(listOf(item), item)
+    }
+
+    fun loadStreamSubtitlesAsync(subtitleUrl: String?) {
+        if (subtitleUrl.isNullOrBlank()) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                val conn = (java.net.URL(subtitleUrl).openConnection() as java.net.HttpURLConnection).apply {
+                    connectTimeout = 4000
+                    readTimeout = 4000
+                    setRequestProperty("User-Agent", "Mozilla/5.0")
+                }
+                if (conn.responseCode in 200..299) {
+                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                    val cues = PlaybackRules.parseSubtitleCues(body)
+                    if (cues.isNotEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            service?.loadAutoSubCues(cues, userTriggered = false)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fun exitPlayer() {
@@ -935,6 +992,33 @@ private enum class AppScreenMode { LIBRARY, MUSIC, VIDEO }
 
 @Composable
 fun App(activity: MainActivity) {
+    var versionLockState by remember { mutableStateOf(VersionLockState()) }
+    LaunchedEffect(Unit) {
+        val lock = VersionLockManager.checkVersionLock(activity)
+        if (lock.isLocked) {
+            versionLockState = lock
+        }
+    }
+
+    if (versionLockState.isLocked) {
+        VersionLockScreen(
+            lockState = versionLockState,
+            onExitApp = { activity.finish() }
+        )
+        return
+    }
+
+    if (activity.showIntroScreen) {
+        IntroOnboardingScreen(
+            onFinished = {
+                activity.showIntroScreen = false
+                activity.requestAccess()
+                activity.reload()
+            }
+        )
+        return
+    }
+
     val service = activity.service
     val metadata = remember(service) { (service?.state ?: activity.emptyState).map { it.copy(position = 0) }.distinctUntilChanged() }
     val state by metadata.collectAsState(initial = service?.state?.value ?: PlayerState())
@@ -972,6 +1056,20 @@ fun App(activity: MainActivity) {
         activity.showPlayer && service != null && state.item?.audio == true -> AppScreenMode.MUSIC
         activity.showPlayer && service != null && state.item != null -> AppScreenMode.VIDEO
         else -> AppScreenMode.LIBRARY
+    }
+
+    if (activity.activeBrowserUrl != null) {
+        val (bUrl, bTitle) = activity.activeBrowserUrl!!
+        MicaShieldBrowserScreen(
+            initialUrl = bUrl,
+            title = bTitle,
+            onBack = { activity.activeBrowserUrl = null },
+            onPlayInMica = { item ->
+                activity.activeBrowserUrl = null
+                activity.startMedia(listOf(item), item)
+            }
+        )
+        return
     }
 
     LaunchedEffect(palette.isLight, screenMode) {
@@ -1132,6 +1230,7 @@ private fun LibraryHome(
     var folderAction by remember { mutableStateOf<String?>(null) }
     var deleteTarget by remember { mutableStateOf<MediaItem?>(null) }
     var deleteSelectedDialog by remember { mutableStateOf(false) }
+    var showClearHistoryDialog by remember { mutableStateOf(false) }
     var manualRefreshing by remember { mutableStateOf(false) }
     var lastFolderNavTime by remember { mutableLongStateOf(0L) }
     LaunchedEffect(activity.scanning) {
@@ -1141,6 +1240,16 @@ private fun LibraryHome(
         }
     }
     val scope = rememberCoroutineScope()
+    val tabHistory = remember { mutableStateListOf<String>() }
+    fun navigateToTab(newTab: String, addHistory: Boolean = true) {
+        if (newTab != tab) {
+            if (addHistory) {
+                tabHistory.add(tab)
+                if (tabHistory.size > 25) tabHistory.removeAt(0)
+            }
+            onTabChange(newTab)
+        }
+    }
     var history by remember { mutableStateOf<List<SavedMedia>>(emptyList()) }
     var playlists by remember { mutableStateOf<List<String>>(emptyList()) }
     var playlistContent by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
@@ -1157,7 +1266,45 @@ private fun LibraryHome(
             val p = dao.playlists()
             val entries =
                 activePlaylist
-                    ?.let { dao.entries(it).map { row -> Library.opened(activity, Uri.parse(row.uri)).copy(title = row.title) } }
+                    ?.let { plName ->
+                        val list = dao.entries(plName).map { row ->
+                            val openedItem = Library.opened(activity, Uri.parse(row.uri))
+                            val cleanTitle = if (row.title.contains(" • ")) row.title.substringBefore(" • ") else row.title
+                            val cleanArtist = if (row.title.contains(" • ")) row.title.substringAfter(" • ") else openedItem.artist
+                            openedItem.copy(title = cleanTitle, artist = cleanArtist)
+                        }
+                        // Background scrubber: resolve authentic individual song covers for imported playlists
+                        val plCover = Store.prefs(activity).getString("playlist_cover_$plName", null)
+                        scope.launch(Dispatchers.IO) {
+                            var anyUpdated = false
+                            list.forEach { itm ->
+                                if (itm.uri.startsWith("resolve://spotify/")) {
+                                    val meta = TrackArtworkStore.findMeta(activity, itm.uri, itm.title)
+                                    val isPlCover = plCover != null && meta?.thumbUrl == plCover
+                                    val needsArt = meta?.localCoverPath.isNullOrBlank() ||
+                                            meta?.thumbUrl.isNullOrBlank() ||
+                                            isPlCover ||
+                                            meta?.thumbUrl?.startsWith("spotify_track://") == true
+                                    if (needsArt) {
+                                        val tokens = itm.uri.removePrefix("resolve://spotify/").split("::")
+                                        val trId = if (tokens.size >= 3 && tokens[0].length in 20..24) tokens[0] else ""
+                                        val resolved = if (trId.isNotBlank()) SpotifyClient.resolveTrackThumbnail(trId) else null
+                                        val individualThumb = resolved ?: runCatching {
+                                            JioSaavnClient.searchSongs("${itm.title} ${itm.artist}").firstOrNull { it.thumbUrl.isNotBlank() }?.thumbUrl
+                                                ?: YtMusicClient.searchSongs("${itm.title} ${itm.artist}").firstOrNull { it.thumbUrl.isNotBlank() }?.thumbUrl
+                                        }.getOrNull()
+                                        if (!individualThumb.isNullOrBlank()) {
+                                            TrackArtworkStore.saveMeta(activity, itm.uri, itm.title, itm.artist, individualThumb)
+                                            TrackArtworkStore.downloadAndCacheCover(activity, itm.uri, itm.title, itm.artist, individualThumb, forceOverwrite = true)
+                                            anyUpdated = true
+                                        }
+                                    }
+                                }
+                            }
+                            if (anyUpdated) Library.bumpThumbnailRevision()
+                        }
+                        list
+                    }
                     .orEmpty()
             withContext(Dispatchers.Main) {
                 history = h
@@ -1166,7 +1313,7 @@ private fun LibraryHome(
             }
         }
     }
-    BackHandler(folder != null || activePlaylist != null || searching || selected.isNotEmpty() || tab != "Folders") {
+    BackHandler(folder != null || activePlaylist != null || searching || selected.isNotEmpty() || tab != "Folders" || tabHistory.isNotEmpty()) {
         when {
             selected.isNotEmpty() -> selected = emptySet()
             searching -> {
@@ -1180,6 +1327,11 @@ private fun LibraryHome(
             activePlaylist != null -> {
                 lastFolderNavTime = android.os.SystemClock.uptimeMillis()
                 onActivePlaylistChange(null)
+                navigateToTab("Library", addHistory = false)
+            }
+            tabHistory.isNotEmpty() -> {
+                val prevTab = tabHistory.removeAt(tabHistory.lastIndex)
+                onTabChange(prevTab)
             }
             tab != "Folders" -> {
                 onTabChange("Folders")
@@ -1189,16 +1341,28 @@ private fun LibraryHome(
     val hidden = Store.prefs(activity).getStringSet("hidden", emptySet()).orEmpty()
     val raw =
         when (tab) {
-            "Audio" -> activity.audios
+            "Audio" -> activity.audios.filter { !it.folder.contains("MSPlayer", ignoreCase = true) && !it.uri.contains("MSPlayer", ignoreCase = true) }
             "History" -> history.map { saved ->
                 (activity.audios + activity.videos).firstOrNull { it.uri == saved.uri }
-                    ?: MediaItem(
-                        saved.uri,
-                        saved.title,
-                        folder = if (PlaybackRules.isStreamUrl(saved.uri)) "Network Streams" else "Opened files",
-                        duration = saved.position,
-                        audio = PlaybackRules.audioFile(null, saved.title) || PlaybackRules.audioFile(null, Uri.parse(saved.uri).lastPathSegment ?: ""),
-                    )
+                    ?: run {
+                        val meta = TrackArtworkStore.findMeta(activity, saved.uri, saved.title)
+                        val cleanTitle = if (saved.title.contains(" • ")) saved.title.substringBefore(" • ") else saved.title
+                        val cleanArtist = if (saved.title.contains(" • ")) saved.title.substringAfter(" • ") else (meta?.artist ?: "")
+                        val isAudio = PlaybackRules.audioFile(null, saved.title) ||
+                                      PlaybackRules.audioFile(null, Uri.parse(saved.uri).lastPathSegment ?: "") ||
+                                      saved.uri.startsWith("resolve://") ||
+                                      saved.uri.startsWith("saavn_") ||
+                                      saved.uri.startsWith("yt_")
+                        MediaItem(
+                            uri = saved.uri,
+                            title = cleanTitle.ifBlank { saved.title },
+                            artist = cleanArtist,
+                            folder = if (PlaybackRules.isStreamUrl(saved.uri)) "Network Streams" else "Opened files",
+                            duration = saved.position,
+                            audio = isAudio,
+                            thumbUri = meta?.thumbUrl
+                        )
+                    }
             }
             "Playlists" -> playlistContent
             else ->
@@ -1277,7 +1441,10 @@ private fun LibraryHome(
                         IconButton(
                             onClick = {
                                 onFolderChange(null)
-                                onActivePlaylistChange(null)
+                                if (activePlaylist != null) {
+                                    onActivePlaylistChange(null)
+                                    onTabChange("Library")
+                                }
                             },
                             interactionSource = backSrc,
                             modifier = Modifier.size(38.dp).iosLiquidPress(backSrc, scaleDown = 0.88f),
@@ -1444,16 +1611,28 @@ private fun LibraryHome(
                         label = "libraryContentTransition",
                     ) { (curTab, curFolder, curPlaylist) ->
                         val curRaw = when (curTab) {
-                            "Audio" -> activity.audios
+                            "Audio" -> activity.audios.filter { !it.folder.contains("MSPlayer", ignoreCase = true) && !it.uri.contains("MSPlayer", ignoreCase = true) }
                             "History" -> history.map { saved ->
                                 (activity.audios + activity.videos).firstOrNull { it.uri == saved.uri }
-                                    ?: MediaItem(
-                                        saved.uri,
-                                        saved.title,
-                                        folder = if (PlaybackRules.isStreamUrl(saved.uri)) "Network Streams" else "Opened files",
-                                        duration = saved.position,
-                                        audio = PlaybackRules.audioFile(null, saved.title) || PlaybackRules.audioFile(null, Uri.parse(saved.uri).lastPathSegment ?: ""),
-                                    )
+                                    ?: run {
+                                        val meta = TrackArtworkStore.findMeta(activity, saved.uri, saved.title)
+                                        val cleanTitle = if (saved.title.contains(" • ")) saved.title.substringBefore(" • ") else saved.title
+                                        val cleanArtist = if (saved.title.contains(" • ")) saved.title.substringAfter(" • ") else (meta?.artist ?: "")
+                                        val isAudio = PlaybackRules.audioFile(null, saved.title) ||
+                                                      PlaybackRules.audioFile(null, Uri.parse(saved.uri).lastPathSegment ?: "") ||
+                                                      saved.uri.startsWith("resolve://") ||
+                                                      saved.uri.startsWith("saavn_") ||
+                                                      saved.uri.startsWith("yt_")
+                                        MediaItem(
+                                            uri = saved.uri,
+                                            title = cleanTitle.ifBlank { saved.title },
+                                            artist = cleanArtist,
+                                            folder = if (PlaybackRules.isStreamUrl(saved.uri)) "Network Streams" else "Opened files",
+                                            duration = saved.position,
+                                            audio = isAudio,
+                                            thumbUri = meta?.thumbUrl
+                                        )
+                                    }
                             }
                             "Playlists" -> playlistContent
                             else ->
@@ -1525,7 +1704,7 @@ private fun LibraryHome(
                             ) {
                                 Box(Modifier.fillMaxSize().offset { IntOffset(0, pullOffsetPx) }) {
                                 when {
-                            curTab == "Online" -> {
+                            curTab == "Audio" -> {
                                 OnlineMusicScreen(
                                     activity = activity,
                                     service = service,
@@ -1533,6 +1712,19 @@ private fun LibraryHome(
                                     glassEnabled = glassEnabled,
                                     bottomPadding = listBottomPad,
                                     onNavigateToTab = { onTabChange(it) },
+                                )
+                            }
+                            curTab == "Online" -> {
+                                SearchHubScreen(
+                                    activity = activity,
+                                    service = service,
+                                    palette = palette,
+                                    glassEnabled = glassEnabled,
+                                    bottomPadding = listBottomPad,
+                                    onNavigateToTab = { onTabChange(it) },
+                                    onOpenBrowser = { url, title ->
+                                        activity.activeBrowserUrl = Pair(url, title)
+                                    }
                                 )
                             }
                             curTab == "Library" -> {
@@ -1555,33 +1747,26 @@ private fun LibraryHome(
                                 )
                             }
                             curTab == "Playlists" && curPlaylist == null -> {
-                                if (playlists.isEmpty())
-                                    EmptyLibrary(
-                                        "Your playlists",
-                                        "Add a video or audio file using its menu.",
-                                        Icons.Default.QueueMusic,
-                                    )
-                                else
-                                    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = listBottomPad)) {
-                                        items(playlists, key = { it }) { name ->
-                                            val plSrc = remember { MutableInteractionSource() }
-                                            ListItem(
-                                                headlineContent = { Text(name, color = palette.textPrimary) },
-                                                leadingContent = {
-                                                    Icon(Icons.Default.QueueMusic, null, tint = palette.accent)
-                                                },
-                                                modifier = Modifier
-                                                    .animateItem(placementSpec = MotionSpec.ItemPlacementSpring)
-                                                    .iosLiquidPress(plSrc, scaleDown = 0.98f, sheenAlpha = 0.10f)
-                                                    .clickable(interactionSource = plSrc, indication = ripple()) {
-                                                        onActivePlaylistChange(name)
-                                                    },
-                                                colors = ListItemDefaults.colors(
-                                                    containerColor = if (glassEnabled) Color.Transparent else palette.background
-                                                ),
-                                            )
-                                        }
-                                    }
+                                LaunchedEffect(Unit) {
+                                    onTabChange("Library")
+                                }
+                                YourLibraryScreen(
+                                    activity = activity,
+                                    service = service,
+                                    palette = palette,
+                                    glassEnabled = glassEnabled,
+                                    bottomPadding = listBottomPad,
+                                    onOpenPlaylist = { name ->
+                                        onTabChange("Playlists")
+                                        onActivePlaylistChange(name)
+                                    },
+                                    onOpenMedia = { item ->
+                                        activity.startMedia(listOf(item), item)
+                                    },
+                                    onNavigateToOnline = {
+                                        onTabChange("Online")
+                                    },
+                                )
                             }
                             curTab == "Folders" && curFolder == null && !searching -> {
                                 val allValidVideos = activity.videos.filter { it.folder !in hidden }
@@ -1640,11 +1825,11 @@ private fun LibraryHome(
                                                 horizontalArrangement = Arrangement.SpaceBetween,
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
-                                                QuickAction("Music", Icons.Default.Headphones) { onTabChange("Audio") }
-                                                QuickAction("Online", Icons.Default.Public) { onTabChange("Online") }
-                                                QuickAction("History", Icons.Default.History) { onTabChange("History") }
+                                                QuickAction("Music", Icons.Default.Headphones) { navigateToTab("Audio") }
+                                                QuickAction("Online", Icons.Default.Public) { navigateToTab("Online") }
+                                                QuickAction("History", Icons.Default.History) { navigateToTab("History") }
                                                 QuickAction("Stream", Icons.Default.CloudQueue) { onStreamDialogChange(true) }
-                                                QuickAction("Settings", Icons.Default.Settings) { onTabChange("Settings") }
+                                                QuickAction("Settings", Icons.Default.Settings) { navigateToTab("Settings") }
                                             }
                                         }
                                         if (showContinueWatching && continueHero != null) {
@@ -1801,13 +1986,7 @@ private fun LibraryHome(
                                                                 Box(Modifier.width(104.dp).height(58.dp)) {
                                                                     Thumbnail(video, Modifier.fillMaxSize())
                                                                     if (history.none { it.uri == video.uri }) {
-                                                                        Box(
-                                                                            Modifier.align(Alignment.TopStart).padding(3.dp)
-                                                                                .background(Color(0xFFFF3B72), RoundedCornerShape(3.dp))
-                                                                                .padding(horizontal = 3.5.dp, vertical = 1.dp)
-                                                                        ) {
-                                                                            Text("NEW", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                                                                        }
+                                                                        ModernNewBadge(Modifier.align(Alignment.TopStart).padding(3.dp))
                                                                     }
                                                                     Box(
                                                                         modifier = Modifier
@@ -1987,6 +2166,47 @@ private fun LibraryHome(
                                 }
                             else ->
                                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = listBottomPad)) {
+                                    if (curTab == "History" && curItems.isNotEmpty()) {
+                                        item(key = "history_header") {
+                                            Row(
+                                                Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    "Recently Watched & Played (${curItems.size})",
+                                                    color = palette.textSecondary,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                                Row(
+                                                    Modifier
+                                                        .clip(RoundedCornerShape(12.dp))
+                                                        .background(Color(0x22EF4444))
+                                                        .clickable { showClearHistoryDialog = true }
+                                                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Icon(Icons.Rounded.DeleteSweep, "Clear History", tint = Color(0xFFEF4444), modifier = Modifier.size(16.dp))
+                                                    Spacer(Modifier.width(4.dp))
+                                                    Text("Clear", color = Color(0xFFEF4444), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (curTab == "History" && curItems.isEmpty()) {
+                                        item(key = "history_empty") {
+                                            Box(Modifier.fillMaxWidth().padding(top = 80.dp), contentAlignment = Alignment.Center) {
+                                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                    Icon(Icons.Rounded.History, null, tint = palette.textSecondary.copy(alpha = 0.4f), modifier = Modifier.size(48.dp))
+                                                    Spacer(Modifier.height(10.dp))
+                                                    Text("No watch or listening history yet", color = palette.textSecondary, fontSize = 14.sp)
+                                                }
+                                            }
+                                        }
+                                    }
                                     items(curItems, key = { it.uri }) { item ->
                                         MediaRow(
                                             item,
@@ -2031,13 +2251,14 @@ private fun LibraryHome(
         val showResumeFab = (folder != null || activePlaylist != null) && state.item?.audio != true && tab != "Settings" && tab != "Online" && tab != "Library" &&
             !(tab == "Playlists" && activePlaylist == null) &&
             (activity.videos.isNotEmpty() || state.item != null)
-        if (showResumeFab) {
+        val isImeOpen = WindowInsets.isImeVisible
+        if (showResumeFab && !isImeOpen) {
             val fabSrc = remember { MutableInteractionSource() }
             val fabClick = {
                 val current = state.item
                 if (current != null) {
                     activity.showPlayer = true
-                    activity.immersive(true)
+                    activity.immersive(!current.audio)
                 } else {
                     val last =
                         history.firstOrNull()?.let { h ->
@@ -2051,7 +2272,7 @@ private fun LibraryHome(
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .safeDrawingPadding()
+                        .navigationBarsPadding()
                         .padding(end = 16.dp, bottom = 82.dp)
                         .size(54.dp)
                         .iosLiquidPress(fabSrc, scaleDown = 0.89f, sheenAlpha = 0.22f)
@@ -2082,7 +2303,7 @@ private fun LibraryHome(
                     shape = CircleShape,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .safeDrawingPadding()
+                        .navigationBarsPadding()
                         .padding(end = 16.dp, bottom = 84.dp)
                         .size(54.dp)
                         .iosLiquidPress(fabSrc, scaleDown = 0.90f),
@@ -2095,7 +2316,7 @@ private fun LibraryHome(
                 }
             }
         }
-        if (state.item?.audio == true && service != null) {
+        if (state.item?.audio == true && service != null && !isImeOpen) {
             val miniSrc = remember { MutableInteractionSource() }
             val morphModifier = with(sharedTransitionScope) {
                 Modifier.sharedBounds(
@@ -2106,7 +2327,7 @@ private fun LibraryHome(
             }
             Row(
                 Modifier.align(Alignment.BottomCenter)
-                    .safeDrawingPadding()
+                    .navigationBarsPadding()
                     .padding(horizontal = 16.dp)
                     .padding(bottom = 82.dp)
                     .fillMaxWidth()
@@ -2140,13 +2361,29 @@ private fun LibraryHome(
                     }
                     .clickable(interactionSource = miniSrc, indication = ripple()) {
                         activity.showPlayer = true
-                        activity.immersive(true)
+                        activity.immersive(false)
                     }
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // Rounded Square Thumbnail (NO SPINNING DISC - Matching Screenshot_20261117_054325.jpg)
-                val thumbBmp = rememberRemoteBitmap(state.item?.thumbUri)
+                var localThumb by remember(state.item?.uri) { mutableStateOf<android.graphics.Bitmap?>(null) }
+                val context = LocalContext.current
+                LaunchedEffect(state.item?.uri) {
+                    val itm = state.item ?: return@LaunchedEffect
+                    if (itm.thumbUri.isNullOrBlank()) {
+                        withContext(Dispatchers.IO) {
+                            val bmp = Library.thumbnail(context, itm)
+                                ?: TrackArtworkStore.findMeta(context, itm.uri, itm.title)?.let { meta ->
+                                    if (meta.localCoverPath.isNotBlank()) android.graphics.BitmapFactory.decodeFile(meta.localCoverPath)
+                                    else null
+                                }
+                            withContext(Dispatchers.Main) { localThumb = bmp }
+                        }
+                    }
+                }
+                val remoteBmp = rememberRemoteBitmap(state.item?.thumbUri)
+                val thumbBmp = remoteBmp ?: localThumb
                 Box(
                     Modifier
                         .size(46.dp)
@@ -2170,7 +2407,7 @@ private fun LibraryHome(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        state.item!!.artist.ifBlank { "MS Player" },
+                        state.item!!.artist.ifBlank { "Mica One" },
                         color = palette.textSecondary,
                         fontSize = 12.sp,
                         maxLines = 1,
@@ -2198,26 +2435,36 @@ private fun LibraryHome(
         val density = LocalDensity.current
         val haptics = LocalHapticFeedback.current
         fun switchDockTab(name: String) {
+            val wasAlreadyCurrent = (tab == name)
+            if (!wasAlreadyCurrent) {
+                tabHistory.add(tab)
+                if (tabHistory.size > 25) tabHistory.removeAt(0)
+            }
             onTabChange(name)
             onFolderChange(null)
             onActivePlaylistChange(null)
             onSearchChange("")
             onSearchingChange(false)
             selected = emptySet()
-            if (name == "Online") {
+            if (name == "Online" && wasAlreadyCurrent) {
                 activity.onlineResetTrigger++
             }
-            if (name == "Library") {
+            if (name == "Library" && wasAlreadyCurrent) {
                 activity.libraryResetTrigger++
             }
         }
-        BoxWithConstraints(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .safeDrawingPadding()
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-                .fillMaxWidth()
-                .height(62.dp)
+        AnimatedVisibility(
+            visible = !isImeOpen,
+            enter = fadeIn(tween(160)),
+            exit = fadeOut(tween(160)),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            BoxWithConstraints(
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .fillMaxWidth()
+                    .height(62.dp)
                 .let { base ->
                     if (glassEnabled) {
                         base.liquidGlassSurface(
@@ -2351,6 +2598,7 @@ private fun LibraryHome(
                     }
                 }
             }
+        }
         }
     folderAction?.let { name ->
         LiquidGlassAlertDialog(
@@ -2503,6 +2751,33 @@ private fun LibraryHome(
             )
         }
     }
+    if (showClearHistoryDialog) {
+        LiquidGlassAlertDialog(
+            onDismissRequest = { showClearHistoryDialog = false },
+            title = { Text("Clear Playback History", color = palette.textPrimary) },
+            text = { Text("Are you sure you want to clear your entire watch and playback history? This cannot be undone.", color = palette.textSecondary) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showClearHistoryDialog = false
+                        activity.lifecycleScope.launch(Dispatchers.IO) {
+                            Store.db(activity).dao().clearHistory()
+                            withContext(Dispatchers.Main) {
+                                onBumpRefresh()
+                                activity.toast("Playback history cleared")
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFE53935)),
+                ) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearHistoryDialog = false }) {
+                    Text("Cancel", color = palette.textSecondary)
+                }
+            },
+        )
+    }
     if (streamDialog) {
         StreamUrlDialog(
             activity = activity,
@@ -2519,14 +2794,25 @@ private fun LibraryHome(
                 onStreamUrlChange("")
                 activity.lifecycleScope.launch {
                     val resolved = StreamResolver.resolve(cleanUrl)
+                    if (resolved.streamUrl.isBlank()) {
+                        activity.toast("Unable to resolve playable stream")
+                        return@launch
+                    }
                     val item = MediaItem(
                         uri = resolved.streamUrl,
                         title = resolved.title,
+                        artist = resolved.author,
                         folder = "Network Streams",
                         size = 0L,
-                        audio = !resolved.isVideo
+                        audio = !resolved.isVideo,
+                        thumbUri = resolved.thumbUrl.takeIf { it.isNotBlank() },
+                        streamUserAgent = resolved.userAgent
                     )
-                    play(item, listOf(item))
+                    if (item.audio && resolved.thumbUrl.isNotBlank()) {
+                        TrackArtworkStore.saveMeta(activity, resolved.streamUrl, resolved.title, resolved.author, resolved.thumbUrl)
+                    }
+                    activity.startMedia(listOf(item), item)
+                    activity.loadStreamSubtitlesAsync(resolved.subtitleUrl)
                     Store.recordStream(activity, cleanUrl)
                     onRecentStreamsChange(Store.recentStreams(activity))
                 }
@@ -2868,19 +3154,61 @@ fun EmptyLibrary(title: String, description: String, icon: ImageVector) {
 
 @Composable
 fun Badge(text: String, color: Color = Color(0xFF42464D), textColor: Color = Color.White) {
+    val isDefaultBg = color == Color(0xFF42464D)
+    val lum = color.red * 0.299f + color.green * 0.587f + color.blue * 0.114f
+    val isLightBg = lum > 0.60f
+    val pillBg = if (isDefaultBg) Color.White.copy(alpha = 0.12f) else if (isLightBg) color.copy(alpha = 0.90f) else color.copy(alpha = 0.22f)
+    val pillBorder = if (isDefaultBg) Color.White.copy(alpha = 0.18f) else if (isLightBg) Color(0xFF0F172A).copy(alpha = 0.20f) else color.copy(alpha = 0.45f)
+    val pillTextColor = if (textColor != Color.White) textColor else if (isDefaultBg) Color.White.copy(alpha = 0.90f) else if (isLightBg) Color(0xFF0F172A) else if (lum > 0.45f) color else textColor
     Text(
         text,
-        color = textColor,
-        fontSize = 12.sp,
-        lineHeight = 14.sp,
+        color = pillTextColor,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.3.sp,
+        lineHeight = 13.sp,
         maxLines = 1,
         softWrap = false,
         overflow = TextOverflow.Ellipsis,
         modifier =
-            Modifier.clip(RoundedCornerShape(4.dp))
-                .background(color)
-                .padding(horizontal = 6.dp, vertical = 2.dp),
+            Modifier
+                .clip(RoundedCornerShape(100.dp))
+                .background(pillBg)
+                .border(0.5.dp, pillBorder, RoundedCornerShape(100.dp))
+                .padding(horizontal = 7.dp, vertical = 2.dp),
     )
+}
+
+@Composable
+fun ModernNewBadge(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(100.dp))
+            .background(
+                Brush.horizontalGradient(
+                    colors = listOf(Color(0xFFFF3366), Color(0xFFFF6B8B))
+                )
+            )
+            .border(0.6.dp, Color(0xFFFFB3C6).copy(alpha = 0.60f), RoundedCornerShape(100.dp))
+            .padding(horizontal = 5.dp, vertical = 1.5.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.5.dp)) {
+            Box(
+                Modifier.size(3.5.dp)
+                    .clip(CircleShape)
+                    .background(Color.White)
+            )
+            Text(
+                "NEW",
+                color = Color.White,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 0.5.sp,
+                lineHeight = 10.sp
+            )
+        }
+    }
 }
 
 @Composable
@@ -2888,11 +3216,70 @@ fun Thumbnail(item: MediaItem, modifier: Modifier, showDuration: Boolean = true)
     val context = LocalContext.current
     val palette = LocalAppPalette.current
     val revision by Library.thumbnailRevision.collectAsState()
-    var bitmap by remember(item.uri, revision) { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var loading by remember(item.uri, revision) { mutableStateOf(true) }
-    LaunchedEffect(item.uri, item.size, item.modified, item.added, revision) {
+    var bitmap by remember(item.uri, item.thumbUri, revision) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var loading by remember(item.uri, item.thumbUri, revision) { mutableStateOf(true) }
+    val remoteThumb = rememberRemoteBitmap(item.thumbUri)
+    LaunchedEffect(item.uri, item.thumbUri, item.size, item.modified, item.added, revision, remoteThumb) {
         loading = true
-        bitmap = withTimeoutOrNull(20000L) { Library.thumbnail(context, item) }
+        if (remoteThumb != null) {
+            bitmap = remoteThumb
+            loading = false
+            return@LaunchedEffect
+        }
+        bitmap = withTimeoutOrNull(15000L) {
+            withContext(Dispatchers.IO) {
+                // 1. Direct thumbUri check
+                val remoteUri = item.thumbUri?.takeIf { it.isNotBlank() && it.startsWith("http") }
+                if (remoteUri != null) {
+                    val loaded = OnlineImageCache.get(remoteUri)
+                    if (loaded != null) return@withContext loaded
+                }
+                // 1b. Spotify track ID resolution
+                val spotifyId = when {
+                    item.thumbUri?.startsWith("spotify_track://") == true -> item.thumbUri.removePrefix("spotify_track://")
+                    item.uri.startsWith("resolve://spotify/") -> {
+                        val firstToken = item.uri.removePrefix("resolve://spotify/").substringBefore("::")
+                        if (firstToken.length in 20..24 && !firstToken.contains(" ")) firstToken else ""
+                    }
+                    else -> ""
+                }
+                if (spotifyId.isNotBlank()) {
+                    val resolvedUrl = SpotifyClient.resolveTrackThumbnail(spotifyId)
+                    if (!resolvedUrl.isNullOrBlank()) {
+                        TrackArtworkStore.saveMeta(context, item.uri, item.title, item.artist, resolvedUrl)
+                        val loaded = OnlineImageCache.get(resolvedUrl) ?: runCatching {
+                            val conn = (java.net.URL(resolvedUrl).openConnection() as java.net.HttpURLConnection).apply {
+                                connectTimeout = 4000
+                                readTimeout = 4000
+                                setRequestProperty("User-Agent", "Mozilla/5.0")
+                            }
+                            val bytes = conn.inputStream.use { it.readBytes() }
+                            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.also {
+                                OnlineImageCache.put(resolvedUrl, it)
+                            }
+                        }.getOrNull()
+                        if (loaded != null) return@withContext loaded
+                    }
+                }
+                // 2. TrackArtworkStore cache
+                val meta = TrackArtworkStore.findMeta(context, item.uri, item.title)
+                if (meta != null) {
+                    if (meta.localCoverPath.isNotBlank()) {
+                        val f = java.io.File(meta.localCoverPath)
+                        if (f.exists() && f.length() > 100) {
+                            val decoded = android.graphics.BitmapFactory.decodeFile(f.absolutePath)
+                            if (decoded != null) return@withContext decoded
+                        }
+                    }
+                    if (meta.thumbUrl.isNotBlank() && meta.thumbUrl.startsWith("http")) {
+                        val loaded = OnlineImageCache.get(meta.thumbUrl)
+                        if (loaded != null) return@withContext loaded
+                    }
+                }
+                // 3. Local media inspection
+                Library.thumbnail(context, item)
+            }
+        }
         loading = false
     }
     Box(
@@ -2992,7 +3379,8 @@ fun MediaRow(
     var info by remember(item.uri) { mutableStateOf<MediaInfo?>(null) }
     LaunchedEffect(item.uri, activity?.service) {
         val titleLower = item.title.lowercase()
-        if (titleLower.endsWith(".tmp") || titleLower.endsWith(".crdownload") || titleLower.endsWith(".part") || titleLower.contains(".pending")) {
+        if (PlaybackRules.isStreamUrl(item.uri) || item.uri.startsWith("resolve://") || item.uri.startsWith("yt_") || item.uri.startsWith("saavn_") ||
+            titleLower.endsWith(".tmp") || titleLower.endsWith(".crdownload") || titleLower.endsWith(".part") || titleLower.contains(".pending")) {
             return@LaunchedEffect
         }
         kotlinx.coroutines.delay(350L)
@@ -3075,16 +3463,11 @@ fun MediaRow(
                 )
                 if (!seen) {
                     Spacer(Modifier.width(6.dp))
-                    Box(
-                        Modifier.background(Color(0xFFFF3B72), RoundedCornerShape(3.dp))
-                            .padding(horizontal = 4.dp, vertical = 1.dp)
-                    ) {
-                        Text("NEW", color = Color.White, fontSize = 8.5.sp, fontWeight = FontWeight.Bold)
-                    }
+                    ModernNewBadge()
                 }
             }
             Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                if (PlaybackRules.isStreamUrl(item.uri)) Badge("STREAM", Color(0xFF00838F))
+                if (PlaybackRules.isStreamUrl(item.uri) && !item.uri.startsWith("resolve://spotify/")) Badge("STREAM", Color(0xFF00838F))
                 info?.subtitles?.firstOrNull()?.let { Badge(it, Color(0xFF00BE81)) }
                 if (resolved.height > 0) Badge("${resolved.height}p", palette.chipBackground, palette.chipText)
                 if (item.audio && item.duration > 0) Badge(durationText(item.duration), palette.chipBackground, palette.chipText)
@@ -3435,6 +3818,34 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                                 },
                             )
                         }
+                        if (islandOn) {
+                            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = palette.cardBorder.copy(alpha = 0.5f))
+                            var notchLevel by remember(notifTick, epoch) {
+                                mutableStateOf(prefs.getBoolean("dynamic_island_notch_level", false))
+                            }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                                    Text("Align with camera notch", color = palette.textPrimary, fontSize = 14.sp)
+                                    Text(
+                                        if (notchLevel) "Positioned directly around camera cutout"
+                                        else "Positioned cleanly below status bar",
+                                        color = palette.textSecondary,
+                                        fontSize = 12.sp,
+                                    )
+                                }
+                                Switch(
+                                    checked = notchLevel,
+                                    onCheckedChange = { enabled ->
+                                        notchLevel = enabled
+                                        prefs.edit().putBoolean("dynamic_island_notch_level", enabled).apply()
+                                        activity.service?.refreshNotification()
+                                    },
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -3521,7 +3932,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             }
             item(key = "about") {
                 SettingsGlassCard(palette) {
-                    Text("MS PLAYER ${BuildConfig.VERSION_NAME}", color = palette.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text("MICA ${BuildConfig.VERSION_NAME}", color = palette.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         "By SRIRAM S & ANTIGRAVITY",
                         color = palette.accentSecondary,
@@ -3540,7 +3951,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                             .clickable(interactionSource = updateSrc, indication = ripple(), enabled = !checkingUpdate) {
                                 checkingUpdate = true
                                 scope.launch(Dispatchers.IO) {
-                                    val info = UpdateChecker.check("0.7.0")
+                                    val info = UpdateChecker.check(BuildConfig.VERSION_NAME)
                                     withContext(Dispatchers.Main) {
                                         checkingUpdate = false
                                         updateInfo = info
@@ -3559,7 +3970,28 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text("Check for updates", color = palette.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            Text(if (checkingUpdate) "Checking releases..." else "Version 0.7.0", color = palette.accentSecondary, fontSize = 11.5.sp)
+                            Text(if (checkingUpdate) "Checking releases..." else "Version ${BuildConfig.VERSION_NAME}", color = palette.accentSecondary, fontSize = 11.5.sp)
+                        }
+                        Icon(Icons.Default.ChevronRight, null, tint = palette.textSecondary, modifier = Modifier.size(18.dp))
+                    }
+                    val tourSrc = remember { MutableInteractionSource() }
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .iosLiquidPress(tourSrc, scaleDown = 0.98f)
+                            .clickable(interactionSource = tourSrc, indication = ripple()) {
+                                IntroManager.resetIntro(activity)
+                                activity.showIntroScreen = true
+                            }
+                            .padding(vertical = 8.dp, horizontal = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(Icons.Default.HelpOutline, null, tint = palette.accent, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Feature Tour & Intro", color = palette.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("Explore gestures, lossless audio, streams & MICA JAM", color = palette.accentSecondary, fontSize = 11.5.sp)
                         }
                         Icon(Icons.Default.ChevronRight, null, tint = palette.textSecondary, modifier = Modifier.size(18.dp))
                     }
@@ -3579,7 +4011,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text("GitHub Repository", color = palette.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                            Text("github.com/AWT-SRIRAM/MSPLAYER", color = palette.accentSecondary, fontSize = 11.5.sp)
+                            Text("github.com/AWT-SRIRAM/MICA", color = palette.accentSecondary, fontSize = 11.5.sp)
                         }
                         Icon(Icons.Default.ChevronRight, null, tint = palette.textSecondary, modifier = Modifier.size(18.dp))
                     }
@@ -3671,7 +4103,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             onDismissRequest = { showUpdateDialog = false },
             title = {
                 Text(
-                    if (info?.isAvailable == true) "Update Available" else "MS PLAYER is up to date",
+                    if (info?.isAvailable == true) "Update Available" else "MICA is up to date",
                     color = palette.textPrimary,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 17.sp,
@@ -3686,13 +4118,13 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                             Text(info.changelog.take(300), color = palette.textSecondary.copy(alpha = 0.8f), fontSize = 12.sp)
                         }
                     } else {
-                        Text("MS PLAYER v0.7.0 is the latest version.", color = palette.textSecondary, fontSize = 13.5.sp)
+                        Text("MICA v${BuildConfig.VERSION_NAME} is the latest version.", color = palette.textSecondary, fontSize = 13.5.sp)
                     }
                 }
             },
             confirmButton = {
                 if (info?.isAvailable == true) {
-                    val targetUrl = info.downloadUrl.takeIf { it.isNotBlank() } ?: info.releasePageUrl.takeIf { it.isNotBlank() } ?: "https://github.com/AWT-SRIRAM/MSPLAYER/releases"
+                    val targetUrl = info.downloadUrl.takeIf { it.isNotBlank() } ?: info.releasePageUrl.takeIf { it.isNotBlank() } ?: "https://github.com/AWT-SRIRAM/MICA/releases"
                     Button(
                         onClick = {
                             showUpdateDialog = false
@@ -3980,7 +4412,7 @@ private fun OpenSourceLicensesDialog(
     val entries = remember {
         listOf(
             LicenseSummaryEntry(
-                name = "MS PLAYER (App Source)",
+                name = "MICA (App Source)",
                 author = "SRIRAM S & ANTIGRAVITY",
                 licenseBadge = "MIT",
                 summary = "Ad-free offline multimedia player application source code hosted on GitHub.",
@@ -4038,7 +4470,7 @@ private fun OpenSourceLicensesDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    "MS PLAYER is built with trusted open-source libraries. Here is a quick, readable summary of what each component does:",
+                    "MICA is built with trusted open-source libraries. Here is a quick, readable summary of what each component does:",
                     color = palette.textSecondary,
                     fontSize = 12.5.sp,
                 )
@@ -4350,6 +4782,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
     DisposableEffect(service) {
         activity.immersive(true)
         onDispose {
+            activity.immersive(false)
             service.endTemporarySpeed()
             service.detachVideo(attachedLayout)
             activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -4375,6 +4808,12 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
             },
             modifier = Modifier
                 .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = zoom
+                    scaleY = zoom
+                    translationX = panX
+                    translationY = panY
+                }
                 .onGloballyPositioned { coords ->
                     val b = coords.boundsInWindow()
                     if (b.width > 0f && b.height > 0f) {
@@ -4449,6 +4888,15 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                         panY += dy
                                     }
                                 },
+                                subtitlesEnabled = service.areSubtitlesEnabled(),
+                                subtitleScale = subtitleStyle.scale,
+                                onSubtitleScale = { newScale ->
+                                    val updated = subtitleStyle.copy(scale = newScale)
+                                    updated.save(activity)
+                                    subtitleStyle = updated
+                                    service.subtitleStyle(updated)
+                                    service.updateSubtitleScale(newScale)
+                                },
                             )
                         }
                     )
@@ -4499,8 +4947,8 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 exit = slideOutVertically(tween(160)) { -it / 2 },
                             )
                             .background(Brush.verticalGradient(listOf(Color.Black.copy(alpha = .80f), Color.Black.copy(alpha = .35f), Color.Transparent)))
-                            .windowInsetsPadding(WindowInsets.statusBars.only(WindowInsetsSides.Top).union(WindowInsets.displayCutout.only(WindowInsetsSides.Horizontal)))
-                            .padding(bottom = 4.dp)
+                            .windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout).only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
+                            .padding(top = 2.dp, bottom = 2.dp)
                     ) {
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 8.dp).padding(top = 2.dp, bottom = 2.dp),
@@ -4509,9 +4957,13 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             IconButton(onClick = { activity.exitPlayer() }) {
                                 Icon(Icons.Default.ArrowBack, "Back", tint = Color.White)
                             }
-                            val displayTitle = state.item?.title?.substringBeforeLast('.') ?: ""
+                            val rawTitle = state.item?.title.orEmpty().ifBlank {
+                                state.item?.uri?.substringAfterLast('/')?.substringBefore('?') ?: ""
+                            }
+                            val displayTitle = if (rawTitle.contains('.')) rawTitle.substringBeforeLast('.') else rawTitle
+                            val finalTitle = displayTitle.ifBlank { state.item?.artist.orEmpty().ifBlank { "Playing Stream" } }
                             Text(
-                                displayTitle,
+                                finalTitle,
                                 color = Color.White,
                                 modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
                                 fontSize = 17.5.sp,
@@ -4554,6 +5006,40 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 14.sp
                                 )
+                            }
+                            val isYtStream = state.item?.let {
+                                it.folder == "Network Streams" && (
+                                    it.uri.contains("googlevideo.com") ||
+                                    it.uri.contains("youtube.com") ||
+                                    it.uri.contains("yt_") ||
+                                    it.sourceVideoId.isNotBlank()
+                                )
+                            } ?: false
+                            val currentVTrack = service.currentVideoTrackId()
+                            val vTracks = service.availableVideoTracks()
+                            if (isYtStream && vTracks.size > 1) {
+                                val currentQuality = vTracks.firstOrNull { it.first == currentVTrack }?.second ?: "Auto"
+                                val qualityLabel = when {
+                                    currentQuality.contains("1080", ignoreCase = true) -> "1080p"
+                                    currentQuality.contains("720", ignoreCase = true) -> "720p"
+                                    currentQuality.contains("480", ignoreCase = true) -> "480p"
+                                    currentQuality.contains("360", ignoreCase = true) -> "360p"
+                                    currentQuality.contains("2160", ignoreCase = true) || currentQuality.contains("4k", ignoreCase = true) -> "4K"
+                                    else -> "Quality"
+                                }
+                                TextButton(
+                                    onClick = {
+                                        service.refreshTracks()
+                                        openPlayerMenu("Quality")
+                                    }
+                                ) {
+                                    Text(
+                                        qualityLabel,
+                                        color = Accent,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.5.sp
+                                    )
+                                }
                             }
                             IconButton(
                                 onClick = {
@@ -4740,6 +5226,79 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 Icon(Icons.Default.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(34.dp))
                             }
                             Spacer(Modifier.weight(1f))
+                            val subToggleSrc = remember { MutableInteractionSource() }
+                            val subActive = service.areSubtitlesEnabled()
+                            IconButton(
+                                onClick = {
+                                    if (!service.areSubtitlesEnabled()) {
+                                        service.toggleSubtitlesMaster()
+                                    }
+                                    val currentScale = subtitleStyle.scale
+                                    val nextScale = when {
+                                        currentScale < 90 -> 100
+                                        currentScale in 90..115 -> 125
+                                        currentScale in 116..140 -> 150
+                                        currentScale in 141..165 -> 175
+                                        currentScale in 166..190 -> 200
+                                        else -> 75
+                                    }
+                                    val updatedStyle = subtitleStyle.copy(scale = nextScale)
+                                    updatedStyle.save(activity)
+                                    service.subtitleStyle(updatedStyle)
+                                    subtitleStyle = updatedStyle
+                                    touch()
+                                    hint(PlayerFeedback.SubtitleScale(nextScale))
+                                    activity.toast("Subtitle Size: $nextScale%")
+                                },
+                                interactionSource = subToggleSrc,
+                                modifier = Modifier.iosLiquidPress(subToggleSrc, scaleDown = 0.88f),
+                            ) {
+                                Box(
+                                    Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Accent.copy(alpha = 0.35f))
+                                        .border(0.8.dp, Accent, RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 7.dp, vertical = 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_cc_flaticon),
+                                        contentDescription = "Subtitle Size",
+                                        tint = Accent,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                            }
+                            val isYtStream = state.item?.let {
+                                it.uri.contains("googlevideo.com") || it.uri.startsWith("yt_") || it.sourceVideoId.isNotBlank() || (it.folder == "Network Streams" && it.uri.contains("youtu"))
+                            } == true
+                            if (isYtStream) {
+                                val hdSrc = remember { MutableInteractionSource() }
+                                IconButton(
+                                    onClick = {
+                                        touch()
+                                        activity.toast("Video Stream Quality: 1080p Full HD (Adaptive)")
+                                    },
+                                    interactionSource = hdSrc,
+                                    modifier = Modifier.iosLiquidPress(hdSrc, scaleDown = 0.88f),
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(Color.White.copy(alpha = 0.12f))
+                                            .border(0.8.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+                                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            painter = painterResource(R.drawable.ic_hd_flaticon),
+                                            contentDescription = "HD Quality",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            }
                             IconButton(
                                 onClick = {
                                     val nextAspect = aspectOption.next()
@@ -4977,6 +5536,38 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                         Text("Settings ${if (expanded) "▴" else "▾"}")
                     }
                     if (expanded) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text("Subtitle Size", color = Color.White, fontSize = 14.sp)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                IconButton(
+                                    modifier = Modifier.size(32.dp),
+                                    onClick = {
+                                        val currentScale = SubtitleStyle.load(activity).scale
+                                        val newScale = (currentScale - 10).coerceAtLeast(50)
+                                        service.updateSubtitleScale(newScale)
+                                        subtitleStyle = subtitleStyle.copy(scale = newScale)
+                                    }
+                                ) {
+                                    Text("－", color = Cyan, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Text("${subtitleStyle.scale}%", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                IconButton(
+                                    modifier = Modifier.size(32.dp),
+                                    onClick = {
+                                        val currentScale = SubtitleStyle.load(activity).scale
+                                        val newScale = (currentScale + 10).coerceAtMost(250)
+                                        service.updateSubtitleScale(newScale)
+                                        subtitleStyle = subtitleStyle.copy(scale = newScale)
+                                    }
+                                ) {
+                                    Text("＋", color = Cyan, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
                         DelayControls("Delay", state.subtitleDelay) { service.subtitleDelay(it) }
                         TextButton(
                             onClick = {
@@ -5087,6 +5678,25 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                 Text("Media information unavailable", color = Muted, fontSize = 13.sp)
             }
         }
+    } else if (menu == "Quality" && !activity.inPip) {
+        PlayerSidePanel("Video Quality", { closePlayerMenu() }) {
+            val currentVTrack = service.currentVideoTrackId()
+            val vTracks = service.availableVideoTracks()
+            TrackChoice("Auto (Adaptive)", currentVTrack == -1 || vTracks.isEmpty()) {
+                service.setVideoTrack(-1)
+                closePlayerMenu()
+            }
+            vTracks.forEach { (id, label) ->
+                val displayLabel = when {
+                    label.contains("x", ignoreCase = true) || label.contains("p", ignoreCase = true) -> label
+                    else -> "Quality ($label)"
+                }
+                TrackChoice(displayLabel, id == currentVTrack) {
+                    service.setVideoTrack(id)
+                    closePlayerMenu()
+                }
+            }
+        }
     } else if (menu != null && !activity.inPip)
         PlayerMenuDialog(
             onDismissRequest = {
@@ -5097,6 +5707,22 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                 Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     when (menu) {
                         "Options" -> {
+                            val isYtStream = state.item?.let {
+                                it.folder == "Network Streams" && (
+                                    it.uri.contains("googlevideo.com") ||
+                                    it.uri.contains("youtube.com") ||
+                                    it.uri.contains("yt_") ||
+                                    it.sourceVideoId.isNotBlank()
+                                )
+                            } ?: false
+                            val vTracks = service.availableVideoTracks()
+                            if (isYtStream && vTracks.size > 1) {
+                                LiquidGlassPopupMenuItem(
+                                    text = { Text("Quality") },
+                                    leadingIcon = { Icon(Icons.Default.HighQuality, null, tint = Cyan, modifier = Modifier.size(18.dp)) },
+                                    onClick = { openPlayerMenu("Quality") },
+                                )
+                            }
                             LiquidGlassPopupMenuItem(
                                 text = { Text("Information") },
                                 leadingIcon = { Icon(Icons.Default.Info, null, tint = Cyan, modifier = Modifier.size(18.dp)) },
@@ -5464,22 +6090,32 @@ fun NativeSubtitleOverlay(
     val controlsTopPx by service.subtitleControlsTopPx.collectAsState()
     val revision by service.subtitleStyleRevision.collectAsState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val style = remember(service, revision) { SubtitleStyle.load(context) }
     var totalDragX by remember { mutableFloatStateOf(0f) }
+    var totalDragY by remember { mutableFloatStateOf(0f) }
+    var hudText by remember { mutableStateOf<String?>(null) }
+    var hudJob by remember { mutableStateOf<Job?>(null) }
     val hasActiveSub = !subtitleText.isNullOrBlank() || !dualLines.primary.isNullOrBlank() || !dualLines.secondary.isNullOrBlank()
 
     Box(
         modifier = modifier
             .then(
-                if (controlsVisible && hasActiveSub) {
+                if (hasActiveSub) {
                     Modifier.pointerInput(style) {
-                        detectTransformGestures { _, pan, zoom, _ ->
-                            if (zoom != 1f) {
-                                val newScale = (style.scale * zoom).toInt().coerceIn(50, 300)
+                        detectTransformGestures { _, pan, _, _ ->
+                            totalDragY += pan.y
+                            if (kotlin.math.abs(totalDragY) > 20f) {
+                                val step = if (totalDragY < 0) 5 else -5
+                                totalDragY = 0f
+                                val newScale = (style.scale + step).coerceIn(50, 300)
                                 if (newScale != style.scale) {
                                     val updated = style.copy(scale = newScale)
                                     updated.save(context)
                                     service.subtitleStyle(updated)
+                                    hudText = "Subtitle Size: $newScale%"
+                                    hudJob?.cancel()
+                                    hudJob = scope.launch { delay(900); hudText = null }
                                 }
                             } else {
                                 totalDragX += pan.x
@@ -5503,7 +6139,8 @@ fun NativeSubtitleOverlay(
                         liftAbovePrimarySpu = playerState.hasPrimaryHwSubtitle,
                         controlsBottomReservedPx = controlsTopPx,
                     )
-                    setDualSubtitleText(dualLines.primary, dualLines.secondary)
+                    val effectivePrimary = dualLines.primary ?: subtitleText
+                    setDualSubtitleText(effectivePrimary, dualLines.secondary)
                 }
             },
             update = { view ->
@@ -5514,10 +6151,24 @@ fun NativeSubtitleOverlay(
                     liftAbovePrimarySpu = playerState.hasPrimaryHwSubtitle,
                     controlsBottomReservedPx = controlsTopPx,
                 )
-                view.setDualSubtitleText(dualLines.primary, dualLines.secondary)
+                val effectivePrimary = dualLines.primary ?: subtitleText
+                view.setDualSubtitleText(effectivePrimary, dualLines.secondary)
             },
             modifier = Modifier.fillMaxSize(),
         )
+
+        hudText?.let { text ->
+            Box(
+                Modifier
+                    .align(Alignment.Center)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color.Black.copy(alpha = 0.78f))
+                    .border(1.dp, Accent.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(text, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
+        }
     }
 }
 

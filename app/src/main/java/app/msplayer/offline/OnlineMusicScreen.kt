@@ -1,5 +1,6 @@
 package app.msplayer.offline
 
+import androidx.activity.compose.BackHandler
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -24,12 +26,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -41,6 +45,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -54,6 +59,9 @@ object OnlineImageCache {
     fun put(url: String, bitmap: Bitmap) {
         memoryCache.put(url, bitmap)
     }
+    fun evict(url: String) {
+        memoryCache.remove(url)
+    }
 }
 
 @Composable
@@ -64,21 +72,38 @@ fun rememberRemoteBitmap(url: String?): Bitmap? {
     LaunchedEffect(url) {
         if (bitmap == null) {
             withContext(Dispatchers.IO) {
-                val loaded = runCatching {
-                    val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 4000
-                        readTimeout = 4000
-                        instanceFollowRedirects = true
-                        setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                        setRequestProperty("Connection", "keep-alive")
+                val realUrl = if (url.startsWith("spotify_track://")) {
+                    val trId = url.removePrefix("spotify_track://")
+                    SpotifyClient.resolveTrackThumbnail(trId)
+                } else url
+
+                if (!realUrl.isNullOrBlank() && realUrl.startsWith("http")) {
+                    val cached = OnlineImageCache.get(realUrl)
+                    if (cached != null) {
+                        OnlineImageCache.put(url, cached)
+                        withContext(Dispatchers.Main) { bitmap = cached }
+                        return@withContext
                     }
-                    val bytes = conn.inputStream.use { it.readBytes() }
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                }.getOrNull()
-                if (loaded != null) {
-                    OnlineImageCache.put(url, loaded)
-                    withContext(Dispatchers.Main) {
-                        bitmap = loaded
+                    val loaded = runCatching {
+                        val conn = (URL(realUrl).openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 4000
+                            readTimeout = 4000
+                            instanceFollowRedirects = true
+                            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                            setRequestProperty("Connection", "keep-alive")
+                        }
+                        val bytes = conn.inputStream.use { it.readBytes() }
+                        val opts = BitmapFactory.Options().apply {
+                            inPreferredConfig = Bitmap.Config.RGB_565
+                        }
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                    }.getOrNull()
+                    if (loaded != null) {
+                        OnlineImageCache.put(realUrl, loaded)
+                        OnlineImageCache.put(url, loaded)
+                        withContext(Dispatchers.Main) {
+                            bitmap = loaded
+                        }
                     }
                 }
             }
@@ -105,10 +130,52 @@ fun OnlineMusicScreen(
     val playerState by (service?.state ?: fallbackPlayerState).collectAsState()
 
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    var searchSuggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var showSuggestions by remember { mutableStateOf(false) }
+    var isSearchFocused by remember { mutableStateOf(false) }
+    var userSelectedSuggestion by remember { mutableStateOf(false) }
     var isSearching by remember { mutableStateOf(false) }
-    var searchResults by remember { mutableStateOf<List<YtTrack>>(emptyList()) }
-    var activeCategory by rememberSaveable { mutableStateOf("Home") }
+    var searchResults by remember { mutableStateOf<List<YtTrack>>(FeedCacheManager.cachedTopHits.value.ifEmpty { FeedCacheManager.defaultCuratedHits() }.let { FeedCacheManager.run { it.deduplicated() } }) }
+    var activeCategory by rememberSaveable { mutableStateOf(activity.savedOnlineCategory) }
+    LaunchedEffect(activeCategory) { activity.savedOnlineCategory = activeCategory }
+
+    var searchHistory by remember {
+        val raw = Store.prefs(context).getString("online_search_history_v1", "") ?: ""
+        mutableStateOf(raw.split("\n").map { it.trim() }.filter { it.isNotBlank() })
+    }
+
+    fun saveToSearchHistory(q: String) {
+        val clean = q.trim()
+        if (clean.isBlank()) return
+        val updated = (listOf(clean) + searchHistory.filter { !it.equals(clean, ignoreCase = true) }).take(25)
+        searchHistory = updated
+        Store.prefs(context).edit().putString("online_search_history_v1", updated.joinToString("\n")).apply()
+    }
+
+    fun removeFromSearchHistory(item: String) {
+        val updated = searchHistory.filter { it != item }
+        searchHistory = updated
+        Store.prefs(context).edit().putString("online_search_history_v1", updated.joinToString("\n")).apply()
+    }
+
+    LaunchedEffect(searchQuery) {
+        if (userSelectedSuggestion) {
+            userSelectedSuggestion = false
+            return@LaunchedEffect
+        }
+        val trimmed = searchQuery.trim()
+        if (trimmed.length >= 2) {
+            delay(150L)
+            val list = YtMusicClient.getSearchSuggestions(trimmed)
+            searchSuggestions = list
+            showSuggestions = list.isNotEmpty()
+        } else {
+            searchSuggestions = emptyList()
+            showSuggestions = false
+        }
+    }
     var showLanguageModal by remember { mutableStateOf(false) }
+    var showJamDialog by remember { mutableStateOf(false) }
     var showGoogleAuthModal by remember { mutableStateOf(false) }
     var showGoogleSignOutConfirm by remember { mutableStateOf(false) }
     var googleSignedIn by remember { mutableStateOf(YtMusicClient.isGoogleSignedIn(context)) }
@@ -156,10 +223,10 @@ fun OnlineMusicScreen(
 
     val categories = remember(palette.mode) {
         when (palette.mode) {
-            AppThemeMode.WHITE_LIQUID_GLASS -> listOf("✨ For You", "Spotify", "☀️ Crystal Pop", "🎸 Acoustic Glass", "🌿 Fresh Morning", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Bollywood")
-            AppThemeMode.LIGHT -> listOf("✨ For You", "Spotify", "☀️ Daylight Hits", "🎵 Feel Good", "🎸 Acoustic", "Popular Artists", "Tamil Hits", "English Pop", "Trending", "Kollywood")
-            AppThemeMode.DARK_LIQUID_GLASS -> listOf("✨ For You", "Spotify", "🌙 Midnight Glass", "🌌 Lo-Fi Chill", "🔊 Deep Bass", "Popular Artists", "Tamil OST & BGM", "Trending", "Kollywood", "EDM")
-            AppThemeMode.DARK -> listOf("✨ For You", "Spotify", "🖤 Night Drive", "🔥 Mass BGM", "🎧 Hip-Hop & EDM", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Lo-Fi")
+            AppThemeMode.WHITE_LIQUID_GLASS -> listOf("✨ For You", "💎 Hi-Res FLAC", "Spotify", "☀️ Crystal Pop", "🎸 Acoustic Glass", "🌿 Fresh Morning", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Bollywood")
+            AppThemeMode.LIGHT -> listOf("✨ For You", "💎 Hi-Res FLAC", "Spotify", "☀️ Daylight Hits", "🎵 Feel Good", "🎸 Acoustic", "Popular Artists", "Tamil Hits", "English Pop", "Trending", "Kollywood")
+            AppThemeMode.DARK_LIQUID_GLASS -> listOf("✨ For You", "💎 Hi-Res FLAC", "Spotify", "🌙 Midnight Glass", "🌌 Lo-Fi Chill", "🔊 Deep Bass", "Popular Artists", "Tamil OST & BGM", "Trending", "Kollywood", "EDM")
+            AppThemeMode.DARK -> listOf("✨ For You", "💎 Hi-Res FLAC", "Spotify", "🖤 Night Drive", "🔥 Mass BGM", "🎧 Hip-Hop & EDM", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Lo-Fi")
         }
     }
 
@@ -184,15 +251,28 @@ fun OnlineMusicScreen(
                     if (jioTracks.isNotEmpty()) jioTracks else YtMusicClient.fetchPlaylistTracks(playlist.listId)
                 }
                 else -> {
-                    YtMusicClient.searchSongs(playlist.searchQuery.ifBlank { playlist.title })
+                    val ytHits = runCatching { YtMusicClient.searchSongs(playlist.searchQuery.ifBlank { playlist.title }) }.getOrDefault(emptyList())
+                    if (ytHits.isNotEmpty()) ytHits else {
+                        runCatching {
+                            JioSaavnClient.searchSongs(playlist.searchQuery.ifBlank { playlist.title }).map { s ->
+                                YtTrack(
+                                    videoId = "saavn_${s.id}",
+                                    title = s.title,
+                                    artist = s.artist,
+                                    thumbUrl = s.thumbUrl,
+                                    directStreamUrl = s.streamUrl
+                                )
+                            }
+                        }.getOrDefault(emptyList())
+                    }
                 }
             }
-            playlistTracks = tracks
+            playlistTracks = FeedCacheManager.run { tracks.deduplicated() }
             isLoadingPlaylistTracks = false
         }
     }
 
-    fun playTrack(track: YtTrack) {
+    fun playTrack(track: YtTrack, contextTracks: List<YtTrack> = emptyList()) {
         // Cancel any previous pending tap resolution so rapid taps never collide or fail silently
         activePlayJob?.cancel()
         val requestId = track.videoId
@@ -208,6 +288,8 @@ fun OnlineMusicScreen(
                     rawThumbUrl = track.thumbUrl,
                     directStreamUrl = track.directStreamUrl
                 )
+                val currentFolderName = selectedPlaylist?.title?.ifBlank { null }
+                    ?: if (searchQuery.isNotBlank()) searchQuery else "Top Hits"
                 if (resolved != null && service != null) {
                     val mediaItem = MediaItem(
                         uri = resolved.streamUrl,
@@ -217,8 +299,28 @@ fun OnlineMusicScreen(
                         thumbUri = resolved.hdThumbUrl.ifBlank { track.thumbUrl },
                         sourceVideoId = track.videoId,
                         streamUserAgent = resolved.userAgent,
+                        folder = currentFolderName,
                     )
-                    service.open(listOf(mediaItem), mediaItem, autoPlay = true)
+                    val queueItems = if (contextTracks.isNotEmpty()) {
+                        val startIdx = contextTracks.indexOfFirst { it.videoId == track.videoId }.coerceAtLeast(0)
+                        val subsequent = contextTracks.drop(startIdx + 1).take(50).map { t ->
+                            val lazyUri = t.directStreamUrl.takeIf { it.startsWith("http") }
+                                ?: if (t.videoId.startsWith("saavn_")) t.videoId else "yt_${t.videoId}"
+                            MediaItem(
+                                uri = lazyUri,
+                                title = t.title,
+                                artist = t.artist,
+                                audio = true,
+                                thumbUri = t.thumbUrl,
+                                sourceVideoId = t.videoId,
+                                folder = currentFolderName,
+                            )
+                        }
+                        listOf(mediaItem) + subsequent
+                    } else {
+                        listOf(mediaItem)
+                    }
+                    service.open(queueItems, mediaItem, autoPlay = true)
                     activity.showPlayer = true
                 } else {
                     Toast.makeText(context, "Could not stream audio track — retrying alternate engine", Toast.LENGTH_SHORT).show()
@@ -233,12 +335,13 @@ fun OnlineMusicScreen(
         }
     }
 
-    fun playAllPlaylist(tracks: List<YtTrack>) {
+    fun playAllPlaylist(tracks: List<YtTrack>, customTitle: String? = null) {
         if (tracks.isEmpty() || service == null) return
         activePlayJob?.cancel()
         val first = tracks.first()
         loadingTrackId = first.videoId
         recordPlayedArtist(first.artist)
+        val playlistFolder = customTitle ?: selectedPlaylist?.title ?: "Featured Playlist"
         activePlayJob = activity.lifecycleScope.launch {
             try {
                 val items = tracks.map { t ->
@@ -251,6 +354,7 @@ fun OnlineMusicScreen(
                         audio = true,
                         thumbUri = t.thumbUrl,
                         sourceVideoId = t.videoId,
+                        folder = playlistFolder,
                     )
                 }
                 val resolved = AudioStreamResolver.resolveBestStream(
@@ -266,6 +370,7 @@ fun OnlineMusicScreen(
                         thumbUri = resolved.hdThumbUrl.ifBlank { first.thumbUrl },
                         sourceVideoId = first.videoId,
                         streamUserAgent = resolved.userAgent,
+                        folder = playlistFolder,
                     )
                     service.open(playable, playable[0], autoPlay = true)
                     activity.showPlayer = true
@@ -280,13 +385,69 @@ fun OnlineMusicScreen(
         }
     }
 
-    fun performSearch(q: String, forceRefresh: Boolean = false) {
+    fun performSearch(q: String, forceRefresh: Boolean = false, userInitiated: Boolean = false) {
         if (q.isBlank()) return
+        if (userInitiated) {
+            saveToSearchHistory(q)
+        }
+        showSuggestions = false
         focusManager.clearFocus()
+
+        // Direct Stream & YouTube Link Interception
+        val isLink = q.contains("http://") || q.contains("https://") ||
+                q.contains("youtube.com") || q.contains("youtu.be") || q.contains("spotify.com")
+        if (isLink) {
+            Store.recordStream(context, q)
+            val listId = Regex("""[?&]list=([\w-]+)""").find(q)?.groupValues?.getOrNull(1)
+            if (listId != null) {
+                scope.launch {
+                    isSearching = true
+                    val tracks = YtMusicClient.fetchPlaylistTracks(listId)
+                    if (tracks.isNotEmpty()) {
+                        playlistTracks = FeedCacheManager.run { tracks.deduplicated() }
+                        selectedPlaylist = PlaylistCard("Imported Playlist", "${tracks.size} tracks", tracks.first().thumbUrl, q, listId = listId, songCount = tracks.size)
+                        playAllPlaylist(tracks)
+                    } else {
+                        Toast.makeText(context, "Could not load YouTube playlist", Toast.LENGTH_SHORT).show()
+                    }
+                    isSearching = false
+                }
+                return
+            }
+
+            scope.launch {
+                isSearching = true
+                try {
+                    val resolved = StreamResolver.resolve(q)
+                    if (resolved.streamUrl.isNotBlank()) {
+                        if (resolved.isVideo) {
+                            activity.playStream(resolved.streamUrl, resolved.title, resolved.thumbUrl)
+                        } else {
+                            val track = YtTrack(
+                                videoId = resolved.streamUrl,
+                                title = resolved.title,
+                                artist = resolved.author.ifBlank { "Online Stream" },
+                                thumbUrl = resolved.thumbUrl,
+                                directStreamUrl = resolved.streamUrl
+                            )
+                            playTrack(track)
+                        }
+                    } else {
+                        Toast.makeText(context, "Could not resolve stream from link", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Stream resolution error: ${e.message}", Toast.LENGTH_SHORT).show()
+                } finally {
+                    isSearching = false
+                }
+            }
+            return
+        }
+
         if (activeCategory != "Playlists") {
             val cached = if (!forceRefresh) OnlineMusicCache.get(context, q) else null
             if (cached != null && cached.isNotEmpty()) {
-                searchResults = cached
+                searchResults = FeedCacheManager.run { cached.deduplicated() }
                 isSearching = false
                 return
             }
@@ -300,11 +461,36 @@ fun OnlineMusicScreen(
                 val yt = runCatching { ytDef.await() }.getOrDefault(emptyList())
                 searchedPlaylists = (yt + jio).distinctBy { it.title.lowercase() }
             } else {
-                val results = YtMusicClient.searchSongs(q)
+                val ytDef = async { runCatching { YtMusicClient.searchSongs(q) }.getOrDefault(emptyList()) }
+                val jioDef = async {
+                    runCatching {
+                        JioSaavnClient.searchSongs(q).map { s ->
+                            YtTrack(
+                                videoId = "saavn_${s.id}",
+                                title = s.title,
+                                artist = s.artist,
+                                thumbUrl = s.thumbUrl,
+                                directStreamUrl = s.streamUrl
+                            )
+                        }
+                    }.getOrDefault(emptyList())
+                }
+                val ytResults = ytDef.await()
+                val jioResults = jioDef.await()
+                val enrichedYt = ytResults.map { yt ->
+                    if (yt.artist.equals("Unknown", true) || yt.artist.isBlank()) {
+                        val match = jioResults.find { it.title.equals(yt.title, true) || it.title.contains(yt.title, true) || yt.title.contains(it.title, true) }
+                        if (match != null && match.artist.isNotBlank() && !match.artist.equals("Unknown", true)) {
+                            yt.copy(artist = match.artist)
+                        } else yt
+                    } else yt
+                }
+                val results = if (enrichedYt.isNotEmpty()) {
+                    FeedCacheManager.run { (enrichedYt + jioResults).deduplicated() }
+                } else FeedCacheManager.run { jioResults.deduplicated() }
                 if (results.isNotEmpty()) {
                     searchResults = results
                     OnlineMusicCache.put(context, q, results)
-                    OnlineMusicCache.put(context, activeCategory, results)
                 }
                 // Background pre-fetch playlists for seamless instant filter toggle
                 launch {
@@ -333,9 +519,56 @@ fun OnlineMusicScreen(
             }
             return
         }
+        if (cat == "💎 Hi-Res FLAC") {
+            val flacStations = listOf(
+                YtTrack(
+                    videoId = "flac_rp_main",
+                    title = "Radio Paradise (Main Mix)",
+                    artist = "Audiophile 16-bit / 44.1 kHz FLAC",
+                    durationText = "Live Hi-Res",
+                    thumbUrl = "https://upload.wikimedia.org/wikipedia/commons/7/78/Radio_Paradise_logo.png",
+                    directStreamUrl = "https://stream.radioparadise.com/flac"
+                ),
+                YtTrack(
+                    videoId = "flac_rp_mellow",
+                    title = "Radio Paradise (Mellow Mix)",
+                    artist = "Audiophile 16-bit / 44.1 kHz FLAC",
+                    durationText = "Live Hi-Res",
+                    thumbUrl = "https://upload.wikimedia.org/wikipedia/commons/7/78/Radio_Paradise_logo.png",
+                    directStreamUrl = "https://stream.radioparadise.com/mellow-flac"
+                ),
+                YtTrack(
+                    videoId = "flac_rp_rock",
+                    title = "Radio Paradise (Rock Mix)",
+                    artist = "Audiophile 16-bit / 44.1 kHz FLAC",
+                    durationText = "Live Hi-Res",
+                    thumbUrl = "https://upload.wikimedia.org/wikipedia/commons/7/78/Radio_Paradise_logo.png",
+                    directStreamUrl = "https://stream.radioparadise.com/rock-flac"
+                ),
+                YtTrack(
+                    videoId = "flac_mother_earth",
+                    title = "Mother Earth Radio (Vinyl Master)",
+                    artist = "Ultra HD 24-bit / 96 kHz Master FLAC",
+                    durationText = "Live Master",
+                    thumbUrl = "https://cdn-profiles.tunein.com/s341094/images/logoq.jpg",
+                    directStreamUrl = "https://motherearth.stream:8443/motherearth"
+                ),
+                YtTrack(
+                    videoId = "flac_jb_radio",
+                    title = "JB Radio-2 (Audiophile Acoustic)",
+                    artist = "FLAC 24-bit / 96 kHz Live Stream",
+                    durationText = "Live Hi-Res",
+                    thumbUrl = "https://cdn-profiles.tunein.com/s341094/images/logoq.jpg",
+                    directStreamUrl = "http://199.189.111.30:8010/flac"
+                )
+            )
+            searchResults = flacStations
+            isSearching = false
+            return
+        }
         val cached = OnlineMusicCache.get(context, cat)
         if (cached != null && cached.isNotEmpty()) {
-            searchResults = cached
+            searchResults = FeedCacheManager.run { cached.deduplicated() }
             isSearching = false
             return
         }
@@ -382,7 +615,7 @@ fun OnlineMusicScreen(
             "EDM" -> "EDM Party Hits 2026"
             else -> "$cat Songs 2026"
         }
-        performSearch(query)
+        performSearch(query, userInitiated = false)
     }
 
     // Initial load & refresh when theme or language changes on Home
@@ -402,9 +635,23 @@ fun OnlineMusicScreen(
         }
     }
 
-    Column(
-        Modifier.fillMaxSize()
-    ) {
+    BackHandler(enabled = searchQuery.isNotBlank() || showSuggestions || isSearchFocused || selectedPlaylist != null) {
+        if (showSuggestions || isSearchFocused) {
+            showSuggestions = false
+            isSearchFocused = false
+            focusManager.clearFocus()
+        } else if (selectedPlaylist != null) {
+            selectedPlaylist = null
+        } else if (searchQuery.isNotBlank()) {
+            searchQuery = ""
+            loadCategoryTracks(activeCategory)
+        }
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize()
+        ) {
         // Clean, Full-Width Liquid Glass Search Bar
         Row(
             Modifier
@@ -416,16 +663,18 @@ fun OnlineMusicScreen(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
                 shape = RoundedCornerShape(26.dp),
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .onFocusChanged { isSearchFocused = it.isFocused },
                 placeholder = {
                     Text(
-                        if (activeCategory == "Playlists") "Search Playlists..." else "Search Songs & Artists...",
+                        if (activeCategory == "Playlists") "Search Playlists or paste URL..." else "Search Songs, Artists or paste link...",
                         color = palette.textSecondary.copy(alpha = 0.7f),
                         fontSize = 14.sp
                     )
                 },
                 leadingIcon = {
-                    IconButton(onClick = { performSearch(searchQuery) }) {
+                    IconButton(onClick = { performSearch(searchQuery, userInitiated = true) }) {
                         Icon(Icons.Rounded.Search, "Search", tint = palette.accent)
                     }
                 },
@@ -434,15 +683,17 @@ fun OnlineMusicScreen(
                         IconButton(onClick = {
                             searchQuery = ""
                             selectedPlaylist = null
+                            showSuggestions = false
+                            focusManager.clearFocus()
                             loadCategoryTracks(activeCategory)
                         }) {
-                            Icon(Icons.Rounded.Close, null, tint = palette.textSecondary)
+                            Icon(Icons.Rounded.Close, "Clear search", tint = palette.accent, modifier = Modifier.size(22.dp))
                         }
                     }
                 },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { performSearch(searchQuery) }),
+                keyboardActions = KeyboardActions(onSearch = { performSearch(searchQuery, userInitiated = true) }),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = palette.accent,
                     unfocusedBorderColor = if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.90f) else if (glassEnabled) Color.White.copy(alpha = 0.18f) else palette.cardBorder,
@@ -452,6 +703,96 @@ fun OnlineMusicScreen(
                     unfocusedTextColor = palette.textPrimary,
                 ),
             )
+        }
+
+        // Search History Dropdown (Matching Screenshot_20261120_065043.jpg)
+        if (isSearchFocused && searchQuery.isBlank() && searchHistory.isNotEmpty()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.96f) else Color(0xF0181F2A))
+                    .border(0.8.dp, palette.cardBorder, RoundedCornerShape(16.dp))
+                    .padding(vertical = 4.dp)
+            ) {
+                searchHistory.forEach { histItem ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                userSelectedSuggestion = true
+                                searchQuery = histItem
+                                showSuggestions = false
+                                isSearchFocused = false
+                                focusManager.clearFocus()
+                                performSearch(histItem, userInitiated = true)
+                            }
+                            .padding(horizontal = 14.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Rounded.History, "History", tint = palette.textSecondary.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Text(histItem, color = palette.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
+                        IconButton(
+                            onClick = { removeFromSearchHistory(histItem) },
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(Icons.Rounded.Close, "Remove", tint = palette.textSecondary.copy(alpha = 0.6f), modifier = Modifier.size(15.dp))
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        IconButton(
+                            onClick = {
+                                userSelectedSuggestion = true
+                                searchQuery = histItem
+                            },
+                            modifier = Modifier.size(26.dp)
+                        ) {
+                            Icon(Icons.Rounded.NorthWest, "Fill query", tint = palette.textSecondary.copy(alpha = 0.6f), modifier = Modifier.size(15.dp))
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showSuggestions && searchSuggestions.isNotEmpty()) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.96f) else Color(0xF0181F2A))
+                    .border(0.8.dp, palette.cardBorder, RoundedCornerShape(16.dp))
+                    .padding(vertical = 4.dp)
+            ) {
+                searchSuggestions.forEach { suggestion ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                userSelectedSuggestion = true
+                                searchQuery = suggestion
+                                showSuggestions = false
+                                performSearch(suggestion, userInitiated = true)
+                            }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Rounded.Search, null, tint = palette.accent, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text(suggestion, color = palette.textPrimary, fontSize = 13.5.sp, modifier = Modifier.weight(1f))
+                        IconButton(
+                            onClick = {
+                                userSelectedSuggestion = true
+                                searchQuery = suggestion
+                            },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Rounded.NorthWest, "Fill query", tint = palette.textSecondary.copy(alpha = 0.6f), modifier = Modifier.size(14.dp))
+                        }
+                    }
+                }
+            }
         }
 
         // Category & Language Chips Row with Liquid Glass Surfaces
@@ -659,6 +1000,42 @@ fun OnlineMusicScreen(
                 }
             }
 
+            // MS Jam — Listen Together Chip
+            item(key = "ms_jam_chip") {
+                val jamState by JamSyncController.sessionState.collectAsState()
+                val isJamActive = jamState.role != JamRole.NONE && jamState.isConnected
+                Box(
+                    modifier = Modifier
+                        .liquidGlassSurface(
+                            backdrop = null,
+                            enabled = glassEnabled,
+                            shape = chipShape,
+                            tint = if (isJamActive) Color(0xFF10B981).copy(alpha = 0.2f) else palette.accent.copy(alpha = 0.16f),
+                            blurRadius = 8.dp,
+                            fallbackColor = palette.surface,
+                        )
+                        .border(1.dp, if (isJamActive) Color(0xFF10B981) else palette.accent.copy(alpha = 0.5f), chipShape)
+                        .clickable { showJamDialog = true }
+                        .padding(horizontal = 12.dp, vertical = 7.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Rounded.SpeakerGroup,
+                            contentDescription = null,
+                            tint = if (isJamActive) Color(0xFF10B981) else palette.accent,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            if (isJamActive) "Jam: ${jamState.roomCode}" else "MICA JAM",
+                            color = if (isJamActive) Color(0xFF10B981) else palette.accent,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            }
+
             // 6. Google Account Status Chip (At the end)
             item(key = "google_auth") {
                 Box(
@@ -856,7 +1233,7 @@ fun OnlineMusicScreen(
                                 isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
                                 dlProgress = dlProgress?.progress ?: 0f,
                                 isPlaying = isPlaying,
-                                onPlay = { playTrack(track) },
+                                onPlay = { playTrack(track, playlistTracks) },
                                 onDownload = {
                                     AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
                                 }
@@ -913,7 +1290,73 @@ fun OnlineMusicScreen(
                             Icon(Icons.Rounded.ChevronRight, null, tint = palette.textSecondary, modifier = Modifier.size(20.dp))
                         }
                     }
-                } else if ((activeCategory == "Home" || activeCategory == "Top Hits") && searchQuery.isBlank() && searchResults.isNotEmpty()) {
+                } else if (activeCategory == "Top Hits" && searchQuery.isBlank() && searchResults.isNotEmpty()) {
+                    // Dedicated Top 50 Chartbusters Leaderboard (#1 - #50)
+                    item(key = "top_hits_hdr") {
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text("🔥 Top 50 Chartbusters", color = palette.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                                Text("Global trending hits & live ranks", color = palette.textSecondary, fontSize = 12.sp)
+                            }
+                            IconButton(onClick = { loadCategoryTracks("Top Hits") }) {
+                                Icon(Icons.Rounded.Refresh, "Refresh charts", tint = palette.accent)
+                            }
+                        }
+                    }
+
+                    itemsIndexed(searchResults, key = { idx, trk -> "top_chart_${idx}_${trk.videoId}" }) { index, track ->
+                        val rank = index + 1
+                        val dlProgress = activeDownloads[track.videoId]
+                        val isPlaying = playerState.playing && playerState.item?.title == track.title
+                        val rankColor = when (rank) {
+                            1 -> Color(0xFFFFD700) // Gold
+                            2 -> Color(0xFFC0C0C0) // Silver
+                            3 -> Color(0xFFCD7F32) // Bronze
+                            else -> palette.accent.copy(alpha = 0.75f)
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Rank Badge Number
+                            Box(
+                                modifier = Modifier
+                                    .width(36.dp)
+                                    .padding(end = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "#$rank",
+                                    color = rankColor,
+                                    fontSize = if (rank in 1..9) 15.sp else 13.sp,
+                                    fontWeight = FontWeight.Black
+                                )
+                            }
+                            Box(Modifier.weight(1f)) {
+                                OnlineTrackRow(
+                                    track = track,
+                                    palette = palette,
+                                    glassEnabled = glassEnabled,
+                                    isLoading = loadingTrackId == track.videoId,
+                                    isDownloading = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed,
+                                    isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
+                                    dlProgress = dlProgress?.progress ?: 0f,
+                                    isPlaying = isPlaying,
+                                    onPlay = { playTrack(track, searchResults) },
+                                    onDownload = {
+                                        AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                } else if (activeCategory == "Home" && searchQuery.isBlank() && searchResults.isNotEmpty()) {
                     // Section 1: "Quick Picks"
                     item(key = "home_start_listening_hdr") {
                         Column(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 4.dp)) {
@@ -934,7 +1377,7 @@ fun OnlineMusicScreen(
                             isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
                             dlProgress = dlProgress?.progress ?: 0f,
                             isPlaying = isPlaying,
-                            onPlay = { playTrack(track) },
+                            onPlay = { playTrack(track, searchResults) },
                             onDownload = {
                                 AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
                             }
@@ -1049,7 +1492,7 @@ fun OnlineMusicScreen(
                             isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
                             dlProgress = dlProgress?.progress ?: 0f,
                             isPlaying = isPlaying,
-                            onPlay = { playTrack(track) },
+                            onPlay = { playTrack(track, searchResults) },
                             onDownload = {
                                 AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
                             }
@@ -1118,6 +1561,27 @@ fun OnlineMusicScreen(
                             }
                         }
                     }
+                    if (searchQuery.isNotBlank()) {
+                        item(key = "search_active_hdr") {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("Results for \"$searchQuery\"", color = palette.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                AssistChip(
+                                    onClick = {
+                                        searchQuery = ""
+                                        selectedPlaylist = null
+                                        loadCategoryTracks(activeCategory)
+                                    },
+                                    label = { Text("Clear ✕", color = palette.accent, fontSize = 12.sp, fontWeight = FontWeight.Bold) },
+                                    colors = AssistChipDefaults.assistChipColors(containerColor = palette.accent.copy(alpha = 0.12f)),
+                                    border = BorderStroke(1.dp, palette.accent.copy(alpha = 0.35f))
+                                )
+                            }
+                        }
+                    }
                     items(searchResults, key = { it.videoId }) { track ->
                         val dlProgress = activeDownloads[track.videoId]
                         val isPlaying = playerState.playing && playerState.item?.title == track.title
@@ -1130,7 +1594,7 @@ fun OnlineMusicScreen(
                             isDlComplete = dlProgress?.isComplete == true || AudioDownloadManager.isDownloaded(track.title, track.artist),
                             dlProgress = dlProgress?.progress ?: 0f,
                             isPlaying = isPlaying,
-                            onPlay = { playTrack(track) },
+                            onPlay = { playTrack(track, searchResults) },
                             onDownload = {
                                 AudioDownloadManager.downloadSong(context, scope, track.videoId, track.title, track.artist, track.thumbUrl)
                             }
@@ -1140,6 +1604,49 @@ fun OnlineMusicScreen(
             }
         }
     }
+
+    // Floating Random Pick Dice FAB (Matching Screenshot_20261121_105558.jpg)
+    // Positioned in the bottom-right corner, directly above mini-player
+    val miniPlayerActive = playerState.item != null
+    val diceOffsetBottom = bottomPadding + (if (miniPlayerActive) 76.dp else 16.dp)
+
+    Box(
+        modifier = Modifier
+            .align(Alignment.BottomEnd)
+            .padding(end = 20.dp, bottom = diceOffsetBottom)
+    ) {
+        val diceBg = if (palette.isLight) {
+            Brush.linearGradient(listOf(Color(0xF0FFFFFF), Color(0xD9E2E8F0)))
+        } else {
+            Brush.linearGradient(listOf(Color(0xD91E293B), Color(0xB30F172A)))
+        }
+        val diceBorder = if (palette.isLight) Color(0x603B82F6) else Color(0x6060A5FA)
+        val diceIconTint = if (palette.isLight) Color(0xFF1D4ED8) else Color(0xFF93C5FD)
+
+        Box(
+            modifier = Modifier
+                .size(54.dp)
+                .clip(CircleShape)
+                .background(diceBg)
+                .border(1.5.dp, diceBorder, CircleShape)
+                .clickable {
+                    val hits = FeedCacheManager.cachedTopHits.value.ifEmpty { FeedCacheManager.defaultCuratedHits() }
+                    if (hits.isNotEmpty()) {
+                        val randomPick = hits.random()
+                        playTrack(randomPick, hits)
+                    }
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_dice_random),
+                contentDescription = "Random Pick / Surprise Me",
+                tint = diceIconTint,
+                modifier = Modifier.size(28.dp)
+            )
+        }
+    }
+}
 
     // Language Selector Modal BottomSheet
     if (showLanguageModal) {
@@ -1218,6 +1725,13 @@ fun OnlineMusicScreen(
                 Spacer(Modifier.height(24.dp))
             }
         }
+    }
+
+    if (showJamDialog) {
+        JamSyncDialog(
+            service = service,
+            onDismiss = { showJamDialog = false }
+        )
     }
 
     if (showGoogleAuthModal) {

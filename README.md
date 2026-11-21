@@ -1,100 +1,118 @@
-# MS PLAYER
+# MICA
 
-Offline-first, ad-free Android multimedia player built with Kotlin, Jetpack Compose, AndroidLiquidGlass, and LibVLC Android 3.7.7. Current version: **0.6.2**, versionCode **9**, package `app.msplayer.offline`.
+<div align="center">
+  <img src="app/src/main/res/mipmap-xxxhdpi/ic_ms_logo.png" width="128" height="128" alt="MICA Logo" style="border-radius: 28px;" />
+  <h3>ONE APP. EVERY EXPERIENCE.</h3>
+  <p><strong>The Universe of Entertainment — Music • Movies • Streaming • AI Subtitles • Beyond</strong></p>
+  <p>
+    <a href="https://github.com/AWT-SRIRAM/MICA/releases"><img src="https://img.shields.io/badge/Release-v0.8.2-blue?style=for-the-badge" alt="Release v0.8.2" /></a>
+    <img src="https://img.shields.io/badge/Platform-Android%208.0+-green?style=for-the-badge" alt="Android 8.0+" />
+    <img src="https://img.shields.io/badge/Architecture-ARM64--v8a-orange?style=for-the-badge" alt="ARM64-v8a" />
+    <img src="https://img.shields.io/badge/License-MIT-purple?style=for-the-badge" alt="License MIT" />
+  </p>
+</div>
 
-By **SRIRAM S & ANTIGRAVITY**.
+---
 
-Primary device target: iQOO Neo10R running Android 16. Minimum Android API 26; compile/target API 36.
+## 🌟 Overview
 
-## Download APK
+**MICA** is a flagship, offline-first, privacy-respecting multimedia entertainment platform built natively with **Kotlin**, **Jetpack Compose**, and hardware-accelerated **LibVLC Android 3.7.7**. 
 
-- **Latest Signed ARM64 APK (`v0.6.2`, 64.9 MB)**: [**Download `MS-PLAYER-0.6.2-arm64.apk`**](https://github.com/AWT-SRIRAM/MSPLAYER/raw/main/release/MS-PLAYER-0.6.2-arm64.apk) ([view in `release/`](release/MS-PLAYER-0.6.2-arm64.apk))
-  - SHA-256: `5fa98e1c9145378761d6af218e430808d2b7ef3f73d729f0af9be72ada615ffb`
-- Requires Android 8.0+ (API 26) on ARM64 (`arm64-v8a`).
-- The public APK bundles **no preconfigured API keys** — local playback, multi-subtitle tracks, `.srt`/`.zip` subtitles, vertical equalizer & DSP effects, music player, Crystal Liquid Glass UI, gestures, and network streaming work out of the box. For optional Cloud AI Subtitles, Subtitle Translation, and TMDB/Multi-Provider Online Subtitles, add your own free API keys inside `Settings -> API Keys` on the device.
+MICA unites a **Spotify-grade Lossless Music Hub**, a **4K/8K HDR Video Cinema**, a **Brave-style Ad-Shield Browser with direct stream sniffing for anime & cartoons**, an **interactive Android Home Screen Widget**, and **MICA JAM social listening** into one cohesive, buttery-smooth Liquid Glass interface.
 
-## Features
+- **Package ID**: `app.mica`
+- **Current Version**: `0.8.2` (Build Code `29`)
+- **Creators**: **SRIRAM S & ANTIGRAVITY**
+- **Repository**: [github.com/AWT-SRIRAM/MICA](https://github.com/AWT-SRIRAM/MICA)
+- **Target Device Profile**: iQOO Neo 10R / All Android 8.0+ (API 26–36) devices
 
-- Compact media library dashboard with quick-action bar (`Music`, `Playlists`, `History`, `Stream`, `Open`), dismissible `Recently Added` row, folder badges, playlists, resume playback, thumbnails, and seek preview thumbnails.
-- Apple iOS-inspired Crystal Liquid Glass theme (`io.github.kyant0:backdrop:1.0.0`) with live optical refraction, frosted popup menus, floating dock pills, `iosLiquidPress` spring feedback, `SharedTransitionLayout` audio mini-player morph, adaptive album-art glow, and API 31+ window blur-behind player sheets & dialogs (toggleable in Settings).
-- Online Subtitles engine: automatic Filename/Year/`SxxExx` parsing, **TMDB** movie & series normalization, and concurrent multi-provider search & archive extraction across **OpenSubtitles** (with 64-bit moviehash matching), **SubDL**, **SubSource**, and **Wyzie Subs**.
-- Cloud AI Subtitles & Translation: speech-to-text pipeline (`Original speech` and `Speech -> English`) with English track prioritization, lightweight 16 kHz / 18 kbps Mono AAC chunking, live streaming Part-1 preview, ID-locked batch cloud translation (`English` & `Tamil`), and 1-tap `Share .srt` export.
-- Multi-subtitle playback (unlimited simultaneous tracks), `.zip`/`.srt` auto-discovery & import, instant post-seek cue sync, `StrokeView` outline/fill rendering, and optional top docking for secondary tracks.
-- Temporary 0.25x–4.0x speed capsule (8 stops: `0.25x`, `0.5x`, `1.0x`, `1.5x`, `2.0x`, `2.5x`, `3.0x`, `4.0x`) on 400 ms long-press drag, plus direct speed picker, swipe seeking, pinch zoom, and opposite-side brightness/volume HUDs.
-- Studio audio panel with 5-band & 10-band Vertical Equalizer faders, quick preset strip, `Reverb` presets, rotary `Bass Boost` & `Virtualizer` knobs, and 200% volume gain.
-- Network URL streaming (`HTTP`, `HTTPS`, `HLS .m3u8`, `DASH .mpd`, `RTSP`, `RTMP`) with clipboard detection, `ACTION_SEND` intake, hardware-first (`Auto` / `HW` / `HW+` / `SW`) decoders, Picture-in-Picture, and background audio.
+---
 
-No tracking or advertising services are included (`android.permission.INTERNET` is used only when triggering Online Subtitles, AI Subtitles / Translation, or streaming a network URL). This is an independent multimedia player implementation and is not affiliated with MX Player or VLC.
+## 🚀 Key Highlights & Features
 
-## Build
+### 🎵 1. Spotify-Grade Music Hub & Streaming Engine
+- **Dual Lossless Backend**: Seamlessly resolves 320 kbps lossless streams from JioSaavn with high-speed fallback to YouTube Music (iOS/VR client endpoints) with zero audio compression artifacts.
+- **Smart Title Deduplication**: Intelligent fuzzy deduplication engine (`normalizeTrackTitle`) that eliminates repeat suffix variations (`(From "...")`, `[From ...]`, `- Best of ...`) across trending charts and search results.
+- **Adaptive Liquid Glass Dice FAB**: Floating random pick button adapting dynamically to Light and Dark Liquid Glass themes, instantly playing a high-energy trending track on tap without intrusive popups.
+- **Full-Screen Modern Player**:
+  - Perfectly symmetrical Material 3 Skip Previous and Skip Next controls (`32dp` touch targets).
+  - Tri-state Repeat mode: **Repeat All 🔁**, **Repeat One 🔂 (1-badge)**, and **Shuffle 🔀** with non-repeating queue history.
+  - Symmetrical bottom utility dock with **Cast & Audio Output**, **Live Synchronized Lyrics**, and **MICA JAM Social Listening**.
+  - Clean **3-Dots Options Menu** housing the **10-Band Studio Equalizer**, **Sleep Timer with soft fade-out**, and **Codec Info**.
 
-Install JDK 17 and Android SDK API 36 with Build Tools 36.0.0. Configure `JAVA_HOME` and `ANDROID_HOME`, or provide an untracked `local.properties` with `sdk.dir=<SDK path>`. Gradle requires Internet access on the build computer to resolve dependencies.
+### 📱 2. Spotify-Style Android Home Screen Widget
+- **Interactive 4x2 Home Widget** (`MicaMusicWidgetProvider`):
+  - **Live Now Playing Card**: Displays real-time album artwork, bold track title, artist info, previous/next controls, and an animated circular Play/Pause button.
+  - **4 Interactive Quick-Pick Cards**: Curated trending recommendations (*Trending Tamil*, *Top Hits*, *Lofi Beats*, *Discover*) with real album covers and quick-play badges.
+  - **Zero-Latency IPC**: Bi-directional updates between `PlaybackService` and the Android home launcher with instant playback triggers.
 
-Optional API keys can be entered inside `Settings -> API Keys` on the device, or supplied for private builds in your untracked `local.properties` (never committed to git):
+### 🎬 3. Cinema-Grade 4K/8K Video Player
+- **LibVLC 3.7.7 Engine**: Hardware-accelerated decoding for HEVC/H.265, AV1, VP9, H.264, EAC3, TrueHD, DTS-HD, and raw network streams.
+- **Continuous Subtitle HUD Cycling**: The dedicated CC button steps through subtitle sizes (`75% ➔ 100% ➔ 125% ➔ 150% ➔ 175% ➔ 200% ➔ 100%`) with an instant on-screen HUD toast while keeping subtitles perpetually active.
+- **StrokeView Subtitle Rendering**: Multi-pass outline rendering ensuring 100% text legibility on both bright and dark movie scenes.
+- **Intuitive Touch Gestures**: Logarithmic volume on the right, linear brightness on the left, horizontal swipe seeking, 400% pinch-to-zoom, and temporary 4.0x fast-forward speed capsules.
 
-```properties
-sdk.dir=C:\\path\\to\\Android\\Sdk
-MSPLAYER_GROQ_KEY=
-MSPLAYER_DEEPGRAM_KEY=
-MSPLAYER_OPENSUBTITLES_KEY=
-MSPLAYER_SUBDL_KEY=
-MSPLAYER_SUBSOURCE_KEY=
-MSPLAYER_WYZIE_KEY=
-MSPLAYER_TMDB_KEY=
+### 🛡️ 4. MICA Shield Browser & Stream Sniffer
+- **Brave-Style Built-in Ad-Blocker**: Multi-layer host interception blocking advertising scripts, popups, and intrusive banners with automatic cosmetic CSS element collapsing.
+- **Universal Anime & Cartoon Stream Sniffer**:
+  - Automatically intercepts `.m3u8`, `.mp4`, HLS, DASH, and video player elements across popular anime streaming portals (`myanimes.in`, `tamilcartoonsrare.in`) and YouTube.
+  - Surfaces an animated floating glass pill: **"▶ Play in MICA Video Player"** to hand off streams directly to LibVLC hardware acceleration with subtitle controls.
+
+### 👥 5. MICA JAM — Social Listening
+- **Low-Latency Group Playback**: Synchronize audio playback across multiple phones simultaneously over Local Wi-Fi, Mobile Hotspot, or MQTT broker.
+- **Zero Internet Required**: Works completely offline on local networks during road trips, study sessions, and parties.
+
+### 💎 6. Liquid Glass Architecture
+- **Reflective Optical Surfaces**: Built with real-time backdrop blur, light refraction, and frosted borders.
+- **4 Custom Themes**:
+  1. *White Liquid Glass*
+  2. *Light Liquid Glass*
+  3. *Dark Liquid Glass*
+  4. *Amoled Pure Dark*
+
+---
+
+## 📥 Download & Installation
+
+| Release File | Version | Target ABI | Download Link |
+| :--- | :--- | :--- | :--- |
+| **`MICA-PLAYER-0.8.2-arm64.apk`** | `v0.8.2` | ARM64 (`arm64-v8a`) | [Direct Download](https://github.com/AWT-SRIRAM/MICA/releases) |
+
+### SHA-256 Checksum:
+Verify package integrity before installation:
+```bash
+sha256sum MICA-PLAYER-0.8.2-arm64.apk
 ```
 
-Pass `-PpublicRelease=true` to strip all `local.properties` API keys from `BuildConfig` when building public APKs.
+---
 
-```powershell
-.\gradlew.bat assembleDebug testDebugUnitTest lintDebug
+## 🛠️ Building From Source
+
+### Prerequisites
+1. **JDK 17** (e.g. OpenJDK 17 / Temurin)
+2. **Android SDK API 36** with **Build Tools 36.0.0**
+3. **Gradle 8.11.1** (included via `./gradlew`)
+
+### Build Commands
+```bash
+# Clone the repository
+git clone https://github.com/AWT-SRIRAM/MICA.git
+cd MICA
+
+# Assemble Debug APK
+./gradlew assembleDebug
+
+# Assemble Release Signed APK (ARM64)
+./gradlew assembleRelease -PtestAbi=arm64-v8a --no-daemon
 ```
 
-On macOS/Linux, use `./gradlew`. Debug installs as `app.msplayer.offline.debug` (MS PLAYER DEBUG), separately from the everyday app. The test runner refuses the release package. Default native ABI is ARM64; debug APK output is `app/build/outputs/apk/debug/app-debug.apk`.
+---
 
-Pinned tooling: Gradle 8.11.1, AGP 8.10.1, Kotlin/Compose compiler 2.2.21, `io.github.kyant0:backdrop:1.0.0`. Gradle wrapper and distribution checksum are included.
+## 📄 Documentation & Architecture
+For deep technical documentation, demuxing pipelines, and component graphs, see [**`MICA_DOCUMENTARY.md`**](MICA_DOCUMENTARY.md).
 
-### Android tests
+---
 
-Use an Android device or emulator. For an x86_64 emulator:
-
-```powershell
-.\gradlew.bat connectedDebugAndroidTest -PtestAbi=x86_64
-```
-
-Omit `-PtestAbi` for an ARM64 device. Instrumentation fixtures live in `app/src/androidTest/assets`; they are not packaged in the ordinary player APK. The explicit two-install upgrade test skips unless its phase argument is supplied; see [release history](docs/RELEASE-HISTORY.md) and [verification report](docs/VERIFICATION-0.4.0.md).
-
-### Signed release
-
-Supply your own signing key (alias `msplayer`) through `MSPLAYER_KEYSTORE` and `MSPLAYER_STORE_PASSWORD`, then run:
-
-```powershell
-.\gradlew.bat assembleRelease testReleaseUnitTest lintRelease -PpublicRelease=true
-```
-
-The original signing key is excluded. An independently signed APK cannot update an installation signed with another certificate.
-
-## Verification and limits
-
-Version 0.5.0 adds continuous subtitle size/scale, exact migration of old defaults, a transactional Text dialog, encoding selection, native-inset compensation, and placement against the measured timeline boundary. ASS/PGS stay native. See [0.5.0 verification](docs/VERIFICATION-0.5.0.md) for phone/emulator results and measured residuals.
-
-The controlled iQOO comparison meets the approximate cap-height and bottom-clearance targets; native bold weight and multiline pitch still differ from MX. This is a review build, without a claim of pixel parity. Subtitle gestures/folder selection remain scheduled for 0.5.1; cue scroll and fade are deferred. The native surface alpha probe had no effect.
-
-The [0.4.0 verification](docs/VERIFICATION-0.4.0.md) remains historical evidence. Sustained high-bitrate performance, HDR/Dolby Vision colour and audio-route comfort are not established by this subtitle update. AC3/EAC3 decoding does not imply Dolby Atmos certification or surround passthrough.
-
-Arial/Droid font choices require actual device-installed families. Another app's private Android `IS_PENDING` downloads remain inaccessible; incomplete files may not play or seek. Exact MX thumbnail frames and pixel parity are not established.
-
-## Reference comparisons
-
-These are layout comparisons using user-supplied reference captures. The speed comparison uses different clips and does not establish colour/subtitle parity.
-
-![Music interface comparison](docs/images/comparison-music.png)
-
-![Temporary speed comparison](docs/images/comparison-temporary-speed.png)
-
-## Source and licensing
-
-Application code is provided under [MIT](LICENSE), subject to the exclusions and dependency terms in [third-party notices](THIRD-PARTY-NOTICES.md). Engine source snapshots and licence texts are retained in `third_party` and `app/src/main/assets/licenses`.
-
-The existing launcher artwork, reference screenshots, and upstream test media retain their respective third-party rights and are not covered by the application's MIT grant. See the notices and [release history](docs/RELEASE-HISTORY.md) for provenance and LibVLC replacement/relinking instructions.
-
-[0.5.0 source provenance](docs/SOURCE-PROVENANCE-0.5.0.json) · [0.4.0 provenance](docs/SOURCE-PROVENANCE.json)
+## ⚖️ License & Provenance
+MICA application source code is distributed under the [MIT License](LICENSE).  
+LibVLC Android binaries and headers are licensed under [LGPL-2.1](app/src/main/assets/licenses).

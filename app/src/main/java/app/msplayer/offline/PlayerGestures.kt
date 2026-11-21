@@ -50,6 +50,9 @@ fun Modifier.videoGestures(
     aspect: String, zoom: Float, onZoom: (Float) -> Unit, onTap: () -> Unit,
     onDrag: (Long?) -> Unit, onFeedback: (PlayerFeedback?) -> Unit,
     onPan: (Float, Float) -> Unit = { _, _ -> },
+    subtitlesEnabled: Boolean = false,
+    subtitleScale: Int = 100,
+    onSubtitleScale: (Int) -> Unit = {},
 ): Modifier {
     val zoomNow by rememberUpdatedState(zoom)
     val aspectNow by rememberUpdatedState(aspect)
@@ -58,6 +61,9 @@ fun Modifier.videoGestures(
     val dragNow by rememberUpdatedState(onDrag)
     val zoomCallback by rememberUpdatedState(onZoom)
     val panCallback by rememberUpdatedState(onPan)
+    val subtitlesEnabledNow by rememberUpdatedState(subtitlesEnabled)
+    val subScaleNow by rememberUpdatedState(subtitleScale)
+    val subScaleCallback by rememberUpdatedState(onSubtitleScale)
     return pointerInput(locked, enabled, service) {
         if (locked || !enabled) return@pointerInput
         var lastTap = 0L
@@ -74,6 +80,7 @@ fun Modifier.videoGestures(
                 ?: (android.provider.Settings.System.getInt(activity.contentResolver, android.provider.Settings.System.SCREEN_BRIGHTNESS, 128) / 255f)
             var x = 0f; var y = 0f; var mode = 0; var target = baseTime
             var gestureZoom = zoomNow
+            var gestureSubScale = subScaleNow.toFloat()
             var speedStartX = 0f
             var speedAnchorRate = 1.5f
             var currentSpeedRate = 1.5f
@@ -104,21 +111,17 @@ fun Modifier.videoGestures(
                         if (mode == 5) { service.endTemporarySpeed(); feedbackNow(null) }
                         mode = 4
                         val zoomFactor = event.calculateZoom()
-                        gestureZoom = (gestureZoom * zoomFactor).coerceIn(0.5f, 3.0f)
-                        if (gestureZoom >= 1.20f && service.aspectMode.value != PlaybackRules.AspectOption.CROP) {
-                            service.setAspectMode(PlaybackRules.AspectOption.CROP)
-                            feedbackNow(PlayerFeedback.AspectRatio(PlaybackRules.AspectOption.CROP.label))
-                            gestureZoom = 1.0f
-                            try {
-                                activity.window.decorView.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
-                            } catch (_: Exception) {}
-                        } else if (gestureZoom <= 0.80f && service.aspectMode.value != PlaybackRules.AspectOption.BEST_FIT) {
-                            service.setAspectMode(PlaybackRules.AspectOption.BEST_FIT)
-                            feedbackNow(PlayerFeedback.AspectRatio(PlaybackRules.AspectOption.BEST_FIT.label))
-                            gestureZoom = 1.0f
-                            try {
-                                activity.window.decorView.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
-                            } catch (_: Exception) {}
+                        val panDelta = event.calculatePan()
+                        if (subtitlesEnabledNow) {
+                            gestureSubScale = (gestureSubScale * zoomFactor).coerceIn(50f, 250f)
+                            val roundedScale = gestureSubScale.toInt()
+                            subScaleCallback(roundedScale)
+                            feedbackNow(PlayerFeedback.SubtitleScale(roundedScale))
+                        } else {
+                            gestureZoom = (gestureZoom * zoomFactor).coerceIn(1.0f, 3.0f)
+                            zoomCallback(gestureZoom)
+                            panCallback(panDelta.x, panDelta.y)
+                            feedbackNow(PlayerFeedback.Zoom((gestureZoom * 100).toInt()))
                         }
                     } else {
                         if (mode == 0 && (abs(x) > viewConfiguration.touchSlop || abs(y) > viewConfiguration.touchSlop))
@@ -158,8 +161,12 @@ fun Modifier.videoGestures(
                         if (mode == 1) service.seek(target)
                         if (mode == 5) { service.endTemporarySpeed(); feedbackNow(null) }
                         if (mode == 4) {
-                            gestureZoom = 1.0f
-                            zoomCallback(1.0f)
+                            val discreteSteps = listOf(1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
+                            val nearest = discreteSteps.minByOrNull { abs(it - gestureZoom) } ?: gestureZoom
+                            val finalZoom = if (abs(nearest - gestureZoom) < 0.08f) nearest else gestureZoom
+                            gestureZoom = finalZoom
+                            zoomCallback(finalZoom)
+                            feedbackNow(PlayerFeedback.Zoom((finalZoom * 100).toInt()))
                         }
                         if (mode == 0) {
                             val stepSec = Store.prefs(activity).getInt("double_tap", 10)

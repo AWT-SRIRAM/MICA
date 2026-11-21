@@ -52,6 +52,67 @@ object JioSaavnClient {
     /**
      * Searches JioSaavn for songs and resolves direct 320kbps streams
      */
+    fun extractArtist(item: JSONObject): String {
+        val moreInfo = item.optJSONObject("more_info")
+
+        // 1. Direct string in more_info or item (ensure it is NOT a JSON string starting with { or [)
+        val pStr = moreInfo?.optString("primary_artists")?.takeIf { it.isNotBlank() && !it.startsWith("{") && !it.startsWith("[") }
+            ?: item.optString("primary_artists").takeIf { it.isNotBlank() && !it.startsWith("{") && !it.startsWith("[") }
+        if (!pStr.isNullOrBlank()) {
+            return cleanHtml(pStr)
+        }
+
+        val sStr = moreInfo?.optString("singers")?.takeIf { it.isNotBlank() && !it.startsWith("{") && !it.startsWith("[") }
+            ?: item.optString("singers").takeIf { it.isNotBlank() && !it.startsWith("{") && !it.startsWith("[") }
+        if (!sStr.isNullOrBlank()) {
+            return cleanHtml(sStr)
+        }
+
+        // 2. Parse artistMap object
+        val artistMap = moreInfo?.optJSONObject("artistMap") ?: item.optJSONObject("artistMap")
+        if (artistMap != null) {
+            val primaryArr = artistMap.optJSONArray("primary_artists")
+                ?: artistMap.optJSONArray("artists")
+                ?: artistMap.optJSONArray("singers")
+            if (primaryArr != null && primaryArr.length() > 0) {
+                val names = mutableListOf<String>()
+                for (i in 0 until primaryArr.length()) {
+                    val aObj = primaryArr.optJSONObject(i)
+                    val aName = aObj?.optString("name")?.takeIf { it.isNotBlank() }
+                    if (aName != null) names.add(aName)
+                }
+                if (names.isNotEmpty()) {
+                    return cleanHtml(names.joinToString(", "))
+                }
+            }
+        }
+
+        // 3. Check if primary_artists or singers is a JSONArray
+        val pArr = moreInfo?.optJSONArray("primary_artists") ?: item.optJSONArray("primary_artists")
+            ?: moreInfo?.optJSONArray("singers") ?: item.optJSONArray("singers")
+        if (pArr != null && pArr.length() > 0) {
+            val names = mutableListOf<String>()
+            for (i in 0 until pArr.length()) {
+                val aObj = pArr.optJSONObject(i)
+                val aName = aObj?.optString("name") ?: pArr.optString(i)
+                if (aName.isNotBlank() && !aName.startsWith("{")) names.add(aName)
+            }
+            if (names.isNotEmpty()) {
+                return cleanHtml(names.joinToString(", "))
+            }
+        }
+
+        // 4. Music director
+        val mStr = moreInfo?.optString("music")?.takeIf { it.isNotBlank() && !it.startsWith("{") }
+            ?: item.optString("music").takeIf { it.isNotBlank() && !it.startsWith("{") }
+        if (!mStr.isNullOrBlank()) return cleanHtml(mStr)
+
+        return "Unknown"
+    }
+
+    private fun cleanHtml(s: String): String =
+        s.replace("&quot;", "\"").replace("&#039;", "'").replace("&amp;", "&").trim()
+
     suspend fun searchSongs(query: String): List<JioTrack> = withContext(Dispatchers.IO) {
         val cleanQuery = query.trim()
         if (cleanQuery.isBlank()) return@withContext emptyList()
@@ -77,9 +138,9 @@ object JioSaavnClient {
                         val item = list.optJSONObject(i) ?: continue
                         val id = item.optString("id", "")
                         var title = item.optString("song", item.optString("title", ""))
-                        title = title.replace("&quot;", "\"").replace("&#039;", "'").replace("&amp;", "&")
-                        val artist = item.optString("primary_artists", item.optString("singers", "Unknown"))
-                            .replace("&quot;", "\"").replace("&#039;", "'").replace("&amp;", "&")
+                        title = cleanHtml(title)
+                        val moreInfo = item.optJSONObject("more_info")
+                        val artist = extractArtist(item)
                         val durationSec = item.optInt("duration", 0)
                         val durationText = if (durationSec > 0) "${durationSec / 60}:${(durationSec % 60).toString().padStart(2, '0')}" else ""
                         var img = item.optString("image", "")
@@ -87,7 +148,6 @@ object JioSaavnClient {
                         img = img.replace("150x150.jpg", "500x500.jpg")
                             .replace("50x50.jpg", "500x500.jpg")
 
-                        val moreInfo = item.optJSONObject("more_info")
                         val encUrl = moreInfo?.optString("encrypted_media_url", "") ?: ""
                         var directStream = if (encUrl.isNotBlank()) decryptMediaUrl(encUrl) ?: "" else ""
 
@@ -203,8 +263,7 @@ object JioSaavnClient {
                     val id = s.optString("id", "")
                     var songTitle = s.optString("song", s.optString("title", ""))
                         .replace("&quot;", "\"").replace("&#039;", "'").replace("&amp;", "&")
-                    var artist = s.optString("primary_artists", s.optString("singers", "Unknown"))
-                        .replace("&quot;", "\"").replace("&#039;", "'").replace("&amp;", "&")
+                    val artist = extractArtist(s)
                     val durSec = s.optInt("duration", 0)
                     val durText = if (durSec > 0) "${durSec / 60}:${(durSec % 60).toString().padStart(2, '0')}" else ""
                     var img = s.optString("image", "")
@@ -258,14 +317,13 @@ object JioSaavnClient {
                             val id = s.optString("id", "")
                             val songTitle = s.optString("song", s.optString("title", ""))
                                 .replace("&quot;", "\"").replace("&#039;", "'").replace("&amp;", "&")
-                            val songArtist = s.optString("primary_artists", s.optString("singers", artist.ifBlank { "Unknown" }))
-                                .replace("&quot;", "\"").replace("&#039;", "'").replace("&amp;", "&")
+                            val moreInfo = s.optJSONObject("more_info")
+                            val songArtist = extractArtist(s).let { if (it == "Unknown" && artist.isNotBlank()) artist else it }
                             val durSec = s.optInt("duration", 0)
                             val durText = if (durSec > 0) "${durSec / 60}:${(durSec % 60).toString().padStart(2, '0')}" else ""
                             val img = s.optString("image", "")
                                 .replace("150x150.jpg", "500x500.jpg")
                                 .replace("50x50.jpg", "500x500.jpg")
-                            val moreInfo = s.optJSONObject("more_info")
                             val encUrl = s.optString("encrypted_media_url", moreInfo?.optString("encrypted_media_url", "") ?: "")
                             val directStream = if (encUrl.isNotBlank()) decryptMediaUrl(encUrl) ?: "" else ""
                             if (id.isNotBlank() && songTitle.isNotBlank() && songTitle.lowercase().trim() != seedLower) {

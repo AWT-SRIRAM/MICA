@@ -79,7 +79,7 @@ object TrackArtworkStore {
                 if (artist.isNotBlank() && !artist.equals("Unknown", true) && !artist.equals("Unknown Artist", true)) {
                     existing.put("artist", artist)
                 }
-                if (thumbUrl.isNotBlank() && thumbUrl.startsWith("http")) {
+                if (thumbUrl.isNotBlank() && (thumbUrl.startsWith("http") || thumbUrl.startsWith("spotify_track://"))) {
                     existing.put("thumbUrl", thumbUrl)
                 }
                 if (localCoverPath.isNotBlank()) {
@@ -135,10 +135,11 @@ object TrackArtworkStore {
         title: String,
         artist: String,
         thumbUrl: String,
+        forceOverwrite: Boolean = false,
     ): File? {
         if (thumbUrl.isBlank() || !thumbUrl.startsWith("http")) return null
         val file = File(coversDir(context), "${keyHash(title.ifBlank { uri })}.jpg")
-        if (file.exists() && file.length() > 512) {
+        if (!forceOverwrite && file.exists() && file.length() > 512) {
             saveMeta(context, uri, title, artist, thumbUrl, file.absolutePath)
             return file
         }
@@ -154,6 +155,8 @@ object TrackArtworkStore {
                 if (bytes.size > 512) {
                     FileOutputStream(file).use { it.write(bytes) }
                     saveMeta(context, uri, title, artist, thumbUrl, file.absolutePath)
+                    OnlineImageCache.evict(uri)
+                    OnlineImageCache.evict(thumbUrl)
                     return@runCatching file
                 }
             }
@@ -182,6 +185,7 @@ object TrackArtworkStore {
         val localPaths = listOfNotNull(
             meta?.localCoverPath?.takeIf { it.isNotBlank() },
             existingThumbUri?.takeIf { it.startsWith("file://") }?.removePrefix("file://"),
+            existingThumbUri?.takeIf { it.startsWith("/") },
             File(coversDir(context), "${keyHash(title.ifBlank { uri })}.jpg").absolutePath,
         ).distinct()
 
@@ -197,13 +201,13 @@ object TrackArtworkStore {
             }
         }
 
-        // 2. Embedded ID3 cover art for local content:// or file:// tracks
-        if (uri.startsWith("file://") || uri.startsWith("content://")) {
+        // 2. Embedded ID3 cover art for local content://, file:// or raw path tracks
+        if (uri.startsWith("file://") || uri.startsWith("content://") || uri.startsWith("/")) {
             val embedded = runCatching {
                 val mmr = MediaMetadataRetriever()
                 try {
-                    if (uri.startsWith("file://")) {
-                        val path = Uri.parse(uri).path
+                    if (uri.startsWith("file://") || uri.startsWith("/")) {
+                        val path = if (uri.startsWith("file://")) Uri.parse(uri).path else uri
                         if (!path.isNullOrBlank()) mmr.setDataSource(path)
                     } else {
                         context.contentResolver.openFileDescriptor(Uri.parse(uri), "r")?.use { fd ->
@@ -227,9 +231,22 @@ object TrackArtworkStore {
             }
         }
 
-        // 3. Remote thumbUri from MediaItem or TrackArtworkStore
-        val remoteUrl = existingThumbUri?.takeIf { it.startsWith("http") }
+        // 3. Remote thumbUri from MediaItem, Spotify oEmbed, or TrackArtworkStore
+        var remoteUrl = existingThumbUri?.takeIf { it.startsWith("http") }
             ?: meta?.thumbUrl?.takeIf { it.startsWith("http") }
+
+        val spotifyTrackId = when {
+            existingThumbUri?.startsWith("spotify_track://") == true -> existingThumbUri.removePrefix("spotify_track://")
+            meta?.thumbUrl?.startsWith("spotify_track://") == true -> meta.thumbUrl.removePrefix("spotify_track://")
+            else -> ""
+        }
+        if (spotifyTrackId.isNotBlank()) {
+            val fetchedSpotifyThumb = SpotifyClient.resolveTrackThumbnail(spotifyTrackId)
+            if (!fetchedSpotifyThumb.isNullOrBlank()) {
+                remoteUrl = fetchedSpotifyThumb
+            }
+        }
+
         if (!remoteUrl.isNullOrBlank()) {
             val savedFile = downloadAndCacheCover(context, uri, title, artist, remoteUrl)
             val bmp = savedFile?.let { runCatching { BitmapFactory.decodeFile(it.absolutePath) }.getOrNull() }
@@ -373,8 +390,11 @@ object AudioDownloadManager {
                     // Cache offline cover art & track metadata for Library -> Downloaded
                     val fileUri = Uri.fromFile(targetFile).toString()
                     TrackArtworkStore.saveMeta(context.applicationContext, fileUri, title, artist, thumbUrl)
+                    TrackArtworkStore.saveMeta(context.applicationContext, targetFile.name, title, artist, thumbUrl)
+                    TrackArtworkStore.saveMeta(context.applicationContext, targetFile.absolutePath, title, artist, thumbUrl)
                     if (thumbUrl.isNotBlank()) {
                         TrackArtworkStore.downloadAndCacheCover(context.applicationContext, fileUri, title, artist, thumbUrl)
+                        TrackArtworkStore.downloadAndCacheCover(context.applicationContext, targetFile.name, title, artist, thumbUrl)
                     }
 
                     // Index into MediaStore so it immediately appears in Music and Library tabs
@@ -382,7 +402,14 @@ object AudioDownloadManager {
                         context.applicationContext,
                         arrayOf(targetFile.absolutePath),
                         arrayOf("audio/mp4", "audio/m4a"),
-                    ) { path, uri -> }
+                    ) { _, scannedUri ->
+                        if (scannedUri != null) {
+                            TrackArtworkStore.saveMeta(context.applicationContext, scannedUri.toString(), title, artist, thumbUrl)
+                            if (thumbUrl.isNotBlank()) {
+                                TrackArtworkStore.downloadAndCacheCover(context.applicationContext, scannedUri.toString(), title, artist, thumbUrl)
+                            }
+                        }
+                    }
 
                     withContext(Dispatchers.Main) {
                         _activeDownloads.value = _activeDownloads.value + (videoId to DownloadProgress(videoId, title, 1f, isComplete = true))

@@ -10,7 +10,7 @@ import org.json.JSONObject
  * Enables instant 0ms tab switching without repeated network fetches.
  */
 object OnlineMusicCache {
-    private const val PREFS_KEY = "online_music_cache_v1"
+    private const val PREFS_KEY = "online_music_cache_v4"
     private const val TTL_MS = 2 * 3600 * 1000L // 2 hours
     private val memoryCache = LruCache<String, Pair<List<YtTrack>, Long>>(30)
 
@@ -20,7 +20,7 @@ object OnlineMusicCache {
 
         // 1. Fast memory lookup
         memoryCache.get(key)?.let { (tracks, timestamp) ->
-            if (now - timestamp < TTL_MS) return tracks
+            if (now - timestamp < TTL_MS && tracks.none { it.artist.isBlank() || it.artist.equals("Unknown", true) || it.artist.startsWith("{") || it.artist.startsWith("[") }) return FeedCacheManager.run { tracks.deduplicated() }
             else memoryCache.remove(key)
         }
 
@@ -35,11 +35,13 @@ object OnlineMusicCache {
             val tracks = mutableListOf<YtTrack>()
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
+                val art = o.optString("artist", "")
+                if (art.isBlank() || art.equals("Unknown", true) || art.startsWith("{") || art.startsWith("[")) return null // Stale entry with missing/raw artist
                 tracks.add(
                     YtTrack(
                         videoId = o.optString("id", ""),
                         title = o.optString("title", ""),
-                        artist = o.optString("artist", ""),
+                        artist = art,
                         durationText = o.optString("dur", ""),
                         thumbUrl = o.optString("thumb", ""),
                         directStreamUrl = o.optString("stream", "")
@@ -47,8 +49,9 @@ object OnlineMusicCache {
                 )
             }
             if (tracks.isNotEmpty()) {
-                memoryCache.put(key, tracks to time)
-                tracks
+                val deduped = FeedCacheManager.run { tracks.deduplicated() }
+                memoryCache.put(key, deduped to time)
+                deduped
             } else null
         }.getOrNull()
     }
@@ -56,10 +59,11 @@ object OnlineMusicCache {
     fun put(context: Context, categoryKey: String, tracks: List<YtTrack>) {
         if (tracks.isEmpty()) return
         val key = categoryKey.lowercase().trim()
+        val deduped = FeedCacheManager.run { tracks.deduplicated() }
         val now = System.currentTimeMillis()
 
         // Store memory
-        memoryCache.put(key, tracks to now)
+        memoryCache.put(key, deduped to now)
 
         // Store disk asynchronously
         runCatching {

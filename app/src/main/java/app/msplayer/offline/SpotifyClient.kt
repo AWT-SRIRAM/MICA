@@ -12,7 +12,8 @@ data class SpotifyTrack(
     val artist: String,
     val durationMs: Long,
     val album: String = "",
-    val thumbUrl: String = ""
+    val thumbUrl: String = "",
+    val trackId: String = ""
 )
 
 data class ImportedSpotify(
@@ -105,12 +106,16 @@ object SpotifyClient {
                     }
                 }
 
+                val trId = entity.optString("id", "")
+                val specificThumb = if (trId.isNotBlank()) "spotify_track://$trId" else coverUrl
+
                 val track = SpotifyTrack(
                     title = trackTitle,
                     artist = artist,
                     durationMs = duration,
                     album = trackTitle,
-                    thumbUrl = coverUrl
+                    thumbUrl = specificThumb,
+                    trackId = trId
                 )
                 return@withContext ImportedSpotify(
                     title = trackTitle,
@@ -138,13 +143,17 @@ object SpotifyClient {
                 if (trackTitle.isBlank()) continue
                 val artist = item.optString("subtitle", "").trim().ifBlank { "Unknown Artist" }
                 val duration = item.optLong("duration", 0L).coerceAtLeast(0L)
+                val rawUri = item.optString("uri", "")
+                val trId = if (rawUri.startsWith("spotify:track:")) rawUri.removePrefix("spotify:track:") else item.optString("id", "")
+                val specificThumb = if (trId.isNotBlank()) "spotify_track://$trId" else ""
                 tracks.add(
                     SpotifyTrack(
                         title = trackTitle,
                         artist = artist,
                         durationMs = duration,
                         album = playlistTitle,
-                        thumbUrl = coverUrl
+                        thumbUrl = specificThumb,
+                        trackId = trId
                     )
                 )
             }
@@ -155,6 +164,30 @@ object SpotifyClient {
                 thumbUrl = coverUrl,
                 tracks = tracks
             )
+        }.getOrNull()
+    }
+
+    /**
+     * Resolves authentic track-specific album art via Spotify's public oEmbed API.
+     * Automatically scales the 300x300 image to 640x640 HD.
+     */
+    fun resolveTrackThumbnail(trackId: String): String? {
+        if (trackId.isBlank()) return null
+        return runCatching {
+            val url = "https://open.spotify.com/oembed?url=https://open.spotify.com/track/$trackId"
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 3000
+                readTimeout = 3000
+                setRequestProperty("User-Agent", "Mozilla/5.0")
+            }
+            if (conn.responseCode in 200..299) {
+                val json = conn.inputStream.bufferedReader().use { it.readText() }
+                val obj = JSONObject(json)
+                val raw = obj.optString("thumbnail_url", "").trim()
+                if (raw.isNotBlank()) {
+                    raw.replace("ab67616d00001e02", "ab67616d0000b273")
+                } else null
+            } else null
         }.getOrNull()
     }
 }

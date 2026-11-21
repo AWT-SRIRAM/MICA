@@ -171,7 +171,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         applyVolume()
         bindPlayerEvents()
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
-        videoLayout?.takeIf { !surfaceSuspended }?.let { player.attachViews(it, null, useTexture, false) }
+        videoLayout?.takeIf { !surfaceSuspended }?.let { player.attachViews(it, null, useTexture, true) }
         openCurrent(prior.position, restore = false, keepSubtitleChoice = true)
     }
 
@@ -196,10 +196,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
             val fraction = if (state.value.plainSubtitle) {
                 (if (style.legacyMargin == null) style.bottomMargin / 100f else 0f) + controlsLift
             } else 0f
-            // VLC 3.x substext.h adds a 4% intrinsic margin before sub-margin.
-            // New presets remove it; migrated custom layouts retain their exact offset.
-            val nativeInset = if (state.value.plainSubtitle && style.compensateNativeInset && style.legacyMargin == null) .04f else 0f
-            surface.translationY = surface.height * (nativeInset - fraction)
+            // Never allow positive translationY to shift subtitles downwards off the screen/bezel
+            val targetTranslationY = -(surface.height * fraction).coerceAtLeast(0f)
+            surface.translationY = targetTranslationY
             surface.scaleX = 1f
             surface.scaleY = 1f
         }
@@ -217,7 +216,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     private lateinit var audioManager: AudioManager
     private lateinit var focus: AudioFocusRequest
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val coroutineExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        android.util.Log.e("MSPlayer", "Unhandled PlaybackService coroutine exception", throwable)
+    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + coroutineExceptionHandler)
     private var queue = emptyList<MediaItem>()
     val queueItems = MutableStateFlow<List<MediaItem>>(emptyList())
     val shuffleEnabled = MutableStateFlow(false)
@@ -349,7 +351,26 @@ class PlaybackService : MediaBrowserServiceCompat() {
         repeatMode.value = value
         Store.prefs(this).edit().putString("repeat", value).apply()
     }
-    fun toggleShuffle() { shuffleEnabled.value = !shuffleEnabled.value }
+    fun toggleRepeat() {
+        val next = when (repeatMode.value) {
+            "off" -> "all"
+            "all" -> "one"
+            else -> "off"
+        }
+        setRepeat(next)
+        updateSession(forceState = true)
+        updateNotification()
+    }
+    private val playedShuffleHistory = mutableSetOf<Int>()
+    fun toggleShuffle() {
+        shuffleEnabled.value = !shuffleEnabled.value
+        playedShuffleHistory.clear()
+        playedShuffleHistory.add(index)
+        session.setShuffleMode(if (shuffleEnabled.value) PlaybackStateCompat.SHUFFLE_MODE_ALL else PlaybackStateCompat.SHUFFLE_MODE_NONE)
+        updateSession(forceState = true)
+        updateDynamicIsland()
+        updateNotification()
+    }
     val autoQueueActive = MutableStateFlow(false)
     val autoQueueLoading = MutableStateFlow(false)
     val autoQueueSeedTitle = MutableStateFlow<String?>(null)
@@ -370,21 +391,83 @@ class PlaybackService : MediaBrowserServiceCompat() {
             }
         }
 
+    companion object {
+        fun normalizeSongTitle(title: String): String {
+            if (title.isBlank()) return ""
+            var t = title.lowercase()
+            // 1. Remove bracketed / parenthetical expressions
+            t = t.replace(Regex("""\s*[\(\[][^()\[\]]*[\)\]]"""), " ")
+            // 2. Remove common video/audio suffixes
+            val suffixes = listOf(
+                "- official video", "- official music video", "- official audio",
+                "- video song", "- full song", "- lyric video", "- lyrical video",
+                "- audio song", "- hd video", "- 4k", "- from "
+            )
+            for (s in suffixes) {
+                val idx = t.indexOf(s)
+                if (idx != -1) t = t.substring(0, idx)
+            }
+            // 3. Remove non-alphanumeric chars
+            t = t.replace(Regex("""[^a-z0-9\s]"""), " ").replace(Regex("""\s+"""), " ").trim()
+            return t
+        }
+
+        fun normalizeArtistName(artist: String): String {
+            if (artist.isBlank()) return ""
+            var a = artist.lowercase()
+            val delimiters = listOf(",", "&", "feat.", "ft.", "feat", "ft", "|", "/")
+            for (d in delimiters) {
+                val idx = a.indexOf(d)
+                if (idx != -1) a = a.substring(0, idx)
+            }
+            return a.replace(Regex("""[^a-z0-9\s]"""), " ").replace(Regex("""\s+"""), " ").trim()
+        }
+
+        fun isDuplicateTrack(titleA: String, artistA: String, titleB: String, artistB: String): Boolean {
+            val normA = normalizeSongTitle(titleA)
+            val normB = normalizeSongTitle(titleB)
+            if (normA.isNotBlank() && normA == normB) return true
+            if (normA.length >= 4 && normB.length >= 4) {
+                if (normA.contains(normB) || normB.contains(normA)) {
+                    val artA = normalizeArtistName(artistA)
+                    val artB = normalizeArtistName(artistB)
+                    if (artA.isBlank() || artB.isBlank() || artA == artB || artA.contains(artB) || artB.contains(artA)) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+    }
+
     fun appendToQueue(items: List<MediaItem>) {
         if (items.isEmpty()) return
-        val existingKeys = queue.map { "${it.title.lowercase().trim()}::${it.artist.lowercase().trim()}" }.toMutableSet()
+        val currentSeed = queue.getOrNull(index)
+        val existingNormalized = queue.map { normalizeSongTitle(it.title) to normalizeArtistName(it.artist) }.toMutableList()
         val existingUris = queue.map { it.uri }.toMutableSet()
         val existingVids = queue.mapNotNull { it.sourceVideoId.takeIf { v -> v.isNotBlank() } }.toMutableSet()
-        val toAdd = items.filter { candidate ->
-            val key = "${candidate.title.lowercase().trim()}::${candidate.artist.lowercase().trim()}"
+
+        val toAdd = mutableListOf<MediaItem>()
+        for (candidate in items) {
+            val normTitle = normalizeSongTitle(candidate.title)
+            val normArtist = normalizeArtistName(candidate.artist)
             val vid = candidate.sourceVideoId
-            val dup = key in existingKeys || candidate.uri in existingUris || (vid.isNotBlank() && vid in existingVids)
-            if (!dup) {
-                existingKeys.add(key)
+
+            if (currentSeed != null && isDuplicateTrack(currentSeed.title, currentSeed.artist, candidate.title, candidate.artist)) {
+                continue
+            }
+            if (candidate.uri in existingUris || (vid.isNotBlank() && vid in existingVids)) {
+                continue
+            }
+            val isDup = existingNormalized.any { (exTitle, exArtist) ->
+                isDuplicateTrack(exTitle, exArtist, normTitle, normArtist)
+            }
+            if (!isDup) {
+                existingNormalized.add(normTitle to normArtist)
                 existingUris.add(candidate.uri)
                 if (vid.isNotBlank()) existingVids.add(vid)
+                toAdd.add(candidate)
             }
-            !dup
         }
         if (toAdd.isNotEmpty()) {
             queue = queue + toAdd
@@ -421,7 +504,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         .distinctBy { it.title.lowercase().trim() }
                 }
 
-                val mediaItems = similarTracks.map { t ->
+                val mediaItems = similarTracks.mapNotNull { t ->
+                    if (isDuplicateTrack(seed.title, seed.artist, t.title, t.artist)) return@mapNotNull null
                     val lazyUri = t.directStreamUrl.takeIf { it.startsWith("http") }
                         ?: if (t.videoId.startsWith("saavn_")) t.videoId else "yt_${t.videoId}"
                     MediaItem(
@@ -463,6 +547,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     ytVideoId = vid,
                     rawThumbUrl = nextItem.thumbUri ?: "",
                     directStreamUrl = "",
+                    context = this@PlaybackService,
                 )
                 if (resolved != null && resolved.streamUrl.isNotBlank()) {
                     withContext(Dispatchers.Main) {
@@ -501,7 +586,12 @@ class PlaybackService : MediaBrowserServiceCompat() {
         }
         abPoints.value = repeatA to repeatB
     }
+    val queueIndex = MutableStateFlow(0)
     private var index = 0
+        set(value) {
+            field = value
+            queueIndex.value = value
+        }
     private var retried = false
     private var finished = false
     private var decoderMode = "Auto"
@@ -539,8 +629,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
     private var sessionArtworkColor: Int = android.graphics.Color.rgb(12, 24, 42)
     private var artworkJob: Job? = null
     private var notifSyncJob: Job? = null
+    private var bufferingWatchdog: Job? = null
     private var lastIslandTickAt = 0L
     private var currentTrackLiked = false
+    val isCurrentTrackLiked = MutableStateFlow(false)
     private var likedTrackUri: String? = null
     private var appInForeground = true
     private lateinit var dynamicIsland: DynamicIslandController
@@ -595,7 +687,11 @@ class PlaybackService : MediaBrowserServiceCompat() {
         fun performAttachAndRedraw() {
             if (released || surfaceSuspended) return
             val useTexture = Store.prefs(this@PlaybackService).getBoolean("use_texture_view", false)
-            player.attachViews(layout, null, useTexture, false)
+            layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)?.apply {
+                setZOrderMediaOverlay(true)
+                holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+            }
+            player.attachViews(layout, null, useTexture, true)
             videoAttached = true
             layout.post {
                 if (!released && !surfaceSuspended) {
@@ -741,11 +837,14 @@ class PlaybackService : MediaBrowserServiceCompat() {
         surfaceSuspended = false
         player.setUseOrientationFromBounds(true)
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
-        player.attachViews(layout, null, useTexture, false)
+        player.attachViews(layout, null, useTexture, true)
         enforceCenterGravity(layout)
         applyHighRefreshPresentation(layout)
-        layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)
-            ?.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
+        layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)?.apply {
+            setZOrderMediaOverlay(true)
+            holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+            addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
+        }
         videoAttached = true
         layout.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
@@ -872,7 +971,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
             Intent(Intent.ACTION_MEDIA_BUTTON).setComponent(mbrComponent),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        session = MediaSessionCompat(this, "MS PLAYER", mbrComponent, mediaButtonPendingIntent)
+        session = MediaSessionCompat(this, "Mica One", mbrComponent, mediaButtonPendingIntent)
         session.setFlags(
             MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
                 MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
@@ -900,13 +999,41 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
                 override fun onSkipToPrevious() = previous()
 
+                override fun onSetShuffleMode(shuffleMode: Int) {
+                    val enabled = shuffleMode != PlaybackStateCompat.SHUFFLE_MODE_NONE
+                    shuffleEnabled.value = enabled
+                    session.setShuffleMode(if (enabled) PlaybackStateCompat.SHUFFLE_MODE_ALL else PlaybackStateCompat.SHUFFLE_MODE_NONE)
+                    updateSession(forceState = true)
+                    updateDynamicIsland()
+                    updateNotification()
+                }
+
+                override fun onSetRepeatMode(newRepeatMode: Int) {
+                    val modeStr = when (newRepeatMode) {
+                        PlaybackStateCompat.REPEAT_MODE_ONE -> "one"
+                        PlaybackStateCompat.REPEAT_MODE_ALL -> "all"
+                        else -> "off"
+                    }
+                    repeatMode.value = modeStr
+                    session.setRepeatMode(newRepeatMode)
+                    updateSession(forceState = true)
+                    updateDynamicIsland()
+                    updateNotification()
+                }
+
                 override fun onCustomAction(action: String?, extras: Bundle?) {
                     when (action) {
                         "toggle_like" -> toggleCurrentTrackLike()
-                        "toggle_shuffle" -> {
+                        "toggle_shuffle", "toggle_repeat" -> {
+                            val nextRepeat = !shuffleEnabled.value
                             toggleShuffle()
+                            if (nextRepeat) {
+                                setRepeat("all")
+                            } else {
+                                setRepeat("off")
+                            }
                             updateSession(forceState = true)
-                            updateDynamicIsland()
+                            scheduleMediaNotificationSync()
                         }
                     }
                 }
@@ -1001,7 +1128,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
             "--no-video-title-show",
             "--audio-time-stretch",
             "--aout=android_audiotrack",
-            "--file-caching=1500",
+            "--file-caching=2000",
             "--network-caching=2000",
             "--no-drop-late-frames",
             "--no-skip-frames",
@@ -1051,6 +1178,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     }
                 }
                 MediaPlayer.Event.Playing -> {
+                    bufferingWatchdog?.cancel()
                     Library.videoPlaybackActive.value = state.value.item?.audio == false
                     val realLen = player.length.takeIf { it > 0L } ?: state.value.duration
                     state.value = state.value.copy(playing = true, buffering = false, error = null, duration = realLen)
@@ -1177,51 +1305,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     val currentItem = state.value.item
                     val isOnlineAudio = currentItem?.audio == true && (PlaybackRules.isStreamUrl(currentItem.uri) || isLazyOnlineUri(currentItem.uri))
                     if (isOnlineAudio && !retried) {
-                        retried = true
-                        state.value = state.value.copy(buffering = true, error = null)
-                        val failedIndex = index
-                        val failedUri = currentItem.uri
-                        scope.launch(Dispatchers.IO) {
-                            val fallback = AudioStreamResolver.resolveAlternateStream(
-                                title = currentItem.title,
-                                artist = currentItem.artist,
-                                ytVideoId = extractVideoId(currentItem),
-                                rawThumbUrl = currentItem.thumbUri ?: "",
-                                excludeUrl = failedUri,
-                            )
-                            withContext(Dispatchers.Main) {
-                                if (state.value.item?.title != currentItem.title) return@withContext
-                                if (fallback != null && fallback.streamUrl.isNotBlank() && fallback.streamUrl != failedUri) {
-                                    val updated = currentItem.copy(
-                                        uri = fallback.streamUrl,
-                                        thumbUri = fallback.hdThumbUrl.ifBlank { currentItem.thumbUri ?: "" },
-                                        streamUserAgent = fallback.userAgent,
-                                    )
-                                    val mutable = queue.toMutableList()
-                                    if (failedIndex in mutable.indices) {
-                                        mutable[failedIndex] = updated
-                                        queue = mutable
-                                    } else {
-                                        queue = listOf(updated)
-                                        index = 0
-                                    }
-                                    queueItems.value = queue
-                                    openCurrent(0L, restore = false, autoPlay = true)
-                                } else if (index + 1 < queue.size) {
-                                    // Gracefully advance to next track instead of stranding playback
-                                    next()
-                                } else {
-                                    state.value = state.value.copy(
-                                        error = "Unable to stream this track right now. Tap to retry or pick another song.",
-                                        playing = false,
-                                        buffering = false,
-                                    )
-                                    abandonFocus()
-                                    updateNotification()
-                                    stopForeground(STOP_FOREGROUND_DETACH)
-                                }
-                            }
-                        }
+                        handleOnlineAudioFallback(currentItem)
                         return@setEventListener
                     }
                     val is4kOrLarge = state.value.videoWidth >= 3840 || state.value.videoHeight >= 2160 || (state.value.item?.size ?: 0L) > 2L * 1024 * 1024 * 1024
@@ -1285,6 +1369,35 @@ class PlaybackService : MediaBrowserServiceCompat() {
             "next" -> next()
             "previous" -> previous()
             "stop" -> stopPlayback()
+            "shuffle", "toggle_shuffle" -> toggleShuffle()
+            "widget_play_pick" -> {
+                val pickIndex = intent.getIntExtra(MicaMusicWidgetProvider.EXTRA_PICK_INDEX, 0)
+                val hits = FeedCacheManager.cachedTopHits.value.ifEmpty { FeedCacheManager.defaultCuratedHits() }
+                val selectedTrack = hits.getOrNull(pickIndex) ?: hits.firstOrNull()
+                if (selectedTrack != null) {
+                    scope.launch {
+                        val resolved = AudioStreamResolver.resolveBestStream(
+                            title = selectedTrack.title,
+                            artist = selectedTrack.artist,
+                            ytVideoId = selectedTrack.videoId,
+                            rawThumbUrl = selectedTrack.thumbUrl,
+                            directStreamUrl = selectedTrack.directStreamUrl
+                        )
+                        if (resolved != null) {
+                            val item = MediaItem(
+                                uri = resolved.streamUrl,
+                                title = selectedTrack.title,
+                                artist = selectedTrack.artist,
+                                audio = true,
+                                thumbUri = resolved.hdThumbUrl.ifBlank { selectedTrack.thumbUrl },
+                                sourceVideoId = selectedTrack.videoId,
+                                folder = "MICA Quick Pick"
+                            )
+                            open(listOf(item), item, autoPlay = true)
+                        }
+                    }
+                }
+            }
         }
         return START_NOT_STICKY
     }
@@ -1519,12 +1632,36 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     updateSession(forceMetadata = true, forceState = true)
                     foreground()
                     scheduleMediaNotificationSync()
+                    var searchTitle = activeItem.title
+                    var searchArtist = activeItem.artist
+                    if (activeItem.uri.startsWith("resolve://spotify/")) {
+                        val payload = activeItem.uri.removePrefix("resolve://spotify/")
+                        val parts = payload.split("::")
+                        if (parts.size >= 3) {
+                            searchTitle = parts[1]
+                            searchArtist = parts[2]
+                        } else {
+                            if (parts.isNotEmpty() && parts[0].isNotBlank()) searchTitle = parts[0]
+                            if (parts.size > 1 && parts[1].isNotBlank()) searchArtist = parts[1]
+                        }
+                    } else if (activeItem.uri.startsWith("resolve://audio/")) {
+                        val payload = activeItem.uri.removePrefix("resolve://audio/")
+                        val parts = payload.split("::")
+                        if (parts.isNotEmpty() && parts[0].isNotBlank()) searchTitle = parts[0]
+                        if (parts.size > 1 && parts[1].isNotBlank()) searchArtist = parts[1]
+                    } else if (searchTitle.contains(" • ")) {
+                        val parts = searchTitle.split(" • ")
+                        if (parts.isNotEmpty() && parts[0].isNotBlank()) searchTitle = parts[0]
+                        if (parts.size > 1 && searchArtist.isBlank()) searchArtist = parts[1]
+                    }
+
                     val resolved = AudioStreamResolver.resolveBestStream(
-                        title = activeItem.title,
-                        artist = activeItem.artist,
+                        title = searchTitle,
+                        artist = searchArtist,
                         ytVideoId = extractVideoId(activeItem),
                         rawThumbUrl = activeItem.thumbUri ?: "",
                         directStreamUrl = "",
+                        context = this@PlaybackService,
                     )
                     if (resolved == null || resolved.streamUrl.isBlank()) {
                         if (currentIdx + 1 < queue.size) {
@@ -1538,6 +1675,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         return@launch
                     }
                     activeItem = activeItem.copy(
+                        title = searchTitle,
+                        artist = searchArtist.ifBlank { activeItem.artist },
                         uri = resolved.streamUrl,
                         thumbUri = resolved.hdThumbUrl.ifBlank { activeItem.thumbUri ?: "" },
                         streamUserAgent = resolved.userAgent,
@@ -1587,13 +1726,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     } else Media(vlc, uri)
                     media.setHWDecoderEnabled(decoderMode != "Software", decoderMode == "Hardware")
                     if (PlaybackRules.isStreamUrl(activeItem.uri)) {
-                        if (activeItem.audio) {
-                            media.addOption(":network-caching=800")
-                            media.addOption(":live-caching=800")
-                        } else {
-                            media.addOption(":network-caching=1500")
-                        }
-                        media.addOption(":http-reconnect")
+                        media.addOption(":network-caching=1500")
+                        media.addOption(":live-caching=1500")
+                        media.addOption(":http-reconnect=1")
                         media.addOption(":http-forward-cookies")
                         val isYtStream = activeItem.uri.contains("googlevideo.com") || activeItem.uri.contains("youtube.com")
                         val streamUa = activeItem.streamUserAgent.ifBlank {
@@ -1604,13 +1739,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
                             }
                         }
                         media.addOption(":http-user-agent=$streamUa")
-                        Store.recordStream(this@PlaybackService, activeItem.uri)
                     } else {
-                        if (activeItem.audio) {
-                            media.addOption(":file-caching=250")
-                        } else {
-                            media.addOption(":file-caching=1500")
-                        }
+                        media.addOption(":file-caching=250")
                     }
                     val start =
                         position
@@ -1620,10 +1750,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
                             ?: 0
                     if (start > 0) media.addOption(":start-time=${start / 1000.0}")
                     resumeAnchor = start.takeIf { it > 0 }
-                    val folderPrefs = if (Store.folderMemoryEnabled(this@PlaybackService) && activeItem.folder.isNotBlank()) {
+                    val folderPrefs = if (!activeItem.audio && !PlaybackRules.isStreamUrl(activeItem.uri) && Store.folderMemoryEnabled(this@PlaybackService) && activeItem.folder.isNotBlank()) {
                         Store.folderMemory(this@PlaybackService, activeItem.folder)
                     } else null
-                    val initialRate = if (restore && pendingStyleRestore == null && folderPrefs?.rate != null && folderPrefs.rate in 0.25f..4f) {
+                    val initialRate = if (!activeItem.audio && !PlaybackRules.isStreamUrl(activeItem.uri) && restore && pendingStyleRestore == null && folderPrefs?.rate != null && folderPrefs.rate in 0.25f..4f) {
                         folderPrefs.rate
                     } else 1f
                     if (restore && pendingStyleRestore == null && !keepSubtitleChoice) {
@@ -1650,6 +1780,30 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     updateSession(forceMetadata = true, forceState = true)
                     foreground()
                     scheduleMediaNotificationSync()
+                    // Immediately record played media to History database
+                    scope.launch(Dispatchers.IO) {
+                        val historyTitle = if (activeItem.artist.isNotBlank()) "${activeItem.title} • ${activeItem.artist}" else activeItem.title
+                        Store.db(this@PlaybackService).dao().save(SavedMedia().apply {
+                            this.uri = activeItem.uri
+                            this.title = historyTitle
+                            this.position = start
+                            this.updated = System.currentTimeMillis()
+                            this.watched = false
+                        })
+                    }
+                    bufferingWatchdog?.cancel()
+                    if (activeItem.audio && (PlaybackRules.isStreamUrl(activeItem.uri) || isLazyOnlineUri(activeItem.uri))) {
+                        val isLiveFlac = activeItem.sourceVideoId.startsWith("flac_") || activeItem.uri.contains("flac", true) || activeItem.uri.contains("motherearth", true)
+                        if (!isLiveFlac) {
+                            bufferingWatchdog = scope.launch {
+                                delay(3500)
+                                if (state.value.buffering && !state.value.playing && !requestedPause) {
+                                    android.util.Log.w("MSPlayer", "Buffering timeout >3.5s on online audio, triggering fallback from ${activeItem.uri}")
+                                    handleOnlineAudioFallback(activeItem)
+                                }
+                            }
+                        }
+                    }
                     // Trigger Auto-Queue Radio & background next-track pre-resolution for online audio
                     if (activeItem.audio && PlaybackRules.isStreamUrl(activeItem.uri)) {
                         triggerAutoQueueIfNeeded(activeItem)
@@ -1749,7 +1903,21 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     fun next() {
         if (shuffleEnabled.value && queue.size > 1) {
-            savePosition(); index = queue.indices.filter { it != index }.random(); retried = false; openCurrent(null); return
+            savePosition()
+            val unplayed = queue.indices.filter { it !in playedShuffleHistory && it != index }
+            val nextIdx = if (unplayed.isNotEmpty()) {
+                unplayed.random()
+            } else {
+                playedShuffleHistory.clear()
+                playedShuffleHistory.add(index)
+                val fresh = queue.indices.filter { it != index }
+                if (fresh.isNotEmpty()) fresh.random() else 0
+            }
+            playedShuffleHistory.add(nextIdx)
+            index = nextIdx
+            retried = false
+            openCurrent(null)
+            return
         }
         if (index + 1 >= queue.size && repeatMode.value == "all" && queue.isNotEmpty()) { savePosition(); index = 0; openCurrent(null); return }
         if (index + 1 < queue.size) {
@@ -1905,7 +2073,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
             preferredName = preferredSub,
             favoriteLanguages = Store.favoriteSubtitleLanguages(this),
             starredTracks = Store.starredSubtitles(this),
-        ) ?: return
+        ) ?: state.value.subtitles.firstOrNull { it.first >= 0 } ?: return
         initialSubRestored = true
         selectedSubTracks.clear()
         selectedSubTracks.add(target.first)
@@ -2117,6 +2285,20 @@ class PlaybackService : MediaBrowserServiceCompat() {
         state.value = state.value.copy(audioTrack = id)
     }
 
+    fun availableVideoTracks(): List<Pair<Int, String>> = runCatching {
+        if (!::player.isInitialized || released) emptyList()
+        else player.videoTracks?.map { it.id to it.name }?.filter { it.first >= 0 }.orEmpty()
+    }.getOrDefault(emptyList())
+
+    fun currentVideoTrackId(): Int = runCatching {
+        if (!::player.isInitialized || released) -1 else player.videoTrack
+    }.getOrDefault(-1)
+
+    fun setVideoTrack(id: Int) {
+        if (!::player.isInitialized || released) return
+        player.setVideoTrack(id)
+    }
+
     private fun updateSubtitleKind() {
         val media = player.media
         try {
@@ -2194,6 +2376,33 @@ class PlaybackService : MediaBrowserServiceCompat() {
         return newDelay
     }
 
+    fun areSubtitlesEnabled(): Boolean = selectedSubTracks.isNotEmpty() || autoSubCues.isNotEmpty()
+
+    fun toggleSubtitlesMaster(): Boolean {
+        userModifiedSubtitles = true
+        if (areSubtitlesEnabled()) {
+            val primary = selectedSubTracks.firstOrNull() ?: -1
+            if (primary >= 0) Store.prefs(this).edit().putInt("last_sub_track_${state.value.item?.uri.hashCode()}", primary).apply()
+            selectedSubTracks.clear()
+            autoSubCues = emptyList()
+            syncSubtitleTracks(persistName = false)
+            return false
+        } else {
+            val savedLast = Store.prefs(this).getInt("last_sub_track_${state.value.item?.uri.hashCode()}", -1)
+            val available = state.value.subtitles.filter { it.first >= 0 }
+            val trackToSelect = if (available.any { it.first == savedLast }) savedLast else available.firstOrNull()?.first ?: -1
+            if (trackToSelect >= 0) {
+                selectedSubTracks.clear()
+                selectedSubTracks.add(trackToSelect)
+                syncSubtitleTracks(persistName = false)
+                return true
+            } else {
+                maybeAutoSelectPrimarySubtitle()
+                return areSubtitlesEnabled()
+            }
+        }
+    }
+
     fun toggleSubtitleTrack(id: Int, name: String) {
         userModifiedSubtitles = true
         if (id < 0) {
@@ -2239,7 +2448,17 @@ class PlaybackService : MediaBrowserServiceCompat() {
         // Route plain-text SRT/VTT/AI tracks through StrokeView Canvas so fill, border,
         // and shadow stay pixel-locked with zero LibVLC FreeType drift. Keep bitmap
         // PGS/VobSub and authored ASS/SSA tracks on LibVLC native SPU.
-        return selectedSubTracks.firstOrNull { isAuthoredOrBitmapTrack(it) } ?: -1
+        val authoredOrBitmap = selectedSubTracks.firstOrNull { isAuthoredOrBitmapTrack(it) }
+        if (authoredOrBitmap != null) return authoredOrBitmap
+
+        // If track has NO software demuxed cues (e.g. streaming Telegram files, network streams),
+        // LibVLC native SPU MUST be used so subtitles render on screen!
+        val cueLackingTrack = selectedSubTracks.firstOrNull { tId ->
+            tId >= 0 && cuesForTrackId(tId).isEmpty()
+        }
+        if (cueLackingTrack != null) return cueLackingTrack
+
+        return -1
     }
 
     private fun syncSubtitleTracks(name: String = "", persistName: Boolean = true) {
@@ -2280,8 +2499,17 @@ class PlaybackService : MediaBrowserServiceCompat() {
     }
 
     fun updateSubtitleTextAt(position: Long) {
-        val effectivePos = position - state.value.subtitleDelay
         val primaryHwTrack = resolvePrimaryHwTrack()
+        if (primaryHwTrack >= 0) {
+            // When LibVLC native SPU is rendering subtitles (e.g. online video streams or bitmap PGS/VobSub),
+            // mute the Compose StrokeView text overlay so subtitles never render twice!
+            if (activeSubtitleText.value != null || dualSubtitleLines.value.primary != null || dualSubtitleLines.value.secondary != null) {
+                activeSubtitleText.value = null
+                dualSubtitleLines.value = SubtitleOverlayLines(primary = null, secondary = null)
+            }
+            return
+        }
+        val effectivePos = position - state.value.subtitleDelay
         val secondaryTracks = selectedSubTracks.filter { it != primaryHwTrack }
         val primaryLines = mutableListOf<String>()
         val extraLines = mutableListOf<String>()
@@ -2803,7 +3031,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         applyVolume()
         bindPlayerEvents()
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
-        videoLayout?.takeIf { !surfaceSuspended }?.let { player.attachViews(it, null, useTexture, false) }
+        videoLayout?.takeIf { !surfaceSuspended }?.let { player.attachViews(it, null, useTexture, true) }
         openCurrent(prior.position, restore = false, keepSubtitleChoice = true)
     }
 
@@ -2875,6 +3103,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         dimensionProbe?.cancel()
         artworkJob?.cancel()
         notifSyncJob?.cancel()
+        bufferingWatchdog?.cancel()
         scope.cancel()
         player.setEventListener(null)
         player.stop()
@@ -2937,6 +3166,56 @@ class PlaybackService : MediaBrowserServiceCompat() {
         val nw = (w * scale).toInt().coerceAtLeast(1)
         val nh = (h * scale).toInt().coerceAtLeast(1)
         return runCatching { Bitmap.createScaledBitmap(source, nw, nh, true) }.getOrDefault(source)
+    }
+
+    private fun handleOnlineAudioFallback(currentItem: MediaItem) {
+        if (retried) return
+        val isLiveFlac = currentItem.sourceVideoId.startsWith("flac_") || currentItem.uri.contains("flac", true) || currentItem.uri.contains("motherearth", true)
+        if (isLiveFlac) return
+        retried = true
+        state.value = state.value.copy(buffering = true, error = null)
+        val failedIndex = index
+        val failedUri = currentItem.uri
+        scope.launch(Dispatchers.IO) {
+            val fallback = AudioStreamResolver.resolveAlternateStream(
+                title = currentItem.title,
+                artist = currentItem.artist,
+                ytVideoId = extractVideoId(currentItem),
+                rawThumbUrl = currentItem.thumbUri ?: "",
+                excludeUrl = failedUri,
+            )
+            withContext(Dispatchers.Main) {
+                if (state.value.item?.title != currentItem.title) return@withContext
+                if (fallback != null && fallback.streamUrl.isNotBlank() && fallback.streamUrl != failedUri) {
+                    val updated = currentItem.copy(
+                        uri = fallback.streamUrl,
+                        thumbUri = fallback.hdThumbUrl.ifBlank { currentItem.thumbUri ?: "" },
+                        streamUserAgent = fallback.userAgent,
+                    )
+                    val mutable = queue.toMutableList()
+                    if (failedIndex in mutable.indices) {
+                        mutable[failedIndex] = updated
+                        queue = mutable
+                    } else {
+                        queue = listOf(updated)
+                        index = 0
+                    }
+                    queueItems.value = queue
+                    openCurrent(0L, restore = false, autoPlay = true)
+                } else if (index + 1 < queue.size) {
+                    next()
+                } else {
+                    state.value = state.value.copy(
+                        error = "Unable to stream this track right now. Tap to retry or pick another song.",
+                        playing = false,
+                        buffering = false,
+                    )
+                    abandonFocus()
+                    updateNotification()
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                }
+            }
+        }
     }
 
     private fun loadNotificationArtwork(targetItem: MediaItem) {
@@ -3010,14 +3289,14 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
             )
         val curItem = state.value.item
-        val title = curItem?.title?.takeIf { it.isNotBlank() } ?: "MS PLAYER"
+        val title = curItem?.title?.takeIf { it.isNotBlank() } ?: "Mica One"
         val artist = curItem?.artist?.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
-            ?: "MS PLAYER"
+            ?: "Mica One"
         val builder = NotificationCompat.Builder(this, "playback")
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle(title)
             .setContentText(artist)
-            .setSubText("MS PLAYER")
+            .setSubText("Mica One")
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setColor(sessionArtworkColor)
@@ -3047,7 +3326,37 @@ class PlaybackService : MediaBrowserServiceCompat() {
         return builder.build()
     }
 
+    private fun shouldShowNotification(): Boolean {
+        val itm = state.value.item ?: return false
+        if (itm.audio) return true
+        if (PlaybackRules.isStreamUrl(itm.uri) ||
+            itm.uri.startsWith("http://") ||
+            itm.uri.startsWith("https://") ||
+            itm.uri.startsWith("resolve://") ||
+            itm.uri.startsWith("yt_") ||
+            itm.uri.startsWith("saavn_") ||
+            itm.folder == "Network Streams"
+        ) {
+            return true
+        }
+        return false
+    }
+
     private fun foreground() {
+        if (!shouldShowNotification()) {
+            session.isActive = false
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.cancel(10)
+            nm.cancel(11)
+            if (Build.VERSION.SDK_INT >= 24) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            if (::dynamicIsland.isInitialized) dynamicIsland.hide()
+            return
+        }
         session.isActive = true
         if (Build.VERSION.SDK_INT >= 29)
             startForeground(
@@ -3087,6 +3396,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
             withContext(Dispatchers.Main) {
                 if (!released && state.value.item?.uri == item.uri && currentTrackLiked != liked) {
                     currentTrackLiked = liked
+                    isCurrentTrackLiked.value = liked
                     updateSession(forceState = true)
                     updateDynamicIsland()
                 }
@@ -3094,10 +3404,11 @@ class PlaybackService : MediaBrowserServiceCompat() {
         }
     }
 
-    private fun toggleCurrentTrackLike() {
+    fun toggleCurrentTrackLike() {
         val item = state.value.item ?: return
         val newLiked = !currentTrackLiked
         currentTrackLiked = newLiked
+        isCurrentTrackLiked.value = newLiked
         likedTrackUri = item.uri
         updateSession(forceState = true)
         updateDynamicIsland()
@@ -3133,6 +3444,13 @@ class PlaybackService : MediaBrowserServiceCompat() {
         notifSyncJob = scope.launch {
             delay(180L)
             if (released || state.value.item == null) return@launch
+            if (!shouldShowNotification()) {
+                session.isActive = false
+                val nm = getSystemService(NotificationManager::class.java)
+                nm.cancel(10)
+                nm.cancel(11)
+                return@launch
+            }
             updateSession(forceMetadata = true, forceState = true)
             getSystemService(NotificationManager::class.java).notify(10, notification())
             updateDynamicIsland()
@@ -3148,9 +3466,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
             return
         }
         refreshLikedStatus(curItem)
-        val title = curItem.title.takeIf { it.isNotBlank() } ?: "MS PLAYER"
+        val title = curItem.title.takeIf { it.isNotBlank() } ?: "Mica One"
         val artist = curItem.artist.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
-            ?: "MS PLAYER"
+            ?: "Mica One"
         dynamicIsland.update(
             DynamicIslandController.Snapshot(
                 title = title,
@@ -3169,20 +3487,41 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     private fun updateNotification() {
         state.value.item?.let { refreshLikedStatus(it) }
-        updateSession()
         val nm = getSystemService(NotificationManager::class.java)
+        if (!shouldShowNotification()) {
+            session.isActive = false
+            nm.cancel(10)
+            nm.cancel(11)
+            if (Build.VERSION.SDK_INT >= 24) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            if (::dynamicIsland.isInitialized) dynamicIsland.hide()
+            return
+        }
+        updateSession()
         nm.notify(10, notification())
         nm.cancel(11)
         updateDynamicIsland()
+        val curItem = state.value.item
+        MicaMusicWidgetProvider.updateWidget(
+            this,
+            state.value.playing,
+            curItem?.title ?: "MICA",
+            curItem?.artist ?: "The Universe of Entertainment",
+            sessionArtworkBitmap
+        )
     }
 
     private fun updateSession(forceMetadata: Boolean = false, forceState: Boolean = false) {
         val value = state.value
         val curItem = value.item
-        val title = curItem?.title?.takeIf { it.isNotBlank() } ?: "MS PLAYER"
+        val title = curItem?.title?.takeIf { it.isNotBlank() } ?: "Mica One"
         val artist = curItem?.artist?.takeIf { it.isNotBlank() && !it.equals("Unknown", true) && !it.equals("Unknown Artist", true) }
-            ?: "MS PLAYER"
-        val album = curItem?.folder?.takeIf { it.isNotBlank() && it != "Opened files" } ?: "MS PLAYER"
+            ?: "Mica One"
+        val album = curItem?.folder?.takeIf { it.isNotBlank() && it != "Opened files" } ?: "Mica One"
         val dur = value.duration.coerceAtLeast(0L)
         val art = sessionArtworkBitmap
         val artIdentity = if (art != null) "${sessionArtKey}#${art.hashCode()}" else "none"
@@ -3235,6 +3574,13 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 now - sessionSentAt < 2000
         )
             return
+        session.setShuffleMode(if (shuffleEnabled.value) PlaybackStateCompat.SHUFFLE_MODE_ALL else PlaybackStateCompat.SHUFFLE_MODE_NONE)
+        val repMode = when (repeatMode.value) {
+            "one" -> PlaybackStateCompat.REPEAT_MODE_ONE
+            "all" -> PlaybackStateCompat.REPEAT_MODE_ALL
+            else -> PlaybackStateCompat.REPEAT_MODE_NONE
+        }
+        session.setRepeatMode(repMode)
         session.setPlaybackState(
             PlaybackStateCompat.Builder()
                 .setActions(
@@ -3244,7 +3590,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         PlaybackStateCompat.ACTION_SEEK_TO or
                         PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
                         PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                        PlaybackStateCompat.ACTION_STOP
+                        PlaybackStateCompat.ACTION_STOP or
+                        PlaybackStateCompat.ACTION_SET_SHUFFLE_MODE or
+                        PlaybackStateCompat.ACTION_SET_REPEAT_MODE
                 )
                 .addCustomAction(
                     "toggle_like",
@@ -3252,9 +3600,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     if (currentTrackLiked) R.drawable.ic_notif_liked else R.drawable.ic_notif_like_add,
                 )
                 .addCustomAction(
-                    "toggle_shuffle",
-                    if (shuffleEnabled.value) "Shuffle On" else "Shuffle Off",
-                    R.drawable.ic_notif_shuffle,
+                    if (shuffleEnabled.value) "toggle_repeat" else "toggle_shuffle",
+                    if (shuffleEnabled.value) "Shuffle On (Tap for Repeat)" else "Repeat On (Tap for Shuffle)",
+                    if (shuffleEnabled.value) R.drawable.ic_notif_shuffle else R.drawable.ic_notif_repeat,
                 )
                 .setState(
                     status,

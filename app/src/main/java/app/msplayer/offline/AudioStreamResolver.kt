@@ -1,7 +1,10 @@
 package app.msplayer.offline
 
+import android.content.Context
 import android.util.Log
 import android.util.LruCache
+import java.net.HttpURLConnection
+import java.net.URL
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -34,6 +37,20 @@ object AudioStreamResolver {
         }
     }
 
+    private fun isStreamReachable(streamUrl: String): Boolean {
+        if (!streamUrl.contains("saavn", ignoreCase = true)) return true
+        return runCatching {
+            val conn = (URL(streamUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "HEAD"
+                connectTimeout = 2200
+                readTimeout = 2200
+                instanceFollowRedirects = false
+                setRequestProperty("User-Agent", DEFAULT_WEB_UA)
+            }
+            conn.responseCode in 200..399
+        }.getOrDefault(false)
+    }
+
     /**
      * Resolves the highest quality stream with 100% backend fallback:
      * 1. JioSaavn 320kbps AAC primary
@@ -45,14 +62,34 @@ object AudioStreamResolver {
         ytVideoId: String = "",
         rawThumbUrl: String = "",
         directStreamUrl: String = "",
+        context: Context? = null,
     ): ResolvedAudio? = withContext(Dispatchers.IO) {
+        if (context != null) {
+            val (_, localAudios) = LibraryCache.load(context)
+            val flacMatch = localAudios.firstOrNull { audio ->
+                (audio.uri.endsWith(".flac", ignoreCase = true) || audio.title.contains("FLAC", ignoreCase = true)) &&
+                PlaybackService.isDuplicateTrack(audio.title, audio.artist, title, artist)
+            }
+            if (flacMatch != null) {
+                Log.d(TAG, "Lossless FLAC upgrade auto-selected from local storage: ${flacMatch.title}")
+                return@withContext ResolvedAudio(
+                    streamUrl = flacMatch.uri,
+                    sourceQuality = "Lossless FLAC (Local Storage)",
+                    hdThumbUrl = flacMatch.thumbUri ?: rawThumbUrl,
+                    userAgent = "",
+                )
+            }
+        }
         if (directStreamUrl.isNotBlank() && directStreamUrl.startsWith("http")) {
-            return@withContext ResolvedAudio(
-                streamUrl = directStreamUrl,
-                sourceQuality = "JioSaavn 320kbps AAC",
-                hdThumbUrl = if (rawThumbUrl.isNotBlank()) rawThumbUrl else YtMusicClient.boostThumbResolution(rawThumbUrl, ytVideoId),
-                userAgent = DEFAULT_WEB_UA,
-            )
+            val isSaavn = directStreamUrl.contains("saavn", ignoreCase = true)
+            if (!isSaavn || isStreamReachable(directStreamUrl)) {
+                return@withContext ResolvedAudio(
+                    streamUrl = directStreamUrl,
+                    sourceQuality = if (directStreamUrl.contains("flac", ignoreCase = true) || title.contains("FLAC", ignoreCase = true)) "Lossless FLAC" else "JioSaavn 320kbps AAC",
+                    hdThumbUrl = if (rawThumbUrl.isNotBlank()) rawThumbUrl else YtMusicClient.boostThumbResolution(rawThumbUrl, ytVideoId),
+                    userAgent = DEFAULT_WEB_UA,
+                )
+            }
         }
         val key = cacheKey(title, artist, ytVideoId)
         val now = System.currentTimeMillis()
@@ -69,7 +106,7 @@ object AudioStreamResolver {
         // Fast concurrent race when a valid YouTube ID or title is present
         if (cleanYtId.isNotBlank() || title.isNotBlank()) {
             val jioDeferred = async {
-                withTimeoutOrNull(4500) {
+                withTimeoutOrNull(3000) {
                     try {
                         JioSaavnClient.resolve320kbps(title, artist)
                     } catch (e: CancellationException) {
@@ -100,7 +137,7 @@ object AudioStreamResolver {
 
             // Give JioSaavn up to 900ms for 320k AAC audiophile quality
             val jio = withTimeoutOrNull(900) { jioDeferred.await() }
-            if (jio != null && jio.streamUrl.isNotBlank()) {
+            if (jio != null && jio.streamUrl.isNotBlank() && isStreamReachable(jio.streamUrl)) {
                 val resolved = ResolvedAudio(
                     streamUrl = jio.streamUrl,
                     sourceQuality = "JioSaavn 320kbps AAC",
@@ -112,7 +149,7 @@ object AudioStreamResolver {
                 return@withContext resolved
             }
 
-            // Immediately fallback to YouTube stream if JioSaavn wasn't ready
+            // Immediately fallback to YouTube stream if JioSaavn wasn't ready or firewall blocked
             val ytStream = ytDeferred.await()
             if (ytStream != null && ytStream.url.isNotBlank()) {
                 val resolved = ResolvedAudio(
@@ -128,7 +165,7 @@ object AudioStreamResolver {
 
             // If JioSaavn finishes slightly later
             val jioLate = jioDeferred.await()
-            if (jioLate != null && jioLate.streamUrl.isNotBlank()) {
+            if (jioLate != null && jioLate.streamUrl.isNotBlank() && isStreamReachable(jioLate.streamUrl)) {
                 val resolved = ResolvedAudio(
                     streamUrl = jioLate.streamUrl,
                     sourceQuality = "JioSaavn 320kbps AAC",
@@ -141,8 +178,8 @@ object AudioStreamResolver {
             }
         }
 
-        // Sequential fallback when resolving by title/artist text only
-        withTimeoutOrNull(4500) {
+        // Sequential fallback when resolving by title/artist text only (3-sec timeout for college Wi-Fi)
+        withTimeoutOrNull(3000) {
             try {
                 val jio = JioSaavnClient.resolve320kbps(title, artist)
                 if (jio != null && jio.streamUrl.isNotBlank()) {
@@ -197,6 +234,9 @@ object AudioStreamResolver {
         excludeUrl: String,
     ): ResolvedAudio? = withContext(Dispatchers.IO) {
         invalidate(title, artist, ytVideoId)
+        val isLiveFlac = ytVideoId.startsWith("flac_") || excludeUrl.contains("flac", ignoreCase = true) || excludeUrl.contains("motherearth", ignoreCase = true)
+        if (isLiveFlac) return@withContext null
+
         val failedWasSaavn = excludeUrl.contains("saavn", ignoreCase = true)
         val cleanYtId = if (ytVideoId.startsWith("saavn_")) "" else ytVideoId
         val cleanTitle = title.replace(Regex("""\(.*?\)|\[.*?\]"""), "").trim()

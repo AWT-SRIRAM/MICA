@@ -142,6 +142,10 @@ class DynamicIslandController(
             return
         }
         val trackKey = "${snapshot.title}::${snapshot.artist}"
+        if (!Store.prefs(context).getBoolean("enable_floating_island_overlay", false)) {
+            removeOverlay()
+            return
+        }
         if (userDismissedForTrack != null && userDismissedForTrack == trackKey) {
             removeOverlay()
             return
@@ -569,8 +573,8 @@ class DynamicIslandController(
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            // Sit cleanly right below the system status bar so 100% of taps & gestures register smoothly!
-            y = statusBarHeightPx() + dp(4f)
+            val notchLevel = Store.prefs(context).getBoolean("dynamic_island_notch_level", false)
+            y = if (notchLevel) dp(2f) else (statusBarHeightPx() + dp(4f))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -938,7 +942,7 @@ class DynamicIslandController(
     /** Lightweight hardware-layered 4-bar audio visualizer throttled to ~24fps for zero stutter. */
     private class SpectrumBarsView(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.parseColor("#FF38BDF8")
+            color = Color.parseColor("#1DB954")
             style = Paint.Style.FILL
         }
         private var phase = 0f

@@ -12,6 +12,7 @@ import androidx.room.Room
 import java.util.Locale
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -180,21 +181,42 @@ object Store {
 
     fun prefs(context: Context) = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    fun isAudioCdnUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("saavncdn.com") ||
+            lower.contains("googlevideo.com") ||
+            lower.contains("jiosaavn.com") ||
+            lower.startsWith("resolve://") ||
+            lower.startsWith("blob:") ||
+            lower.contains("audiopipe")
+    }
+
     fun recentStreams(context: Context): List<String> {
         val raw = prefs(context).getString("recent_streams_v1", "") ?: return emptyList()
-        return raw.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
+        val list = raw.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !isAudioCdnUrl(it) }
+            .distinct()
+            .toList()
+        return list
     }
 
     fun recordStream(context: Context, url: String) {
         val clean = url.trim()
-        if (!PlaybackRules.isStreamUrl(clean)) return
+        if (!PlaybackRules.isStreamUrl(clean) || isAudioCdnUrl(clean)) return
         val updated = (listOf(clean) + recentStreams(context).filter { it != clean }).take(10)
         prefs(context).edit().putString("recent_streams_v1", updated.joinToString("\n")).apply()
     }
 
     fun removeStream(context: Context, url: String) {
-        val updated = recentStreams(context).filter { it != url.trim() }
+        val clean = url.trim()
+        val updated = recentStreams(context).filter { it != clean }
         prefs(context).edit().putString("recent_streams_v1", updated.joinToString("\n")).apply()
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                db(context).dao().deleteSaved(clean)
+            }
+        }
     }
 
     fun dismissedRecentAdded(context: Context): Set<String> =
@@ -377,7 +399,7 @@ object Library {
         } finally { retriever.release() }
     }
     private val probes = Semaphore(2)
-    private val thumbSlots = Semaphore(8)
+    private val thumbSlots = Semaphore(2)
     val videoPlaybackActive = MutableStateFlow(false)
     val isScanning = MutableStateFlow(false)
     private val thumbLocks = Array(32) { Mutex() }
@@ -385,6 +407,7 @@ object Library {
     private val failedThumbs = LruCache<String, Boolean>(512)
     private val folderThumbs = LruCache<String, Bitmap>(64)
     fun retryThumbnails() { thumbs.evictAll(); failedThumbs.evictAll(); folderThumbs.evictAll(); thumbnailRevision.value++ }
+    fun bumpThumbnailRevision() { thumbnailRevision.value++ }
     fun retryFailedThumbnails() { failedThumbs.evictAll(); folderThumbs.evictAll() }
 
     suspend fun folderThumbnail(context: Context, folder: MediaFolder): Bitmap? {
@@ -404,7 +427,7 @@ object Library {
     private val metadata = LruCache<String, MediaInfo>(1024)
 
     suspend fun inspect(context: Context, vlc: LibVLC, item: MediaItem): MediaInfo? {
-        if (PlaybackRules.isStreamUrl(item.uri)) return null
+        if (PlaybackRules.isStreamUrl(item.uri) || item.uri.startsWith("resolve://") || item.uri.startsWith("yt_") || item.uri.startsWith("saavn_")) return null
         val titleLower = item.title.lowercase()
         if (titleLower.endsWith(".tmp") || titleLower.endsWith(".crdownload") || titleLower.endsWith(".part") || titleLower.contains(".pending")) return null
         return probes.withPermit {
@@ -828,6 +851,46 @@ object Library {
 
     suspend fun opened(context: Context, uri: Uri): MediaItem =
         withContext(Dispatchers.IO) {
+            val uriStr = uri.toString()
+            if (uri.scheme == "resolve" || uriStr.startsWith("resolve://") || uriStr.startsWith("yt_") || uriStr.startsWith("saavn_")) {
+                var title = if (uriStr.startsWith("resolve://spotify/")) {
+                    val raw = uriStr.removePrefix("resolve://spotify/")
+                    val tokens = raw.split("::")
+                    if (tokens.size >= 3) {
+                        tokens[1]
+                    } else {
+                        raw.replace("::", " • ")
+                    }
+                } else {
+                    uri.lastPathSegment ?: "Audio Track"
+                }
+                var artist = ""
+                if (uriStr.startsWith("resolve://spotify/")) {
+                    val tokens = uriStr.removePrefix("resolve://spotify/").split("::")
+                    if (tokens.size >= 3) {
+                        artist = tokens.drop(2).joinToString(" • ")
+                    } else if (title.contains(" • ")) {
+                        val parts = title.split(" • ")
+                        title = parts[0]
+                        if (parts.size > 1) artist = parts[1]
+                    }
+                } else if (title.contains(" • ")) {
+                    val parts = title.split(" • ")
+                    title = parts[0]
+                    if (parts.size > 1) artist = parts[1]
+                }
+                val artMeta = TrackArtworkStore.findMeta(context, uriStr, title)
+                var thumb = artMeta?.localCoverPath?.takeIf { it.isNotBlank() && java.io.File(it).exists() }?.let { "file://$it" }
+                    ?: artMeta?.thumbUrl.orEmpty()
+                if (thumb.isBlank() && uriStr.startsWith("resolve://spotify/")) {
+                    val tokens = uriStr.removePrefix("resolve://spotify/").split("::")
+                    if (tokens.size >= 3 && tokens[0].isNotBlank()) {
+                        thumb = "spotify_track://${tokens[0]}"
+                    }
+                }
+                val artArtist = artMeta?.artist.orEmpty().ifBlank { artist }
+                return@withContext MediaItem(uriStr, title, artist = artArtist, thumbUri = thumb, folder = "Playlists", size = 0L, audio = true)
+            }
             if (uri.scheme in listOf("http", "https", "rtsp", "rtmp", "mms", "udp")) {
                 val title = uri.lastPathSegment?.substringBefore('?')?.takeIf { it.isNotBlank() } ?: uri.host ?: uri.toString()
                 val isAudioStream = uri.toString().contains(".mp3") || uri.toString().contains(".m4a") || uri.toString().contains(".aac") || uri.toString().contains(".flac") || uri.toString().contains(".ogg") || uri.toString().contains("saavn") || uri.toString().contains("audio") || uri.toString().contains("spotify")
@@ -892,14 +955,24 @@ object Library {
     }
 
     suspend fun thumbnail(context: Context, item: MediaItem): Bitmap? {
-        if (PlaybackRules.isStreamUrl(item.uri)) return null
+        if (PlaybackRules.isStreamUrl(item.uri) || item.uri.startsWith("resolve://") || item.uri.startsWith("yt_") || item.uri.startsWith("saavn_")) return null
         val titleLower = item.title.lowercase()
         if (titleLower.endsWith(".tmp") || titleLower.endsWith(".crdownload") || titleLower.endsWith(".part") || titleLower.contains(".pending")) return null
         if (item.audio) return audioThumbnail(context, item)
         val key = "v7|${item.uri}|${item.size}|${item.modified}|${item.added}"
         return thumbLocks[(key.hashCode() and Int.MAX_VALUE) % thumbLocks.size].withLock {
             thumbs.get(key)?.let { return@withLock it }
+            if (videoPlaybackActive.value) {
+                while (videoPlaybackActive.value) {
+                    kotlinx.coroutines.delay(100)
+                }
+            }
             thumbSlots.withPermit {
+                if (videoPlaybackActive.value) {
+                    while (videoPlaybackActive.value) {
+                        kotlinx.coroutines.delay(100)
+                    }
+                }
                 var bitmap = withContext(Dispatchers.IO) {
                     val directory = java.io.File(context.cacheDir, "video-thumbnails-v7").apply { mkdirs() }
                     val fileKey = "th_" + (key.hashCode().toLong() and 0xFFFFFFFFL).toString(16) + "_" + (item.uri.hashCode().toLong() and 0xFFFFFFFFL).toString(16)
@@ -1088,7 +1161,21 @@ object Library {
     }
 
     suspend fun audioThumbnail(context: Context, item: MediaItem): Bitmap? {
-        if (!item.audio || PlaybackRules.isStreamUrl(item.uri)) return null
+        if (!item.audio) return null
+        if (PlaybackRules.isStreamUrl(item.uri) || item.uri.startsWith("resolve://") || item.uri.startsWith("yt_") || item.uri.startsWith("saavn_")) {
+            val meta = TrackArtworkStore.findMeta(context, item.uri, item.title)
+            val localCover = meta?.localCoverPath?.takeIf { it.isNotBlank() && java.io.File(it).exists() }
+            if (localCover != null) {
+                return runCatching {
+                    android.graphics.BitmapFactory.decodeFile(localCover)
+                }.getOrNull()
+            }
+            if (!meta?.thumbUrl.isNullOrBlank()) {
+                val cached = OnlineImageCache.get(meta!!.thumbUrl)
+                if (cached != null) return cached
+            }
+            return null
+        }
         val key = "a1|${item.uri}|${item.size}|${item.modified}"
         return thumbLocks[(key.hashCode() and Int.MAX_VALUE) % thumbLocks.size].withLock {
             thumbs.get(key)?.let { return@withLock it }
@@ -1156,7 +1243,19 @@ object Library {
                         }
                     }
 
-                    // 3. Save to disk cache if found
+                    // 3. Fallback to cached cover art via TrackArtworkStore (for Downloaded / Library tracks)
+                    if (found == null) {
+                        val meta = TrackArtworkStore.findMeta(context, item.uri, item.title)
+                        val localCover = meta?.localCoverPath?.takeIf { it.isNotBlank() && java.io.File(it).exists() }
+                        if (localCover != null) {
+                            found = runCatching {
+                                val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = 1 }
+                                android.graphics.BitmapFactory.decodeFile(localCover, opts)
+                            }.getOrNull()
+                        }
+                    }
+
+                    // 4. Save to disk cache if found
                     if (found != null) {
                         runCatching {
                             java.io.FileOutputStream(disk).use { out ->
@@ -1201,7 +1300,7 @@ object Library {
             var vlcTracks: List<IMedia.Track> = emptyList()
             var vlcEncodedBy = ""
 
-            if (vlc != null && !PlaybackRules.isStreamUrl(item.uri)) {
+            if (vlc != null && !PlaybackRules.isStreamUrl(item.uri) && !item.uri.startsWith("resolve://") && !item.uri.startsWith("yt_") && !item.uri.startsWith("saavn_")) {
                 var descriptor: android.os.ParcelFileDescriptor? = null
                 var media: Media? = null
                 var probePlayer: MediaPlayer? = null
