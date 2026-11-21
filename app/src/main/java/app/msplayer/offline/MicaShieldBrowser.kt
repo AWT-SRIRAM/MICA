@@ -147,6 +147,7 @@ fun MicaShieldBrowserScreen(
     var loadingProgress by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var detectedStream by remember { mutableStateOf<DetectedStream?>(null) }
+    var detectedSubtitleUrl by remember { mutableStateOf<String?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
 
     BackHandler {
@@ -311,6 +312,20 @@ fun MicaShieldBrowserScreen(
                                     }
                                 }
 
+                                // 3. Subtitle Sniffer (.vtt / .srt / timedtext / /captions/)
+                                val isSubtitleCandidate = path.endsWith(".vtt") ||
+                                    path.endsWith(".srt") ||
+                                    urlStr.contains(".vtt", ignoreCase = true) ||
+                                    urlStr.contains(".srt", ignoreCase = true) ||
+                                    urlStr.contains("timedtext", ignoreCase = true) ||
+                                    urlStr.contains("/captions/", ignoreCase = true)
+
+                                if (isSubtitleCandidate && !urlStr.contains(".js") && !urlStr.contains(".css") && !urlStr.contains(".png") && !urlStr.contains(".jpg")) {
+                                    post {
+                                        detectedSubtitleUrl = urlStr
+                                    }
+                                }
+
                                 return super.shouldInterceptRequest(view, request)
                             }
 
@@ -406,7 +421,8 @@ fun MicaShieldBrowserScreen(
                                 uri = stream.url,
                                 title = stream.title.ifBlank { pageTitle },
                                 audio = false,
-                                folder = "Stream Sniffer"
+                                folder = "Stream Sniffer",
+                                subtitleUri = detectedSubtitleUrl
                             )
                             onPlayInMica(mediaItem)
                         }

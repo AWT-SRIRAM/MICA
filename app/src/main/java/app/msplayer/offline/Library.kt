@@ -43,6 +43,7 @@ data class MediaItem(
     val thumbUri: String? = null,
     val sourceVideoId: String = "",
     val streamUserAgent: String = "",
+    val subtitleUri: String? = null,
 )
 
 object LibraryCache {

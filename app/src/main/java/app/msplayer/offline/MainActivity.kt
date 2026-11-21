@@ -201,6 +201,10 @@ class MainActivity : ComponentActivity() {
                 service = (binder as PlaybackService.LocalBinder).service
                 bound = true
                 service?.setAppInForeground(lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
+                if (intent.getBooleanExtra("auto_play", false)) {
+                    intent.removeExtra("auto_play")
+                    service?.play()
+                }
                 pendingUri?.let { uri ->
                     pendingUri = null
                     lifecycleScope.launch {
@@ -819,6 +823,10 @@ class MainActivity : ComponentActivity() {
         immersive(!item.audio)
     }
 
+    fun openBrowser(url: String, title: String) {
+        activeBrowserUrl = Pair(url, title)
+    }
+
     fun playStream(url: String, title: String, thumbUrl: String = "", isVideo: Boolean = true) {
         val item = MediaItem(
             uri = url,
@@ -1058,19 +1066,6 @@ fun App(activity: MainActivity) {
         else -> AppScreenMode.LIBRARY
     }
 
-    if (!activity.showPlayer && activity.activeBrowserUrl != null) {
-        val (bUrl, bTitle) = activity.activeBrowserUrl!!
-        MicaShieldBrowserScreen(
-            initialUrl = bUrl,
-            title = bTitle,
-            onBack = { activity.activeBrowserUrl = null },
-            onPlayInMica = { item ->
-                activity.startMedia(listOf(item), item)
-            }
-        )
-        return
-    }
-
     LaunchedEffect(palette.isLight, screenMode) {
         val controller = WindowInsetsControllerCompat(activity.window, activity.window.decorView)
         val useDarkIcons = palette.isLight && screenMode == AppScreenMode.LIBRARY
@@ -1083,35 +1078,103 @@ fun App(activity: MainActivity) {
         activity.updatePipParams()
     }
 
-    SharedTransitionLayout {
-        AnimatedContent(
-            targetState = screenMode,
-            transitionSpec = {
-                when {
-                    targetState != AppScreenMode.LIBRARY && initialState == AppScreenMode.LIBRARY ->
-                        (fadeIn(tween(150)) + scaleIn(initialScale = 0.96f, animationSpec = MotionSpec.MorphSpring)) togetherWith
-                            fadeOut(tween(130))
-                    targetState == AppScreenMode.LIBRARY && initialState != AppScreenMode.LIBRARY ->
-                        fadeIn(tween(150)) togetherWith
-                            (fadeOut(tween(130)) + scaleOut(targetScale = 0.96f))
-                    else ->
-                        fadeIn(tween(150)) togetherWith fadeOut(tween(130))
-                }
-            },
-            label = "appScreenTransition",
-        ) { mode ->
-            when (mode) {
-                AppScreenMode.VIDEO -> {
-                    val activeService = activity.service
-                    if (activeService != null && state.item != null) {
-                        PlayerScreen(activity, activeService, state)
+    Box(Modifier.fillMaxSize()) {
+        if (activity.activeBrowserUrl != null) {
+            val (bUrl, bTitle) = activity.activeBrowserUrl!!
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = if (activity.showPlayer) 0f else 1f
                     }
-                }
-                AppScreenMode.MUSIC -> {
-                    val activeService = activity.service
-                    if (activeService != null && state.item != null) {
-                        Box(Modifier.fillMaxSize()) {
-                            // Underlying library screen visible during drag-down (Spotify Parity)
+            ) {
+                MicaShieldBrowserScreen(
+                    initialUrl = bUrl,
+                    title = bTitle,
+                    onBack = { activity.activeBrowserUrl = null },
+                    onPlayInMica = { item ->
+                        activity.startMedia(listOf(item), item)
+                        if (!item.subtitleUri.isNullOrBlank()) {
+                            activity.loadStreamSubtitlesAsync(item.subtitleUri)
+                        }
+                    }
+                )
+            }
+        }
+
+        if (activity.activeBrowserUrl == null || activity.showPlayer) {
+            SharedTransitionLayout {
+                AnimatedContent(
+                    targetState = screenMode,
+                    transitionSpec = {
+                        when {
+                            targetState != AppScreenMode.LIBRARY && initialState == AppScreenMode.LIBRARY ->
+                                (fadeIn(tween(150)) + scaleIn(initialScale = 0.96f, animationSpec = MotionSpec.MorphSpring)) togetherWith
+                                    fadeOut(tween(130))
+                            targetState == AppScreenMode.LIBRARY && initialState != AppScreenMode.LIBRARY ->
+                                fadeIn(tween(150)) togetherWith
+                                    (fadeOut(tween(130)) + scaleOut(targetScale = 0.96f))
+                            else ->
+                                fadeIn(tween(150)) togetherWith fadeOut(tween(130))
+                        }
+                    },
+                    label = "appScreenTransition",
+                ) { mode ->
+                    when (mode) {
+                        AppScreenMode.VIDEO -> {
+                            val activeService = activity.service
+                            if (activeService != null && state.item != null) {
+                                PlayerScreen(activity, activeService, state)
+                            }
+                        }
+                        AppScreenMode.MUSIC -> {
+                            val activeService = activity.service
+                            if (activeService != null && state.item != null) {
+                                Box(Modifier.fillMaxSize()) {
+                                    // Underlying library screen visible during drag-down (Spotify Parity)
+                                    LibraryHome(
+                                        activity = activity,
+                                        service = service,
+                                        state = state,
+                                        tab = tab,
+                                        onTabChange = { tab = it },
+                                        folder = folder,
+                                        onFolderChange = { folder = it },
+                                        search = search,
+                                        onSearchChange = { search = it },
+                                        searching = searching,
+                                        onSearchingChange = { searching = it },
+                                        grid = grid,
+                                        onGridChange = { grid = it },
+                                        sort = sort,
+                                        onSortChange = { sort = it },
+                                        refresh = refresh,
+                                        onBumpRefresh = { refresh++ },
+                                        activePlaylist = activePlaylist,
+                                        onActivePlaylistChange = { activePlaylist = it },
+                                        streamDialog = streamDialog,
+                                        onStreamDialogChange = { streamDialog = it },
+                                        streamUrl = streamUrl,
+                                        onStreamUrlChange = { streamUrl = it },
+                                        recentStreams = recentStreams,
+                                        onRecentStreamsChange = { recentStreams = it },
+                                        sharedTransitionScope = this@SharedTransitionLayout,
+                                        animatedVisibilityScope = this@AnimatedContent,
+                                    )
+                                    // Dimming scrim behind sliding music player
+                                    Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.40f)))
+                                    // Full-screen Music Player sliding down
+                                    MusicPlayerScreen(
+                                        activity = activity,
+                                        service = activeService,
+                                        state = state,
+                                        sharedTransitionScope = this@SharedTransitionLayout,
+                                        animatedVisibilityScope = this@AnimatedContent,
+                                    )
+                                }
+                            }
+                        }
+                        AppScreenMode.LIBRARY -> {
                             LibraryHome(
                                 activity = activity,
                                 service = service,
@@ -1141,49 +1204,8 @@ fun App(activity: MainActivity) {
                                 sharedTransitionScope = this@SharedTransitionLayout,
                                 animatedVisibilityScope = this@AnimatedContent,
                             )
-                            // Dimming scrim behind sliding music player
-                            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.40f)))
-                            // Full-screen Music Player sliding down
-                            MusicPlayerScreen(
-                                activity = activity,
-                                service = activeService,
-                                state = state,
-                                sharedTransitionScope = this@SharedTransitionLayout,
-                                animatedVisibilityScope = this@AnimatedContent,
-                            )
                         }
                     }
-                }
-                AppScreenMode.LIBRARY -> {
-                    LibraryHome(
-                        activity = activity,
-                        service = service,
-                        state = state,
-                        tab = tab,
-                        onTabChange = { tab = it },
-                        folder = folder,
-                        onFolderChange = { folder = it },
-                        search = search,
-                        onSearchChange = { search = it },
-                        searching = searching,
-                        onSearchingChange = { searching = it },
-                        grid = grid,
-                        onGridChange = { grid = it },
-                        sort = sort,
-                        onSortChange = { sort = it },
-                        refresh = refresh,
-                        onBumpRefresh = { refresh++ },
-                        activePlaylist = activePlaylist,
-                        onActivePlaylistChange = { activePlaylist = it },
-                        streamDialog = streamDialog,
-                        onStreamDialogChange = { streamDialog = it },
-                        streamUrl = streamUrl,
-                        onStreamUrlChange = { streamUrl = it },
-                        recentStreams = recentStreams,
-                        onRecentStreamsChange = { recentStreams = it },
-                        sharedTransitionScope = this@SharedTransitionLayout,
-                        animatedVisibilityScope = this@AnimatedContent,
-                    )
                 }
             }
         }
@@ -2399,14 +2421,26 @@ private fun LibraryHome(
                     }
                 }
                 Column(Modifier.weight(1f).padding(horizontal = 10.dp)) {
-                    Text(
-                        state.item!!.title,
-                        color = palette.textPrimary,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            state.item!!.title,
+                            color = palette.textPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        if (state.playing) {
+                            Spacer(Modifier.width(6.dp))
+                            PlayingAudioWaveBars(
+                                modifier = Modifier.height(14.dp),
+                                barCount = 4,
+                                color = palette.accent,
+                                isAnimating = true,
+                            )
+                        }
+                    }
                     Text(
                         state.item!!.artist.ifBlank { "Mica One" },
                         color = palette.textSecondary,
@@ -3903,6 +3937,90 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                     }
                 }
             }
+            item(key = "web_streaming") {
+                SettingsGlassCard(palette) {
+                    Text("Web & Streaming", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.accent)
+                    Text("Custom streaming portals in Search Hub & refresh rate settings", fontSize = 12.sp, color = palette.textSecondary, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
+
+                    var animeUrl by remember { mutableStateOf(Store.prefs(activity).getString("mica_anime_url", "https://myanimes.in/") ?: "https://myanimes.in/") }
+                    var cartoonUrl by remember { mutableStateOf(Store.prefs(activity).getString("mica_tamilcartoons_url", "https://tamilcartoonsrare.in/") ?: "https://tamilcartoonsrare.in/") }
+
+                    OutlinedTextField(
+                        value = animeUrl,
+                        onValueChange = {
+                            animeUrl = it
+                            Store.prefs(activity).edit().putString("mica_anime_url", it.trim()).apply()
+                        },
+                        label = { Text("Anime Stream URL") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = palette.accent,
+                            unfocusedBorderColor = palette.cardBorder,
+                            focusedTextColor = palette.textPrimary,
+                            unfocusedTextColor = palette.textPrimary
+                        )
+                    )
+
+                    OutlinedTextField(
+                        value = cartoonUrl,
+                        onValueChange = {
+                            cartoonUrl = it
+                            Store.prefs(activity).edit().putString("mica_tamilcartoons_url", it.trim()).apply()
+                        },
+                        label = { Text("Tamil Cartoons URL") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = palette.accent,
+                            unfocusedBorderColor = palette.cardBorder,
+                            focusedTextColor = palette.textPrimary,
+                            unfocusedTextColor = palette.textPrimary
+                        )
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = {
+                                animeUrl = "https://myanimes.in/"
+                                cartoonUrl = "https://tamilcartoonsrare.in/"
+                                Store.prefs(activity).edit()
+                                    .putString("mica_anime_url", "https://myanimes.in/")
+                                    .putString("mica_tamilcartoons_url", "https://tamilcartoonsrare.in/")
+                                    .apply()
+                                epoch++
+                            }
+                        ) {
+                            Icon(Icons.Default.Refresh, null, tint = palette.accent, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Reset to Defaults", color = palette.accent)
+                        }
+                    }
+
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp), color = palette.divider)
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text("Adaptive Refresh Rate (LTPO / VRR)", color = palette.textPrimary, fontSize = 14.5.sp)
+                            Text("Dynamically match video framerate (24fps cinema / 60fps) to eliminate jitter and save power", color = palette.textSecondary, fontSize = 11.5.sp)
+                        }
+                        Switch(
+                            checked = Store.prefs(activity).getBoolean("ltpo_vrr_enabled", true),
+                            onCheckedChange = {
+                                Store.prefs(activity).edit().putBoolean("ltpo_vrr_enabled", it).apply()
+                                epoch++
+                                onSettingsChanged()
+                            },
+                        )
+                    }
+                }
+            }
             item(key = "additional") {
                 val addSrc = remember { MutableInteractionSource() }
                 SettingsGlassCard(palette) {
@@ -4696,14 +4814,20 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
     DisposableEffect(Unit) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             runCatching {
-                // Select maximum supported refresh rate (120Hz/144Hz) for ultra-fluid motion and zero stutter
+                val ltpoEnabled = Store.prefs(activity).getBoolean("ltpo_vrr_enabled", true)
                 val modes = activity.display?.supportedModes ?: emptyArray()
-                val targetMode = modes.maxByOrNull { it.refreshRate }
-                if (targetMode != null) {
-                    val lp = activity.window.attributes
-                    lp.preferredDisplayModeId = targetMode.modeId
-                    activity.window.attributes = lp
+                val lp = activity.window.attributes
+                if (ltpoEnabled) {
+                    lp.preferredRefreshRate = 0f
+                    lp.preferredDisplayModeId = 0
+                } else {
+                    val targetMode = modes.maxByOrNull { it.refreshRate }
+                    if (targetMode != null) {
+                        lp.preferredDisplayModeId = targetMode.modeId
+                        lp.preferredRefreshRate = targetMode.refreshRate
+                    }
                 }
+                activity.window.attributes = lp
             }
         }
         onDispose {
@@ -4711,6 +4835,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                 runCatching {
                     val lp = activity.window.attributes
                     lp.preferredDisplayModeId = 0
+                    lp.preferredRefreshRate = 0f
                     activity.window.attributes = lp
                 }
             }
@@ -4754,6 +4879,46 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                 delay(650L)
                 feedback = null
             }
+    }
+    var showQualityMenu by remember { mutableStateOf(false) }
+    var selectedStreamQuality by remember { mutableStateOf("Auto (Adaptive)") }
+
+    LaunchedEffect(service.finished, state.item?.audio) {
+        if (service.finished && state.item?.audio == false && activity.activeBrowserUrl != null) {
+            activity.exitPlayer()
+        }
+    }
+
+    fun stepSubtitleScale(up: Boolean) {
+        if (!service.areSubtitlesEnabled()) {
+            service.toggleSubtitlesMaster()
+        }
+        val currentScale = subtitleStyle.scale
+        val targetScale = if (up) {
+            when {
+                currentScale < 90 -> 100
+                currentScale in 90..115 -> 125
+                currentScale in 116..140 -> 150
+                currentScale in 141..165 -> 175
+                currentScale in 166..190 -> 200
+                else -> 75
+            }
+        } else {
+            when {
+                currentScale > 185 -> 175
+                currentScale in 160..185 -> 150
+                currentScale in 135..159 -> 125
+                currentScale in 110..134 -> 100
+                currentScale in 85..109 -> 75
+                else -> 200
+            }
+        }
+        val updatedStyle = subtitleStyle.copy(scale = targetScale)
+        updatedStyle.save(activity)
+        service.subtitleStyle(updatedStyle)
+        subtitleStyle = updatedStyle
+        touch()
+        hint(PlayerFeedback.SubtitleScale(targetScale))
     }
     val videoEnteredAt = remember { android.os.SystemClock.elapsedRealtime() }
     val hardwareVolume by service.volumeKeyEvent.collectAsState()
@@ -4993,30 +5158,25 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             ) {
                                 Icon(Icons.Default.MusicNote, "Audio tracks", tint = Color.White)
                             }
-                            IconButton(
-                                onClick = {
-                                    if (!service.areSubtitlesEnabled()) {
-                                        service.toggleSubtitlesMaster()
-                                    }
-                                    val currentScale = subtitleStyle.scale
-                                    val nextScale = when {
-                                        currentScale < 90 -> 100
-                                        currentScale in 90..115 -> 125
-                                        currentScale in 116..140 -> 150
-                                        currentScale in 141..165 -> 175
-                                        currentScale in 166..190 -> 200
-                                        else -> 75
-                                    }
-                                    val updatedStyle = subtitleStyle.copy(scale = nextScale)
-                                    updatedStyle.save(activity)
-                                    service.subtitleStyle(updatedStyle)
-                                    subtitleStyle = updatedStyle
-                                    touch()
-                                    hint(PlayerFeedback.SubtitleScale(nextScale))
-                                    activity.toast("Subtitle Size: $nextScale%")
-                                }
+                            val subTopSrc = remember { MutableInteractionSource() }
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .combinedClickable(
+                                        interactionSource = subTopSrc,
+                                        indication = ripple(bounded = false, radius = 20.dp),
+                                        onClick = { stepSubtitleScale(true) },
+                                        onLongClick = { stepSubtitleScale(false) }
+                                    ),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Icon(Icons.Default.Subtitles, "Subtitle Size (HUD)", tint = Color.White)
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_cc_flaticon),
+                                    contentDescription = "Subtitle Size (Tap: Larger, Hold: Smaller)",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                             val decoderTag = if (state.decoder == "Software") "SW" else if (state.decoder == "Hardware") "HW" else "HW+"
                             TextButton(
@@ -5251,47 +5411,26 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             }
                             Spacer(Modifier.weight(1f))
                             val subToggleSrc = remember { MutableInteractionSource() }
-                            val subActive = service.areSubtitlesEnabled()
-                            IconButton(
-                                onClick = {
-                                    if (!service.areSubtitlesEnabled()) {
-                                        service.toggleSubtitlesMaster()
-                                    }
-                                    val currentScale = subtitleStyle.scale
-                                    val nextScale = when {
-                                        currentScale < 90 -> 100
-                                        currentScale in 90..115 -> 125
-                                        currentScale in 116..140 -> 150
-                                        currentScale in 141..165 -> 175
-                                        currentScale in 166..190 -> 200
-                                        else -> 75
-                                    }
-                                    val updatedStyle = subtitleStyle.copy(scale = nextScale)
-                                    updatedStyle.save(activity)
-                                    service.subtitleStyle(updatedStyle)
-                                    subtitleStyle = updatedStyle
-                                    touch()
-                                    hint(PlayerFeedback.SubtitleScale(nextScale))
-                                    activity.toast("Subtitle Size: $nextScale%")
-                                },
-                                interactionSource = subToggleSrc,
-                                modifier = Modifier.iosLiquidPress(subToggleSrc, scaleDown = 0.88f),
-                            ) {
-                                Box(
-                                    Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(Accent.copy(alpha = 0.35f))
-                                        .border(0.8.dp, Accent, RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 7.dp, vertical = 4.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.ic_cc_flaticon),
-                                        contentDescription = "Subtitle Size",
-                                        tint = Accent,
-                                        modifier = Modifier.size(20.dp)
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(Accent.copy(alpha = 0.35f))
+                                    .border(0.8.dp, Accent, RoundedCornerShape(8.dp))
+                                    .combinedClickable(
+                                        interactionSource = subToggleSrc,
+                                        indication = ripple(),
+                                        onClick = { stepSubtitleScale(true) },
+                                        onLongClick = { stepSubtitleScale(false) }
                                     )
-                                }
+                                    .padding(horizontal = 7.dp, vertical = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_cc_flaticon),
+                                    contentDescription = "Subtitle Size (Tap: Larger, Hold: Smaller)",
+                                    tint = Accent,
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                             val isYtStream = state.item?.let {
                                 it.uri.contains("googlevideo.com") || it.uri.startsWith("yt_") || it.sourceVideoId.isNotBlank() || (it.folder == "Network Streams" && it.uri.contains("youtu"))
@@ -5301,7 +5440,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 IconButton(
                                     onClick = {
                                         touch()
-                                        activity.toast("Video Stream Quality: 1080p Full HD (Adaptive)")
+                                        showQualityMenu = true
                                     },
                                     interactionSource = hdSrc,
                                     modifier = Modifier.iosLiquidPress(hdSrc, scaleDown = 0.88f),
@@ -5721,6 +5860,53 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                 }
             }
         }
+    }
+    if (showQualityMenu && !activity.inPip) {
+        AlertDialog(
+            onDismissRequest = { showQualityMenu = false },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showQualityMenu = false }) {
+                    Text("Close", color = Cyan)
+                }
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(painterResource(R.drawable.ic_hd_flaticon), "HD", tint = Accent, modifier = Modifier.size(24.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("Stream Quality", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Auto (Adaptive)", "1080p Full HD", "720p HD", "480p SD", "360p Data Saver").forEach { q ->
+                        val isSel = selectedStreamQuality == q
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSel) Accent.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f))
+                                .clickable {
+                                    selectedStreamQuality = q
+                                    showQualityMenu = false
+                                    touch()
+                                    hint(PlayerFeedback.Message("Quality: $q"))
+                                }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(q, color = if (isSel) Accent else Color.White, fontSize = 14.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal)
+                            if (isSel) {
+                                Icon(Icons.Default.Check, null, tint = Accent, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+            },
+            containerColor = Color(0xFF141923),
+            shape = RoundedCornerShape(20.dp)
+        )
     } else if (menu != null && !activity.inPip)
         PlayerMenuDialog(
             onDismissRequest = {

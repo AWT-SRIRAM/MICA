@@ -822,7 +822,7 @@ fun MusicPlayerScreen(
 
             // 5. Playback Controls Row: Shuffle/Loop Toggle | Prev | BIG CIRCULAR WHITE PLAY/PAUSE (64dp) | Next | Sleep Timer
             Row(
-                Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -839,14 +839,22 @@ fun MusicPlayerScreen(
                     }
                 }) {
                     val isLoopActive = repeat != "off"
-                    val icon = if (isLoopActive) (if (repeat == "one") Icons.Default.RepeatOne else Icons.Default.Repeat) else Icons.Default.Shuffle
                     val tint = if (shuffle || isLoopActive) Color(0xFF1DB954) else Color.White.copy(alpha = 0.85f)
-                    Icon(
-                        icon,
-                        contentDescription = "Shuffle / Loop",
-                        tint = tint,
-                        modifier = Modifier.size(26.dp)
-                    )
+                    if (isLoopActive) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_loop_exchange),
+                            contentDescription = "Loop",
+                            tint = tint,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    } else {
+                        Icon(
+                            Icons.Default.Shuffle,
+                            contentDescription = "Shuffle",
+                            tint = tint,
+                            modifier = Modifier.size(26.dp)
+                        )
+                    }
                 }
 
                 // Skip Previous (Standard crisp default icon)
@@ -908,10 +916,10 @@ fun MusicPlayerScreen(
 
             Spacer(Modifier.height(14.dp))
 
-            // 6. Bottom Utilities Row: Cast | Lyrics | Jam | Download | Share (SpaceEvenly, Zero Overflow)
+            // 6. Bottom Utilities Row: Cast | Lyrics | Download | Share (Screenshot_20261119_132515.jpg)
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceAround,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Cast
@@ -939,32 +947,6 @@ fun MusicPlayerScreen(
                         tint = if (panel == "Lyrics" || hasLyrics) Accent else Color.White.copy(alpha = 0.85f),
                         modifier = Modifier.size(22.dp)
                     )
-                }
-
-                // Mica Jam
-                val jamState by JamSyncController.sessionState.collectAsState()
-                val isJamActive = jamState.role != JamRole.NONE && jamState.isConnected
-                IconButton(
-                    onClick = { panel = "Jam" },
-                    modifier = Modifier.size(38.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Rounded.SpeakerGroup,
-                            "Mica Jam — Listen Together",
-                            tint = if (isJamActive) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(22.dp)
-                        )
-                        if (isJamActive) {
-                            Box(
-                                Modifier
-                                    .size(6.dp)
-                                    .align(Alignment.TopEnd)
-                                    .clip(CircleShape)
-                                    .background(Color(0xFF10B981))
-                            )
-                        }
-                    }
                 }
 
                 // Download
@@ -1151,12 +1133,21 @@ fun MusicPlayerScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Icon(
-                                if (currentTrack) Icons.Rounded.GraphicEq else Icons.Rounded.MusicNote,
-                                contentDescription = null,
-                                tint = if (currentTrack) dynamicPrimary else Color.White.copy(alpha = 0.65f),
-                                modifier = Modifier.size(18.dp),
-                            )
+                            if (currentTrack) {
+                                PlayingAudioWaveBars(
+                                    modifier = Modifier.size(18.dp),
+                                    barCount = 4,
+                                    color = dynamicPrimary,
+                                    isAnimating = state.playing
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Rounded.MusicNote,
+                                    contentDescription = null,
+                                    tint = Color.White.copy(alpha = 0.65f),
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            }
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     track.title,
@@ -1256,7 +1247,7 @@ fun MusicPlayerScreen(
                     }
                 }
 
-                // 3. Audio Equalizer
+                // 2. Audio Equalizer
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -1275,50 +1266,6 @@ fun MusicPlayerScreen(
                     Column {
                         Text("Audio Equalizer & Sound Effects", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                         Text("10-band EQ, bass boost, spatializer presets", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
-                    }
-                }
-
-                // 4. Sleep Timer
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color.White.copy(alpha = 0.10f))
-                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
-                        .clickable {
-                            panel = null
-                            panel = "Sleep"
-                        }
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Rounded.NightlightRound, null, tint = Accent, modifier = Modifier.size(26.dp))
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text("Sleep Timer", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Set music stop timer with soft audio fade-out", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
-                    }
-                }
-
-                // 5. MICA JAM — Listen Together
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color.White.copy(alpha = 0.10f))
-                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
-                        .clickable {
-                            panel = null
-                            panel = "Jam"
-                        }
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(Icons.Rounded.Groups, null, tint = Accent, modifier = Modifier.size(26.dp))
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text("MICA JAM — Listen Together", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Sync music with friends in real-time over Hotspot / LAN", color = Color.White.copy(alpha = 0.70f), fontSize = 12.sp)
                     }
                 }
             }

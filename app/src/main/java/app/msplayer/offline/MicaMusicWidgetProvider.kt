@@ -96,7 +96,7 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             views.setTextViewText(R.id.widget_time_total, if (durMs > 0L) formatDuration(durMs) else "03:30")
 
             // Play/Pause icon state
-            val playPauseRes = if (isPlaying) R.drawable.ic_notif_pause else R.drawable.ic_widget_play
+            val playPauseRes = if (isPlaying) R.drawable.ic_widget_pause else R.drawable.ic_widget_play
             views.setImageViewResource(R.id.widget_btn_play_pause, playPauseRes)
 
             // Like / Favorite icon state
@@ -191,13 +191,15 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             else -> return
         }
 
-        if (PlaybackService.isServiceRunning) {
-            val serviceIntent = Intent(context, PlaybackService::class.java).apply {
-                this.action = serviceAction
-            }
-            context.startService(serviceIntent)
-        } else {
-            // When service isn't active yet, launch MainActivity to safely bring app to foreground
+        val serviceIntent = Intent(context, PlaybackService::class.java).apply {
+            this.action = serviceAction
+        }
+        val started = runCatching {
+            androidx.core.content.ContextCompat.startForegroundService(context, serviceIntent)
+            true
+        }.getOrDefault(false)
+
+        if (!started) {
             val openIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra("auto_play", true)

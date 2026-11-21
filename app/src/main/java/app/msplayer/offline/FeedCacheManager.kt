@@ -58,11 +58,11 @@ object FeedCacheManager {
 
     private suspend fun refreshOnlineFeeds(context: Context) = withContext(Dispatchers.IO) {
         try {
-            // Fetch top trending hits (Tamil + Global)
+            // Fetch top trending hits (Global + Personalized)
             val freshHits = runCatching {
-                val ytHits = YtMusicClient.searchSongs("Tamil Trending Songs 2026")
+                val ytHits = YtMusicClient.searchSongs("Top Trending Songs 2026")
                 if (ytHits.isNotEmpty()) ytHits else {
-                    JioSaavnClient.searchSongs("Tamil Hits").map { s ->
+                    JioSaavnClient.searchSongs("Top Trending Hits").map { s ->
                         YtTrack(
                             videoId = "saavn_${s.id}",
                             title = s.title,
@@ -224,7 +224,8 @@ object FeedCacheManager {
     )
 
     fun normalizeTrackTitle(title: String): String {
-        return title
+        val base = title.split('(', '[', '-').first().trim()
+        return base
             .replace(Regex("""(?i)\(from\s+["'].*?["']\)"""), "")
             .replace(Regex("""(?i)\(from\s+.*?\)"""), "")
             .replace(Regex("""(?i)\[from\s+.*?\]"""), "")

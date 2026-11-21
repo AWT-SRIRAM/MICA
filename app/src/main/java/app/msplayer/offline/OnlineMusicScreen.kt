@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.util.LruCache
 import android.widget.Toast
 import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -957,7 +958,7 @@ fun OnlineMusicScreen(
                         )
                         .clickable(interactionSource = chipSrc, indication = null) {
                             if (cat == "🎬 Videos") {
-                                activity.activeBrowserUrl = Pair("https://m.youtube.com", "YouTube")
+                                activity.openBrowser("https://m.youtube.com", "YouTube")
                             } else {
                                 activeCategory = cat
                                 searchQuery = ""
@@ -1889,11 +1890,11 @@ private fun OnlineTrackRow(
                     strokeWidth = 2.dp
                 )
             } else if (isPlaying) {
-                Icon(
-                    Icons.Rounded.GraphicEq,
-                    contentDescription = "Playing",
-                    tint = palette.onAccent,
-                    modifier = Modifier.size(20.dp)
+                PlayingAudioWaveBars(
+                    modifier = Modifier.size(18.dp),
+                    barCount = 4,
+                    color = palette.onAccent,
+                    isAnimating = true
                 )
             } else {
                 Icon(
@@ -1903,6 +1904,55 @@ private fun OnlineTrackRow(
                     modifier = Modifier.size(22.dp)
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun PlayingAudioWaveBars(
+    modifier: Modifier = Modifier,
+    barCount: Int = 4,
+    color: Color = Color.White,
+    isAnimating: Boolean = true
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "waveBars")
+    val animValues = List(barCount) { index ->
+        val duration = remember(index) { 550 + (index * 130) }
+        val minH = 0.25f
+        val maxH = when (index % 4) {
+            0 -> 0.95f
+            1 -> 0.60f
+            2 -> 1.00f
+            else -> 0.75f
+        }
+        if (isAnimating) {
+            infiniteTransition.animateFloat(
+                initialValue = minH,
+                targetValue = maxH,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = duration, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "bar_$index"
+            )
+        } else {
+            remember { mutableFloatStateOf(minH) }
+        }
+    }
+
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        animValues.forEach { anim ->
+            Box(
+                modifier = Modifier
+                    .width(2.5.dp)
+                    .fillMaxHeight(anim.value)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(color)
+            )
         }
     }
 }

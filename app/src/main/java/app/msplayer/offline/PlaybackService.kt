@@ -595,7 +595,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
             queueIndex.value = value
         }
     private var retried = false
-    private var finished = false
+    var finished = false
     private var decoderMode = "Auto"
     private var metadataDimensions: Pair<Int, Int>? = null
     private var resumeAnchor: Long? = null
@@ -1552,6 +1552,30 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         }
                     }
 
+                    // Fetch and load remote stream subtitles if provided
+                    if (!item.subtitleUri.isNullOrBlank()) {
+                        scope.launch(Dispatchers.IO) {
+                            runCatching {
+                                val conn = (java.net.URL(item.subtitleUri).openConnection() as java.net.HttpURLConnection).apply {
+                                    connectTimeout = 4000
+                                    readTimeout = 4000
+                                    setRequestProperty("User-Agent", "Mozilla/5.0")
+                                }
+                                if (conn.responseCode in 200..299) {
+                                    val body = conn.inputStream.bufferedReader().use { it.readText() }
+                                    val cues = PlaybackRules.parseSubtitleCues(body)
+                                    if (cues.isNotEmpty()) {
+                                        withContext(Dispatchers.Main) {
+                                            if (state.value.item?.uri == item.uri) {
+                                                loadAutoSubCues(cues, userTriggered = false)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Expose other external sidecar subtitle files in video folder and Subs/Subtitles subfolders
                     val parentDir = localFile?.parentFile
                     val isPrivateAppFilesDir = localFile?.absolutePath?.startsWith(filesDir.absolutePath) == true
@@ -1878,7 +1902,40 @@ class PlaybackService : MediaBrowserServiceCompat() {
         requestedPause = false
         pendingStyleRestore = pendingStyleRestore?.copy(playing = true)
         Library.videoPlaybackActive.value = state.value.item?.audio == false
-        if (state.value.item == null) return
+        if (state.value.item == null) {
+            if (queue.isNotEmpty()) {
+                openCurrent(null, autoPlay = true)
+                return
+            }
+            val hits = FeedCacheManager.cachedTopHits.value.ifEmpty { FeedCacheManager.defaultCuratedHits() }
+            val firstHit = hits.firstOrNull()
+            if (firstHit != null) {
+                scope.launch {
+                    val resolved = AudioStreamResolver.resolveBestStream(
+                        title = firstHit.title,
+                        artist = firstHit.artist,
+                        ytVideoId = firstHit.videoId,
+                        rawThumbUrl = firstHit.thumbUrl,
+                        directStreamUrl = firstHit.directStreamUrl
+                    )
+                    val sUrl = resolved?.streamUrl ?: firstHit.directStreamUrl
+                    if (sUrl.isNotBlank()) {
+                        val item = MediaItem(
+                            uri = sUrl,
+                            title = firstHit.title,
+                            artist = firstHit.artist,
+                            thumbUri = resolved?.hdThumbUrl?.ifBlank { firstHit.thumbUrl } ?: firstHit.thumbUrl,
+                            sourceVideoId = firstHit.videoId,
+                            streamUserAgent = resolved?.userAgent.orEmpty(),
+                            audio = true,
+                            folder = "Top Trending Hits"
+                        )
+                        open(listOf(item), item, autoPlay = true)
+                    }
+                }
+            }
+            return
+        }
         if (::dynamicIsland.isInitialized) dynamicIsland.resetDismiss()
         if (finished) {
             openCurrent(0, false)
@@ -2452,6 +2509,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
     }
 
     private fun resolvePrimaryHwTrack(): Int {
+        // If 9999 (AI or Stream Subtitles) is selected or autoSubCues are present, force software StrokeView rendering!
+        if (9999 in selectedSubTracks || autoSubCues.isNotEmpty()) return -1
+
         // Route plain-text SRT/VTT/AI tracks through StrokeView Canvas so fill, border,
         // and shadow stay pixel-locked with zero LibVLC FreeType drift. Keep bitmap
         // PGS/VobSub and authored ASS/SSA tracks on LibVLC native SPU.
@@ -2507,7 +2567,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     fun updateSubtitleTextAt(position: Long) {
         val primaryHwTrack = resolvePrimaryHwTrack()
-        if (primaryHwTrack >= 0) {
+        val hasSoftwareStreamCues = 9999 in selectedSubTracks || autoSubCues.isNotEmpty()
+        if (primaryHwTrack >= 0 && !hasSoftwareStreamCues) {
             // When LibVLC native SPU is rendering subtitles (e.g. online video streams or bitmap PGS/VobSub),
             // mute the Compose StrokeView text overlay so subtitles never render twice!
             if (activeSubtitleText.value != null || dualSubtitleLines.value.primary != null || dualSubtitleLines.value.secondary != null) {
