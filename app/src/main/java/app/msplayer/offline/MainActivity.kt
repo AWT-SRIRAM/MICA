@@ -1084,7 +1084,7 @@ fun App(activity: MainActivity) {
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Image(
-                    painter = painterResource(R.mipmap.ic_ms_logo),
+                    painter = painterResource(R.drawable.ic_mica_app_logo),
                     contentDescription = "MICA Logo",
                     modifier = Modifier
                         .size(72.dp)
