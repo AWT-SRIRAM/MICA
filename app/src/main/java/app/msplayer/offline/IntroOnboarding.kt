@@ -79,7 +79,7 @@ val introSlides = listOf(
         accentColor = Color(0xFFF59E0B),
     ),
     IntroSlide(
-        title = "Mica Jam — Listen Together",
+        title = "MICA Jam — Listen Together",
         subtitle = "Real-Time Music Sync",
         description = "Turn any room into a concert. Connect with friends over Wi-Fi or hotspot and stream in perfect sync without internet.",
         icon = Icons.Rounded.Group,

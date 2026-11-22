@@ -53,6 +53,7 @@ fun Modifier.videoGestures(
     subtitlesEnabled: Boolean = false,
     subtitleScale: Int = 100,
     onSubtitleScale: (Int) -> Unit = {},
+    subtitleResizeMode: Boolean = false,
 ): Modifier {
     val zoomNow by rememberUpdatedState(zoom)
     val aspectNow by rememberUpdatedState(aspect)
@@ -64,6 +65,7 @@ fun Modifier.videoGestures(
     val subtitlesEnabledNow by rememberUpdatedState(subtitlesEnabled)
     val subScaleNow by rememberUpdatedState(subtitleScale)
     val subScaleCallback by rememberUpdatedState(onSubtitleScale)
+    val subResizeModeNow by rememberUpdatedState(subtitleResizeMode)
     return pointerInput(locked, enabled, service) {
         if (locked || !enabled) return@pointerInput
         var lastTap = 0L
@@ -107,22 +109,28 @@ fun Modifier.videoGestures(
                     }
                     if (event.changes.any { it.isConsumed }) break
                     val pan = event.calculatePan(); x += pan.x; y += pan.y
+                    if (subResizeModeNow) {
+                        // Subtitle Resize Mode is ACTIVE:
+                        // Vertical dragging anywhere on screen scales subtitles.
+                        // Screen zoom, pan, volume, brightness, and seek are completely locked out.
+                        val deltaY = pan.y
+                        if (abs(deltaY) > 0.4f) {
+                            gestureSubScale = (gestureSubScale - deltaY * 0.35f).coerceIn(50f, 250f)
+                            val roundedScale = gestureSubScale.toInt()
+                            subScaleCallback(roundedScale)
+                            feedbackNow(PlayerFeedback.SubtitleScale(roundedScale))
+                        }
+                        continue
+                    }
                     if (event.changes.count { it.pressed } > 1) {
                         if (mode == 5) { service.endTemporarySpeed(); feedbackNow(null) }
                         mode = 4
                         val zoomFactor = event.calculateZoom()
                         val panDelta = event.calculatePan()
-                        if (subtitlesEnabledNow) {
-                            gestureSubScale = (gestureSubScale * zoomFactor).coerceIn(50f, 250f)
-                            val roundedScale = gestureSubScale.toInt()
-                            subScaleCallback(roundedScale)
-                            feedbackNow(PlayerFeedback.SubtitleScale(roundedScale))
-                        } else {
-                            gestureZoom = (gestureZoom * zoomFactor).coerceIn(1.0f, 3.0f)
-                            zoomCallback(gestureZoom)
-                            panCallback(panDelta.x, panDelta.y)
-                            feedbackNow(PlayerFeedback.Zoom((gestureZoom * 100).toInt()))
-                        }
+                        gestureZoom = (gestureZoom * zoomFactor).coerceIn(1.0f, 3.0f)
+                        zoomCallback(gestureZoom)
+                        panCallback(panDelta.x, panDelta.y)
+                        feedbackNow(PlayerFeedback.Zoom((gestureZoom * 100).toInt()))
                     } else {
                         if (mode == 0 && (abs(x) > viewConfiguration.touchSlop || abs(y) > viewConfiguration.touchSlop))
                             mode = if (abs(x) > abs(y)) 1 else if (down.position.x < size.width / 2) 2 else 3

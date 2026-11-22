@@ -1573,12 +1573,26 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
                     // Fetch and load remote stream subtitles if provided
                     if (!item.subtitleUri.isNullOrBlank()) {
+                        if (!item.audio) {
+                            runCatching {
+                                player.addSlave(org.videolan.libvlc.interfaces.IMedia.Slave.Type.Subtitle, item.subtitleUri, true)
+                            }
+                        }
                         scope.launch(Dispatchers.IO) {
                             runCatching {
                                 val conn = (java.net.URL(item.subtitleUri).openConnection() as java.net.HttpURLConnection).apply {
-                                    connectTimeout = 4000
-                                    readTimeout = 4000
-                                    setRequestProperty("User-Agent", "Mozilla/5.0")
+                                    connectTimeout = 5000
+                                    readTimeout = 5000
+                                    setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                                    runCatching {
+                                        val u = android.net.Uri.parse(item.subtitleUri)
+                                        setRequestProperty("Referer", "${u.scheme}://${u.host}/")
+                                        setRequestProperty("Origin", "${u.scheme}://${u.host}")
+                                    }
+                                    val cookie = runCatching { android.webkit.CookieManager.getInstance().getCookie(item.subtitleUri) }.getOrNull()
+                                    if (!cookie.isNullOrBlank()) {
+                                        setRequestProperty("Cookie", cookie)
+                                    }
                                 }
                                 if (conn.responseCode in 200..299) {
                                     val body = conn.inputStream.bufferedReader().use { it.readText() }
@@ -3602,17 +3616,20 @@ class PlaybackService : MediaBrowserServiceCompat() {
         nm.cancel(11)
         updateDynamicIsland()
         val curItem = state.value.item
-        MicaMusicWidgetProvider.updateWidget(
-            this,
-            state.value.playing,
-            curItem?.title ?: "MICA",
-            curItem?.artist ?: "The Universe of Entertainment",
-            sessionArtworkBitmap,
-            posMs = state.value.position,
-            durMs = state.value.duration,
-            isLiked = currentTrackLiked,
-            isRepeat = repeatMode.value != "off"
-        )
+        // The MICA Music Widget strictly updates for music/audio playback, NEVER for video streams!
+        if (curItem?.audio == true) {
+            MicaMusicWidgetProvider.updateWidget(
+                this,
+                state.value.playing,
+                curItem.title.takeIf { it.isNotBlank() } ?: "MICA",
+                curItem.artist.takeIf { it.isNotBlank() && !it.equals("Unknown", true) } ?: "The Universe of Entertainment",
+                sessionArtworkBitmap,
+                posMs = state.value.position,
+                durMs = state.value.duration,
+                isLiked = currentTrackLiked,
+                isRepeat = repeatMode.value != "off"
+            )
+        }
     }
 
     private fun updateSession(forceMetadata: Boolean = false, forceState: Boolean = false) {

@@ -199,7 +199,7 @@ object StreamResolver {
                 return@withContext ResolvedStream(
                     streamUrl = ytAudio.url,
                     title = resolvedTitle,
-                    isVideo = !isExplicitMusicLink && ytAudio.isVideo,
+                    isVideo = !isExplicitMusicLink,
                     userAgent = ytAudio.userAgent,
                     thumbUrl = resolvedThumb,
                     author = resolvedAuthor
@@ -219,7 +219,7 @@ object StreamResolver {
             return@withContext ResolvedStream(
                 streamUrl = ytStream?.url.orEmpty(),
                 title = resolvedTitle,
-                isVideo = !isExplicitMusicLink && (ytStream?.isVideo ?: true),
+                isVideo = !isExplicitMusicLink,
                 userAgent = ytStream?.userAgent.orEmpty(),
                 thumbUrl = resolvedThumb,
                 author = resolvedAuthor

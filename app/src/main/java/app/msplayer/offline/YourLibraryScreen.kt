@@ -333,7 +333,7 @@ fun YourLibraryScreen(
                                     Column {
                                         Icon(Icons.Rounded.SpeakerGroup, null, tint = Color.White, modifier = Modifier.size(24.dp))
                                         Spacer(Modifier.height(8.dp))
-                                        Text("Mica Jam", color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
+                                        Text("MICA Jam", color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.Bold)
                                         Text("Listen together worldwide", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp, maxLines = 1)
                                     }
                                 }

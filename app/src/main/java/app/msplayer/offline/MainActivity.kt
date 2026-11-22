@@ -2885,13 +2885,17 @@ private fun LibraryHome(
                         activity.toast("Unable to resolve playable stream")
                         return@launch
                     }
+                    val isYouTubeVideo = !cleanUrl.contains("music.youtube.com") && (
+                        cleanUrl.contains("youtube.com") || cleanUrl.contains("youtu.be") || resolved.streamUrl.contains("googlevideo.com")
+                    )
+                    val isVideo = resolved.isVideo || isYouTubeVideo
                     val item = MediaItem(
                         uri = resolved.streamUrl,
                         title = resolved.title,
                         artist = resolved.author,
                         folder = "Network Streams",
                         size = 0L,
-                        audio = !resolved.isVideo,
+                        audio = !isVideo,
                         thumbUri = resolved.thumbUrl.takeIf { it.isNotBlank() },
                         streamUserAgent = resolved.userAgent
                     )
@@ -4859,6 +4863,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
         }
     }
     var subtitleStyle by remember { mutableStateOf(SubtitleStyle.load(activity)) }
+    var subtitleResizeMode by remember { mutableStateOf(false) }
     var feedback by remember { mutableStateOf<PlayerFeedback?>(null) }
     var zoom by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
@@ -5144,6 +5149,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                     service.subtitleStyle(updated)
                                     service.updateSubtitleScale(newScale)
                                 },
+                                subtitleResizeMode = subtitleResizeMode,
                             )
                         }
                     )
@@ -5481,36 +5487,24 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(Accent.copy(alpha = 0.35f))
-                                    .border(0.8.dp, Accent, RoundedCornerShape(8.dp))
-                                    .pointerInput(Unit) {
-                                        detectVerticalDragGestures(
-                                            onVerticalDrag = { _, dragAmount ->
-                                                val delta = if (dragAmount < -2f) 5 else if (dragAmount > 2f) -5 else 0
-                                                if (delta != 0) {
-                                                    val newScale = (subtitleStyle.scale + delta).coerceIn(50, 250)
-                                                    if (newScale != subtitleStyle.scale) {
-                                                        val updated = subtitleStyle.copy(scale = newScale)
-                                                        updated.save(activity)
-                                                        service.subtitleStyle(updated)
-                                                        subtitleStyle = updated
-                                                        hint(PlayerFeedback.Message("Subtitle Size: ${newScale}%"))
-                                                        touch()
-                                                    }
-                                                }
-                                            }
-                                        )
-                                    }
+                                    .background(if (subtitleResizeMode) Accent else Color.White.copy(alpha = 0.12f))
+                                    .border(0.8.dp, if (subtitleResizeMode) Accent else Color.White.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
                                     .clickable(interactionSource = subToggleSrc, indication = ripple()) {
-                                        stepSubtitleScale(true)
+                                        subtitleResizeMode = !subtitleResizeMode
+                                        touch()
+                                        if (subtitleResizeMode) {
+                                            hint(PlayerFeedback.Message("Subtitle Resize: ON (Drag screen to scale)"))
+                                        } else {
+                                            hint(PlayerFeedback.Message("Subtitle Resize: OFF (Gestures locked)"))
+                                        }
                                     }
                                     .padding(horizontal = 7.dp, vertical = 4.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     painter = painterResource(R.drawable.ic_cc_flaticon),
-                                    contentDescription = "Subtitle Size (Tap: Cycle, Drag Up/Down: Scale)",
-                                    tint = Accent,
+                                    contentDescription = "Subtitle Resize Mode",
+                                    tint = if (subtitleResizeMode) Color.Black else Color.White,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -5942,70 +5936,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                 }
             }
         }
-    }
-    if (showQualityMenu && !activity.inPip) {
-        AlertDialog(
-            onDismissRequest = { showQualityMenu = false },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showQualityMenu = false }) {
-                    Text("Close", color = Cyan)
-                }
-            },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(painterResource(R.drawable.ic_hd_flaticon), "HD", tint = Accent, modifier = Modifier.size(24.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Text("Stream Quality", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Auto (Adaptive)", "1080p Full HD", "720p HD", "480p SD", "360p Data Saver").forEach { q ->
-                        val isSel = selectedStreamQuality == q
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (isSel) Accent.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f))
-                                .clickable {
-                                    selectedStreamQuality = q
-                                    showQualityMenu = false
-                                    touch()
-                                    hint(PlayerFeedback.Message("Quality: $q"))
-                                    val vTracks = service.availableVideoTracks()
-                                    val qClean = when {
-                                        q.contains("1080") -> "1080"
-                                        q.contains("720") -> "720"
-                                        q.contains("480") -> "480"
-                                        q.contains("360") -> "360"
-                                        else -> ""
-                                    }
-                                    if (qClean.isNotEmpty()) {
-                                        val match = vTracks.firstOrNull { it.second.contains(qClean, ignoreCase = true) }
-                                        if (match != null) {
-                                            service.setVideoTrack(match.first)
-                                        }
-                                    } else if (q.contains("Auto", ignoreCase = true)) {
-                                        service.setVideoTrack(-1)
-                                    }
-                                }
-                                .padding(horizontal = 14.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(q, color = if (isSel) Accent else Color.White, fontSize = 14.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal)
-                            if (isSel) {
-                                Icon(Icons.Default.Check, null, tint = Accent, modifier = Modifier.size(18.dp))
-                            }
-                        }
-                    }
-                }
-            },
-            containerColor = Color(0xFF141923),
-            shape = RoundedCornerShape(20.dp)
-        )
-    } else if (menu != null && !activity.inPip)
+    } else if (menu == "Options" && !activity.inPip) {
         PlayerMenuDialog(
             onDismissRequest = {
                 closePlayerMenu()
@@ -6099,6 +6030,71 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
             },
             confirmButton = { TextButton(onClick = { closePlayerMenu() }) { Text("Close", color = Accent) } },
         )
+    }
+
+    if (showQualityMenu && !activity.inPip) {
+        AlertDialog(
+            onDismissRequest = { showQualityMenu = false },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showQualityMenu = false }) {
+                    Text("Close", color = Cyan)
+                }
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(painterResource(R.drawable.ic_hd_flaticon), "HD", tint = Accent, modifier = Modifier.size(24.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("Stream Quality", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Auto (Adaptive)", "1080p Full HD", "720p HD", "480p SD", "360p Data Saver").forEach { q ->
+                        val isSel = selectedStreamQuality == q
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isSel) Accent.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f))
+                                .clickable {
+                                    selectedStreamQuality = q
+                                    showQualityMenu = false
+                                    touch()
+                                    hint(PlayerFeedback.Message("Quality: $q"))
+                                    val vTracks = service.availableVideoTracks()
+                                    val qClean = when {
+                                        q.contains("1080") -> "1080"
+                                        q.contains("720") -> "720"
+                                        q.contains("480") -> "480"
+                                        q.contains("360") -> "360"
+                                        else -> ""
+                                    }
+                                    if (qClean.isNotEmpty()) {
+                                        val match = vTracks.firstOrNull { it.second.contains(qClean, ignoreCase = true) }
+                                        if (match != null) {
+                                            service.setVideoTrack(match.first)
+                                        }
+                                    } else if (q.contains("Auto", ignoreCase = true)) {
+                                        service.setVideoTrack(-1)
+                                    }
+                                }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(q, color = if (isSel) Accent else Color.White, fontSize = 14.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal)
+                            if (isSel) {
+                                Icon(Icons.Default.Check, null, tint = Accent, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+            },
+            containerColor = Color(0xFF141923),
+            shape = RoundedCornerShape(20.dp)
+        )
+    }
         }
     }
 }

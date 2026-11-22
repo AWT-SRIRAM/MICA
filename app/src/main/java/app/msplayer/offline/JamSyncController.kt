@@ -366,7 +366,7 @@ object JamSyncController {
                             title = title,
                             artist = artist,
                             thumbUri = thumbUri.takeIf { it.isNotBlank() },
-                            folder = "Mica Jam Room",
+                            folder = "MICA Jam Room",
                             audio = true,
                         )
                         service.open(listOf(jamItem), jamItem, autoPlay = true)
@@ -408,7 +408,7 @@ object JamSyncController {
                         title = title,
                         artist = artist,
                         thumbUri = thumbUri.takeIf { it.isNotBlank() },
-                        folder = "Mica Jam Queue",
+                        folder = "MICA Jam Queue",
                         audio = true,
                     )
                     service.appendToQueue(listOf(item))
@@ -463,7 +463,7 @@ fun JamSyncDialog(
                 )
                 Spacer(modifier = Modifier.width(10.dp))
                 Text(
-                    text = "Mica Jam — Listen Together",
+                    text = "MICA Jam — Listen Together",
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White
