@@ -1464,7 +1464,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         return START_NOT_STICKY
     }
 
-    fun open(items: List<MediaItem>, selected: MediaItem, autoPlay: Boolean = true) {
+    fun open(items: List<MediaItem>, selected: MediaItem, autoPlay: Boolean = true, startPosition: Long? = null) {
         endTemporarySpeed()
         resetBoost()
         savePosition()
@@ -1482,7 +1482,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         index = queue.indexOfFirst { it.uri == selected.uri }.coerceAtLeast(0)
         retried = false
         decoderMode = Store.prefs(this).getString("decoder", "Auto") ?: "Auto"
-        openCurrent(null, autoPlay = autoPlay)
+        openCurrent(startPosition, autoPlay = autoPlay)
     }
 
     private fun openCurrent(position: Long?, restore: Boolean = true, keepSubtitleChoice: Boolean = false, autoPlay: Boolean = true) {
@@ -1827,7 +1827,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     } else Media(vlc, uri)
                     media.setHWDecoderEnabled(decoderMode != "Software", decoderMode == "Hardware")
                     if (PlaybackRules.isStreamUrl(activeItem.uri)) {
-                        media.addOption(":network-caching=6000")
+                        val cachingMs = if (activeItem.folder == "MICA Jam Room") 800 else 6000
+                        media.addOption(":network-caching=$cachingMs")
                         media.addOption(":clock-jitter=0")
                         media.addOption(":clock-synchro=0")
                         media.addOption(":http-reconnect=1")

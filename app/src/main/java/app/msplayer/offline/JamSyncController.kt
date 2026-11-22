@@ -2,6 +2,7 @@ package app.msplayer.offline
 
 import android.content.Context
 import android.net.wifi.WifiManager
+import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -116,6 +117,7 @@ object JamSyncController {
     private val clientWriters = CopyOnWriteArrayList<PrintWriter>()
     private var pendingInitialSyncPos: Long? = null
     private var currentService: PlaybackService? = null
+    private var lastSeekTimestamp = 0L
 
     fun getLocalIpAddress(): String {
         var fallbackIp: String? = null
@@ -432,14 +434,20 @@ object JamSyncController {
                                 audio = true,
                             )
                             pendingInitialSyncPos = compensatedPos
-                            service.open(listOf(jamItem), jamItem, autoPlay = isPlaying)
+                            lastSeekTimestamp = SystemClock.elapsedRealtime()
+                            service.open(listOf(jamItem), jamItem, autoPlay = isPlaying, startPosition = compensatedPos)
                         }
 
                         // High-precision sync engine: Catch-up on buffering, snap-seek on large drift, micro-rate steer on minor drift
                         val currentPos = service.player.time
+                        val now = SystemClock.elapsedRealtime()
+
                         if (pendingInitialSyncPos != null) {
                             if (service.player.isPlaying && currentPos > 0L) {
-                                service.player.time = compensatedPos
+                                if (abs(currentPos - compensatedPos) > 400L) {
+                                    service.player.time = compensatedPos
+                                    lastSeekTimestamp = now
+                                }
                                 pendingInitialSyncPos = null
                             }
                         } else {
@@ -448,21 +456,29 @@ object JamSyncController {
 
                             if (isPlaying) {
                                 when {
-                                    // Large drift (> 500ms): Snap seek to host position immediately
-                                    absDrift > 500L -> {
+                                    // Massive drift (> 1500ms): Snap seek with 3.5s cooldown so it never causes repeated rebuffering loops
+                                    absDrift > 1500L && (now - lastSeekTimestamp > 3500L) -> {
                                         service.player.time = compensatedPos
+                                        lastSeekTimestamp = now
                                         if (service.player.rate != 1.0f) {
                                             service.player.rate = 1.0f
                                         }
                                     }
-                                    // Minor drift (60ms to 500ms): Micro-rate steering (tempo adjustment with no audio pops/stutter)
-                                    absDrift > 60L -> {
-                                        val steerRate = if (drift > 0) 1.04f else 0.96f
+                                    // Continuous smooth micro-rate steering (No reloading, no rebuffering, zero latency buildup)
+                                    absDrift > 40L -> {
+                                        val steerRate = when {
+                                            drift > 600L -> 1.08f // Catch up 80ms/s smoothly
+                                            drift > 150L -> 1.04f // Catch up 40ms/s
+                                            drift > 40L -> 1.02f  // Fine alignment
+                                            drift < -600L -> 0.92f // Slow down smoothly
+                                            drift < -150L -> 0.96f
+                                            else -> 0.98f
+                                        }
                                         if (service.player.rate != steerRate) {
                                             service.player.rate = steerRate
                                         }
                                     }
-                                    // In tight sync (< 60ms): Keep normal playback speed
+                                    // In tight lock (< 40ms): Exact normal playback
                                     else -> {
                                         if (service.player.rate != 1.0f) {
                                             service.player.rate = 1.0f
@@ -536,6 +552,7 @@ object JamSyncController {
         clientJob = null
 
         pendingInitialSyncPos = null
+        lastSeekTimestamp = 0L
         runCatching { currentService?.player?.rate = 1.0f }
         currentService = null
 
