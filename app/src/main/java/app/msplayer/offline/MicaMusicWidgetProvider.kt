@@ -45,7 +45,17 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             lastIsPlaying = isPlaying
             lastTitle = title.ifBlank { "MICA" }
             lastArtist = artist.ifBlank { "The Universe of Entertainment" }
-            if (!trackUri.isNullOrBlank()) lastTrackUri = trackUri
+            val prefs = context.getSharedPreferences("mica_widget_prefs", Context.MODE_PRIVATE)
+            if (!trackUri.isNullOrBlank()) {
+                lastTrackUri = trackUri
+                prefs.edit().putString("widget_last_uri", trackUri).apply()
+            } else if (lastTrackUri == null) {
+                lastTrackUri = prefs.getString("widget_last_uri", null)
+            }
+            prefs.edit()
+                .putString("widget_last_title", lastTitle)
+                .putString("widget_last_artist", lastArtist)
+                .apply()
             lastArt = artBitmap
             lastPosMs = posMs
             lastDurMs = durMs
@@ -118,11 +128,20 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             }
 
             // Tap widget -> Open MICA App directly to Music / Audio tab and play current song
+            val prefs = context.getSharedPreferences("mica_widget_prefs", Context.MODE_PRIVATE)
+            val effectiveTrackUri = lastTrackUri ?: prefs.getString("widget_last_uri", null)
+            val effectiveTitle = title.ifBlank { prefs.getString("widget_last_title", "MICA") ?: "MICA" }
+            val effectiveArtist = artist.ifBlank { prefs.getString("widget_last_artist", "The Universe of Entertainment") ?: "The Universe of Entertainment" }
+
             val openAppIntent = Intent(context, MainActivity::class.java).apply {
+                action = "app.mica.ACTION_WIDGET_PLAY_TRACK"
+                data = android.net.Uri.parse("mica://widget/play?t=${System.currentTimeMillis()}")
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra("target_tab", "Audio")
                 putExtra("show_player", true)
-                putExtra("widget_play_uri", lastTrackUri)
+                putExtra("widget_play_uri", effectiveTrackUri)
+                putExtra("widget_track_title", effectiveTitle)
+                putExtra("widget_track_artist", effectiveArtist)
             }
             val openAppPi = PendingIntent.getActivity(
                 context,

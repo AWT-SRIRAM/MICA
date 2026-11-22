@@ -2246,6 +2246,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 subtitleCuesRevision.value++
                 if (matchedReq.selectExtra) {
                     userModifiedSubtitles = true
+                    selectedSubTracks.clear()
                     selectedSubTracks.add(id)
                     autoSelectedExternal = true
                 }
@@ -2540,11 +2541,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
             if (id in selectedSubTracks) {
                 selectedSubTracks.remove(id)
             } else {
-                if (selectedSubTracks.size >= 2) {
-                    val first = selectedSubTracks.first()
-                    selectedSubTracks.clear()
-                    selectedSubTracks.add(first)
-                }
+                selectedSubTracks.clear()
                 selectedSubTracks.add(id)
             }
         }
@@ -2667,12 +2664,15 @@ class PlaybackService : MediaBrowserServiceCompat() {
             }
         }
 
+        val cleanExtraLines = extraLines.filter { line ->
+            primaryLines.none { it.trim().equals(line.trim(), ignoreCase = true) }
+        }
         val primaryStr = if (primaryLines.isEmpty()) null else primaryLines.joinToString("\n")
-        val secondaryStr = if (extraLines.isEmpty()) null else extraLines.joinToString("\n")
+        val secondaryStr = if (cleanExtraLines.isEmpty()) null else cleanExtraLines.joinToString("\n")
         if (dualSubtitleLines.value.primary != primaryStr || dualSubtitleLines.value.secondary != secondaryStr) {
             dualSubtitleLines.value = SubtitleOverlayLines(primary = primaryStr, secondary = secondaryStr)
         }
-        val allLines = primaryLines + extraLines
+        val allLines = primaryLines + cleanExtraLines
         val combined = if (allLines.isEmpty()) null else allLines.joinToString("\n")
         if (activeSubtitleText.value != combined) {
             activeSubtitleText.value = combined
@@ -2731,16 +2731,13 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     fun loadAutoSubCues(cues: List<PlaybackRules.SubtitleCue>, userTriggered: Boolean = true) {
         autoSubCues = cues.sortedBy { it.startMs }
+        selectedSubTracks.clear()
+        selectedSubTracks.add(9999)
         if (userTriggered) {
             userModifiedSubtitles = true
-            selectedSubTracks.add(9999)
-        } else if (!userModifiedSubtitles || 9999 in selectedSubTracks) {
-            selectedSubTracks.add(9999)
         }
         refreshTracks(false)
-        if (9999 in selectedSubTracks) {
-            syncSubtitleTracks("AI Subtitles", persistName = false)
-        }
+        syncSubtitleTracks("AI Subtitles", persistName = false)
     }
 
     private fun resolveLocalFile(uri: Uri, item: MediaItem? = null): java.io.File? {

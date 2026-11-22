@@ -180,7 +180,8 @@ class StrokeView(context: Context) : View(context) {
 
     fun setDualSubtitleText(primaryText: CharSequence?, secondaryText: CharSequence?) {
         val nextPrimary = normalizeText(primaryText)
-        val nextSecondary = normalizeText(secondaryText)
+        val rawSecondary = normalizeText(secondaryText)
+        val nextSecondary = if (rawSecondary.toString().trim().equals(nextPrimary.toString().trim(), ignoreCase = true)) "" else rawSecondary
 
         if (nextPrimary.isEmpty() && nextSecondary.isEmpty()) {
             if (visibility != GONE) visibility = GONE

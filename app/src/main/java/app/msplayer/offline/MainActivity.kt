@@ -537,25 +537,43 @@ class MainActivity : ComponentActivity() {
 
     private fun handleWidgetPlayback(incomingIntent: Intent?) {
         val widgetPlayUri = incomingIntent?.getStringExtra("widget_play_uri")
-        if (!widgetPlayUri.isNullOrBlank()) {
+        val isWidgetAction = incomingIntent?.action == "app.mica.ACTION_WIDGET_PLAY_TRACK" ||
+                !widgetPlayUri.isNullOrBlank() ||
+                (incomingIntent?.getStringExtra("target_tab") == "Audio" && incomingIntent?.getBooleanExtra("show_player", false) == true)
+
+        if (isWidgetAction) {
             showPlayer = true
             pendingTargetTab = "Audio"
             targetTabTrigger++
+            val prefs = getSharedPreferences("mica_widget_prefs", Context.MODE_PRIVATE)
+            val effectiveUri = widgetPlayUri ?: prefs.getString("widget_last_uri", null)
+            val effectiveTitle = incomingIntent?.getStringExtra("widget_track_title")
+                ?: prefs.getString("widget_last_title", "Music") ?: "Music"
+            val effectiveArtist = incomingIntent?.getStringExtra("widget_track_artist")
+                ?: prefs.getString("widget_last_artist", "") ?: ""
+
             lifecycleScope.launch {
                 var attempts = 0
-                while (service == null && attempts++ < 25) delay(40L)
+                while (service == null && attempts++ < 30) delay(40L)
                 val s = service ?: return@launch
                 val currentItem = s.state.value.item
-                if (currentItem?.uri == widgetPlayUri) {
-                    if (!s.state.value.playing) s.play()
-                } else {
-                    val track = audios.firstOrNull { it.uri == widgetPlayUri }
-                    if (track != null) {
-                        s.open(listOf(track), track)
-                    } else if (currentItem != null && currentItem.audio) {
+                if (!effectiveUri.isNullOrBlank()) {
+                    if (currentItem?.uri == effectiveUri) {
                         if (!s.state.value.playing) s.play()
+                    } else {
+                        val track = audios.firstOrNull { it.uri == effectiveUri }
+                            ?: MediaItem(uri = effectiveUri, title = effectiveTitle, artist = effectiveArtist, audio = true)
+                        s.open(if (audios.isNotEmpty()) audios else listOf(track), track)
+                        s.play()
                     }
+                } else if (currentItem != null && currentItem.audio) {
+                    if (!s.state.value.playing) s.play()
+                } else if (audios.isNotEmpty()) {
+                    val first = audios.first()
+                    s.open(audios, first)
+                    s.play()
                 }
+                showPlayer = true
             }
         }
     }
@@ -5670,6 +5688,31 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 Icon(Icons.Default.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(34.dp))
                             }
                             Spacer(Modifier.weight(1f))
+                            val ccSrc = remember { MutableInteractionSource() }
+                            // CC Subtitle Size Button (Bottom Bar Placement)
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .border(1.2.dp, Color.White.copy(alpha = 0.85f), RoundedCornerShape(8.dp))
+                                    .clickable(
+                                        interactionSource = ccSrc,
+                                        indication = ripple(bounded = true, color = Color.White)
+                                    ) {
+                                        touch()
+                                        stepSubtitleScale(up = true)
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "CC",
+                                    color = Color.White,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = 0.5.sp
+                                )
+                            }
+                            Spacer(Modifier.width(16.dp))
                             IconButton(
                                 onClick = {
                                     val nextAspect = aspectOption.next()
