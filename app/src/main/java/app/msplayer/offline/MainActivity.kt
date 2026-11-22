@@ -201,6 +201,10 @@ class MainActivity : ComponentActivity() {
                 service = (binder as PlaybackService.LocalBinder).service
                 bound = true
                 service?.setAppInForeground(lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED))
+                pendingMediaStart?.let { (pItems, pItem) ->
+                    pendingMediaStart = null
+                    startMedia(pItems, pItem)
+                }
                 if (intent.getBooleanExtra("auto_play", false)) {
                     intent.removeExtra("auto_play")
                     service?.play()
@@ -235,6 +239,9 @@ class MainActivity : ComponentActivity() {
         }
 
     var pipSourceRect by mutableStateOf<android.graphics.Rect?>(null)
+    var pendingTargetTab by mutableStateOf<String?>(null)
+    var targetTabTrigger by mutableIntStateOf(0)
+    private var pendingMediaStart: Pair<List<MediaItem>, MediaItem>? = null
     private var closing = false
     private var manualOrientationFor: String? = null
     val diagnosticDocument = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
@@ -518,6 +525,10 @@ class MainActivity : ComponentActivity() {
         showPlayer =
             savedInstanceState?.getBoolean("player") ?: intent.getBooleanExtra("show_player", false)
         showIntroScreen = !IntroManager.isIntroCompleted(this)
+        intent.getStringExtra("target_tab")?.let {
+            pendingTargetTab = it
+            targetTabTrigger++
+        }
         extractIncomingMedia(intent)
         startService(Intent(this, PlaybackService::class.java))
         bindService(Intent(this, PlaybackService::class.java), connection, BIND_AUTO_CREATE)
@@ -646,6 +657,10 @@ class MainActivity : ComponentActivity() {
             immersive(false)
         } else if (intent.getBooleanExtra("show_player", false)) {
             showPlayer = true
+        }
+        intent.getStringExtra("target_tab")?.let {
+            pendingTargetTab = it
+            targetTabTrigger++
         }
     }
 
@@ -814,7 +829,16 @@ class MainActivity : ComponentActivity() {
     }
 
     fun startMedia(items: List<MediaItem>, item: MediaItem) {
-        val svc = service ?: return toast("Player is initializing. Try again in a moment.")
+        val svc = service
+        if (svc == null) {
+            pendingMediaStart = Pair(items, item)
+            runCatching {
+                startService(Intent(this, PlaybackService::class.java))
+                bindService(Intent(this, PlaybackService::class.java), connection, BIND_AUTO_CREATE)
+            }
+            toast("Connecting to player engine...")
+            return
+        }
         externalQueue = items
         playerControlsVisible = true
         manualOrientationFor = null
@@ -843,9 +867,20 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching {
                 val conn = (java.net.URL(subtitleUrl).openConnection() as java.net.HttpURLConnection).apply {
-                    connectTimeout = 4000
-                    readTimeout = 4000
-                    setRequestProperty("User-Agent", "Mozilla/5.0")
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                    setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    activeBrowserUrl?.first?.let { referer ->
+                        setRequestProperty("Referer", referer)
+                        runCatching {
+                            val uri = Uri.parse(referer)
+                            setRequestProperty("Origin", "${uri.scheme}://${uri.host}")
+                        }
+                    }
+                    val cookie = runCatching { android.webkit.CookieManager.getInstance().getCookie(subtitleUrl) }.getOrNull()
+                    if (!cookie.isNullOrBlank()) {
+                        setRequestProperty("Cookie", cookie)
+                    }
                 }
                 if (conn.responseCode in 200..299) {
                     val body = conn.inputStream.bufferedReader().use { it.readText() }
@@ -1042,6 +1077,13 @@ fun App(activity: MainActivity) {
     var streamDialog by remember { mutableStateOf(false) }
     var streamUrl by remember { mutableStateOf("") }
     var recentStreams by remember { mutableStateOf(Store.recentStreams(activity)) }
+
+    LaunchedEffect(activity.targetTabTrigger) {
+        activity.pendingTargetTab?.let {
+            tab = it
+            activity.pendingTargetTab = null
+        }
+    }
 
     LaunchedEffect(activity.pendingStreamPrompt) {
         val incoming = activity.pendingStreamPrompt
@@ -2390,19 +2432,29 @@ private fun LibraryHome(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // Rounded Square Thumbnail (NO SPINNING DISC - Matching Screenshot_20261117_054325.jpg)
-                var localThumb by remember(state.item?.uri) { mutableStateOf<android.graphics.Bitmap?>(null) }
+                var localThumb by remember(state.item?.uri, state.item?.thumbUri) { mutableStateOf<android.graphics.Bitmap?>(null) }
                 val context = LocalContext.current
-                LaunchedEffect(state.item?.uri) {
+                LaunchedEffect(state.item?.uri, state.item?.thumbUri) {
                     val itm = state.item ?: return@LaunchedEffect
-                    if (itm.thumbUri.isNullOrBlank()) {
-                        withContext(Dispatchers.IO) {
-                            val bmp = Library.thumbnail(context, itm)
-                                ?: TrackArtworkStore.findMeta(context, itm.uri, itm.title)?.let { meta ->
-                                    if (meta.localCoverPath.isNotBlank()) android.graphics.BitmapFactory.decodeFile(meta.localCoverPath)
-                                    else null
-                                }
-                            withContext(Dispatchers.Main) { localThumb = bmp }
-                        }
+                    withContext(Dispatchers.IO) {
+                        val directBmp = if (!itm.thumbUri.isNullOrBlank()) {
+                            val path = when {
+                                itm.thumbUri!!.startsWith("file://") -> itm.thumbUri!!.removePrefix("file://")
+                                itm.thumbUri!!.startsWith("/") -> itm.thumbUri
+                                else -> null
+                            }
+                            path?.let { java.io.File(it) }?.takeIf { it.exists() && it.canRead() }?.let {
+                                android.graphics.BitmapFactory.decodeFile(it.absolutePath)
+                            }
+                        } else null
+
+                        val bmp = directBmp
+                            ?: Library.thumbnail(context, itm)
+                            ?: TrackArtworkStore.findMeta(context, itm.uri, itm.title)?.let { meta ->
+                                if (meta.localCoverPath.isNotBlank()) android.graphics.BitmapFactory.decodeFile(meta.localCoverPath)
+                                else null
+                            }
+                        withContext(Dispatchers.Main) { localThumb = bmp }
                     }
                 }
                 val remoteBmp = rememberRemoteBitmap(state.item?.thumbUri)
@@ -3939,64 +3991,86 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
             }
             item(key = "web_streaming") {
                 SettingsGlassCard(palette) {
-                    Text("Web & Streaming", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.accent)
-                    Text("Custom streaming portals in Search Hub & refresh rate settings", fontSize = 12.sp, color = palette.textSecondary, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
-
-                    var animeUrl by remember { mutableStateOf(Store.prefs(activity).getString("mica_anime_url", "https://myanimes.in/") ?: "https://myanimes.in/") }
-                    var cartoonUrl by remember { mutableStateOf(Store.prefs(activity).getString("mica_tamilcartoons_url", "https://tamilcartoonsrare.in/") ?: "https://tamilcartoonsrare.in/") }
-
-                    OutlinedTextField(
-                        value = animeUrl,
-                        onValueChange = {
-                            animeUrl = it
-                            Store.prefs(activity).edit().putString("mica_anime_url", it.trim()).apply()
-                        },
-                        label = { Text("Anime Stream URL") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = palette.accent,
-                            unfocusedBorderColor = palette.cardBorder,
-                            focusedTextColor = palette.textPrimary,
-                            unfocusedTextColor = palette.textPrimary
-                        )
-                    )
-
-                    OutlinedTextField(
-                        value = cartoonUrl,
-                        onValueChange = {
-                            cartoonUrl = it
-                            Store.prefs(activity).edit().putString("mica_tamilcartoons_url", it.trim()).apply()
-                        },
-                        label = { Text("Tamil Cartoons URL") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = palette.accent,
-                            unfocusedBorderColor = palette.cardBorder,
-                            focusedTextColor = palette.textPrimary,
-                            unfocusedTextColor = palette.textPrimary
-                        )
-                    )
-
+                    var expandedWebStreaming by remember { mutableStateOf(false) }
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                        horizontalArrangement = Arrangement.End
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { expandedWebStreaming = !expandedWebStreaming },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        TextButton(
-                            onClick = {
-                                animeUrl = "https://myanimes.in/"
-                                cartoonUrl = "https://tamilcartoonsrare.in/"
-                                Store.prefs(activity).edit()
-                                    .putString("mica_anime_url", "https://myanimes.in/")
-                                    .putString("mica_tamilcartoons_url", "https://tamilcartoonsrare.in/")
-                                    .apply()
-                                epoch++
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Web & Streaming", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.accent)
+                            Text("Custom streaming portals in Search Hub (tap to expand)", fontSize = 12.sp, color = palette.textSecondary, modifier = Modifier.padding(top = 2.dp))
+                        }
+                        IconButton(onClick = { expandedWebStreaming = !expandedWebStreaming }) {
+                            Icon(
+                                if (expandedWebStreaming) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                contentDescription = if (expandedWebStreaming) "Collapse" else "Expand",
+                                tint = palette.accent
+                            )
+                        }
+                    }
+
+                    AnimatedVisibility(visible = expandedWebStreaming) {
+                        Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                            var animeUrl by remember { mutableStateOf(Store.prefs(activity).getString("mica_anime_url", "https://myanimes.in/") ?: "https://myanimes.in/") }
+                            var cartoonUrl by remember { mutableStateOf(Store.prefs(activity).getString("mica_tamilcartoons_url", "https://tamilcartoonsrare.in/") ?: "https://tamilcartoonsrare.in/") }
+
+                            OutlinedTextField(
+                                value = animeUrl,
+                                onValueChange = {
+                                    animeUrl = it
+                                    Store.prefs(activity).edit().putString("mica_anime_url", it.trim()).apply()
+                                },
+                                label = { Text("Anime Stream URL") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = palette.accent,
+                                    unfocusedBorderColor = palette.cardBorder,
+                                    focusedTextColor = palette.textPrimary,
+                                    unfocusedTextColor = palette.textPrimary
+                                )
+                            )
+
+                            OutlinedTextField(
+                                value = cartoonUrl,
+                                onValueChange = {
+                                    cartoonUrl = it
+                                    Store.prefs(activity).edit().putString("mica_tamilcartoons_url", it.trim()).apply()
+                                },
+                                label = { Text("Tamil Cartoons URL") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = palette.accent,
+                                    unfocusedBorderColor = palette.cardBorder,
+                                    focusedTextColor = palette.textPrimary,
+                                    unfocusedTextColor = palette.textPrimary
+                                )
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        animeUrl = "https://myanimes.in/"
+                                        cartoonUrl = "https://tamilcartoonsrare.in/"
+                                        Store.prefs(activity).edit()
+                                            .putString("mica_anime_url", "https://myanimes.in/")
+                                            .putString("mica_tamilcartoons_url", "https://tamilcartoonsrare.in/")
+                                            .apply()
+                                        epoch++
+                                    }
+                                ) {
+                                    Icon(Icons.Default.Refresh, null, tint = palette.accent, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Reset to Defaults", color = palette.accent)
+                                }
                             }
-                        ) {
-                            Icon(Icons.Default.Refresh, null, tint = palette.accent, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Reset to Defaults", color = palette.accent)
                         }
                     }
 
@@ -4917,6 +4991,7 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
         updatedStyle.save(activity)
         service.subtitleStyle(updatedStyle)
         subtitleStyle = updatedStyle
+        hint(PlayerFeedback.Message("Subtitle Size: ${targetScale}%"))
         touch()
         hint(PlayerFeedback.SubtitleScale(targetScale))
     }
@@ -5158,24 +5233,16 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             ) {
                                 Icon(Icons.Default.MusicNote, "Audio tracks", tint = Color.White)
                             }
-                            val subTopSrc = remember { MutableInteractionSource() }
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(CircleShape)
-                                    .combinedClickable(
-                                        interactionSource = subTopSrc,
-                                        indication = ripple(bounded = false, radius = 20.dp),
-                                        onClick = { stepSubtitleScale(true) },
-                                        onLongClick = { stepSubtitleScale(false) }
-                                    ),
-                                contentAlignment = Alignment.Center
+                            IconButton(
+                                onClick = {
+                                    service.refreshTracks()
+                                    openPlayerMenu("Subtitles")
+                                }
                             ) {
                                 Icon(
-                                    painter = painterResource(R.drawable.ic_cc_flaticon),
-                                    contentDescription = "Subtitle Size (Tap: Larger, Hold: Smaller)",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(20.dp)
+                                    Icons.Default.ClosedCaption,
+                                    contentDescription = "Subtitles",
+                                    tint = if (state.subtitleTrack != null) Accent else Color.White
                                 )
                             }
                             val decoderTag = if (state.decoder == "Software") "SW" else if (state.decoder == "Hardware") "HW" else "HW+"
@@ -5416,18 +5483,33 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                     .clip(RoundedCornerShape(8.dp))
                                     .background(Accent.copy(alpha = 0.35f))
                                     .border(0.8.dp, Accent, RoundedCornerShape(8.dp))
-                                    .combinedClickable(
-                                        interactionSource = subToggleSrc,
-                                        indication = ripple(),
-                                        onClick = { stepSubtitleScale(true) },
-                                        onLongClick = { stepSubtitleScale(false) }
-                                    )
+                                    .pointerInput(Unit) {
+                                        detectVerticalDragGestures(
+                                            onVerticalDrag = { _, dragAmount ->
+                                                val delta = if (dragAmount < -2f) 5 else if (dragAmount > 2f) -5 else 0
+                                                if (delta != 0) {
+                                                    val newScale = (subtitleStyle.scale + delta).coerceIn(50, 250)
+                                                    if (newScale != subtitleStyle.scale) {
+                                                        val updated = subtitleStyle.copy(scale = newScale)
+                                                        updated.save(activity)
+                                                        service.subtitleStyle(updated)
+                                                        subtitleStyle = updated
+                                                        hint(PlayerFeedback.Message("Subtitle Size: ${newScale}%"))
+                                                        touch()
+                                                    }
+                                                }
+                                            }
+                                        )
+                                    }
+                                    .clickable(interactionSource = subToggleSrc, indication = ripple()) {
+                                        stepSubtitleScale(true)
+                                    }
                                     .padding(horizontal = 7.dp, vertical = 4.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
                                     painter = painterResource(R.drawable.ic_cc_flaticon),
-                                    contentDescription = "Subtitle Size (Tap: Larger, Hold: Smaller)",
+                                    contentDescription = "Subtitle Size (Tap: Cycle, Drag Up/Down: Scale)",
                                     tint = Accent,
                                     modifier = Modifier.size(20.dp)
                                 )
@@ -5891,6 +5973,22 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                     showQualityMenu = false
                                     touch()
                                     hint(PlayerFeedback.Message("Quality: $q"))
+                                    val vTracks = service.availableVideoTracks()
+                                    val qClean = when {
+                                        q.contains("1080") -> "1080"
+                                        q.contains("720") -> "720"
+                                        q.contains("480") -> "480"
+                                        q.contains("360") -> "360"
+                                        else -> ""
+                                    }
+                                    if (qClean.isNotEmpty()) {
+                                        val match = vTracks.firstOrNull { it.second.contains(qClean, ignoreCase = true) }
+                                        if (match != null) {
+                                            service.setVideoTrack(match.first)
+                                        }
+                                    } else if (q.contains("Auto", ignoreCase = true)) {
+                                        service.setVideoTrack(-1)
+                                    }
                                 }
                                 .padding(horizontal = 14.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,

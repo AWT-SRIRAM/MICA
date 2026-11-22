@@ -865,13 +865,7 @@ object YtMusicClient {
                     }
                 }
 
-                // 1. Prefer Apple HLS manifest (multi-resolution 720p/1080p/4K adaptive video + audio in LibVLC)
-                val hlsUrl = streamingData.optString("hlsManifestUrl", "")
-                if (hlsUrl.isNotBlank()) {
-                    return YtResolvedStream(hlsUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
-                }
-
-                // 2. Multiplexed combined formats (itag 22 = 720p, itag 18 = 360p)
+                // 1. Multiplexed combined formats first (itag 22 = 720p, itag 18 = 360p - rock-solid direct MP4 in LibVLC)
                 val formats = streamingData.optJSONArray("formats")
                 if (formats != null) {
                     var bestVideoUrl: String? = null
@@ -886,6 +880,12 @@ object YtMusicClient {
                         }
                     }
                     if (bestVideoUrl != null) return YtResolvedStream(bestVideoUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
+                }
+
+                // 2. Apple HLS manifest fallback (adaptive multi-resolution)
+                val hlsUrl = streamingData.optString("hlsManifestUrl", "")
+                if (hlsUrl.isNotBlank()) {
+                    return YtResolvedStream(hlsUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
                 }
 
                 // 3. Adaptive video format fallback

@@ -114,9 +114,11 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
                 views.setImageViewResource(R.id.widget_album_art, R.mipmap.ic_ms_logo)
             }
 
-            // Top section click -> Open MICA App
+            // Top section click -> Open MICA App directly to Music / Audio tab
             val openAppIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("target_tab", "Audio")
+                putExtra("show_player", isPlaying)
             }
             val openAppPi = PendingIntent.getActivity(
                 context,

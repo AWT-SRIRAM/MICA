@@ -78,6 +78,25 @@ fun rememberRemoteBitmap(url: String?): Bitmap? {
                     SpotifyClient.resolveTrackThumbnail(trId)
                 } else url
 
+                val localFilePath = when {
+                    realUrl?.startsWith("file://") == true -> realUrl.removePrefix("file://")
+                    realUrl?.startsWith("/") == true -> realUrl
+                    else -> null
+                }
+                if (localFilePath != null) {
+                    val file = java.io.File(localFilePath)
+                    if (file.exists() && file.canRead()) {
+                        val loaded = runCatching {
+                            BitmapFactory.decodeFile(file.absolutePath)
+                        }.getOrNull()
+                        if (loaded != null) {
+                            OnlineImageCache.put(url, loaded)
+                            withContext(Dispatchers.Main) { bitmap = loaded }
+                            return@withContext
+                        }
+                    }
+                }
+
                 if (!realUrl.isNullOrBlank() && realUrl.startsWith("http")) {
                     val cached = OnlineImageCache.get(realUrl)
                     if (cached != null) {
@@ -159,9 +178,10 @@ fun OnlineMusicScreen(
         Store.prefs(context).edit().putString("online_search_history_v1", updated.joinToString("\n")).apply()
     }
 
-    LaunchedEffect(searchQuery) {
-        if (userSelectedSuggestion) {
-            userSelectedSuggestion = false
+    LaunchedEffect(searchQuery, isSearchFocused) {
+        if (userSelectedSuggestion || !isSearchFocused) {
+            if (userSelectedSuggestion) userSelectedSuggestion = false
+            showSuggestions = false
             return@LaunchedEffect
         }
         val trimmed = searchQuery.trim()
@@ -169,7 +189,7 @@ fun OnlineMusicScreen(
             delay(150L)
             val list = YtMusicClient.getSearchSuggestions(trimmed)
             searchSuggestions = list
-            showSuggestions = list.isNotEmpty()
+            showSuggestions = isSearchFocused && list.isNotEmpty()
         } else {
             searchSuggestions = emptyList()
             showSuggestions = false
@@ -1407,6 +1427,9 @@ fun OnlineMusicScreen(
                                     modifier = Modifier
                                         .width(96.dp)
                                         .clickable {
+                                            userSelectedSuggestion = true
+                                            showSuggestions = false
+                                            isSearchFocused = false
                                             searchQuery = artist.searchQuery
                                             performSearch(artist.searchQuery)
                                         }
@@ -1521,6 +1544,9 @@ fun OnlineMusicScreen(
                                     modifier = Modifier
                                         .width(130.dp)
                                         .clickable {
+                                            userSelectedSuggestion = true
+                                            showSuggestions = false
+                                            isSearchFocused = false
                                             searchQuery = album.searchQuery
                                             performSearch(album.searchQuery)
                                         }
@@ -1613,7 +1639,7 @@ fun OnlineMusicScreen(
     // Floating Random Pick Dice FAB (Matching Screenshot_20261121_105558.jpg)
     // Positioned in the bottom-right corner, directly above mini-player
     val miniPlayerActive = playerState.item != null
-    val diceOffsetBottom = bottomPadding + (if (miniPlayerActive) 76.dp else 16.dp)
+    val diceOffsetBottom = bottomPadding + (if (miniPlayerActive) 70.dp else 10.dp)
 
     Box(
         modifier = Modifier

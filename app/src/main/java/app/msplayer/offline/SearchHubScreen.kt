@@ -197,7 +197,7 @@ fun SearchHubScreen(
                 onOpenBrowser(cartoonUrl, "Tamil Cartoons Rare")
             }
             "playlist" -> onNavigateToTab("Library")
-            "made_for_you" -> onNavigateToTab("Online")
+            "made_for_you" -> onNavigateToTab("Audio")
         }
     }
 

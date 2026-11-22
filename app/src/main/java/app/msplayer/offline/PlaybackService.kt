@@ -604,6 +604,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
     private var seekOrigin = 0L
     private var seekCorrection: Job? = null
     private var dimensionProbe: Job? = null
+    private var trackPlayStartTime = 0L
 
     private fun clearSeek() { seekTarget = null; seekStarted = 0L; seekCorrection?.cancel(); seekCorrection = null }
     private fun nativePosition(): Long {
@@ -1258,6 +1259,23 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         updateSubtitleTextAt(nativePosition())
                     }
                 MediaPlayer.Event.EndReached -> {
+                    val elapsedPlaybackMs = SystemClock.elapsedRealtime() - trackPlayStartTime
+                    val isImmediateFailure = elapsedPlaybackMs in 1..1800L && state.value.position <= 2500L
+                    if (isImmediateFailure) {
+                        android.util.Log.w("MSPlayer", "EndReached within ${elapsedPlaybackMs}ms - stream load failure!")
+                        val currentItem = state.value.item
+                        val isStream = currentItem != null && (PlaybackRules.isStreamUrl(currentItem.uri) || isLazyOnlineUri(currentItem.uri))
+                        if (isStream && !retried) {
+                            retried = true
+                            handleOnlineAudioFallback(currentItem)
+                            return@setEventListener
+                        }
+                        // Stop playback gracefully to prevent infinite looping at video end
+                        state.value = state.value.copy(playing = false, buffering = false)
+                        timeline.value = PlaybackTimeline(0L, state.value.duration, state.value.seekable)
+                        updateNotification()
+                        return@setEventListener
+                    }
                     Library.videoPlaybackActive.value = false
                     finished = true
                     savePosition(true)
@@ -1429,6 +1447,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
     }
 
     private fun openCurrent(position: Long?, restore: Boolean = true, keepSubtitleChoice: Boolean = false, autoPlay: Boolean = true) {
+        trackPlayStartTime = SystemClock.elapsedRealtime()
         endTemporarySpeed()
         sleepFadeActive = false
         if (::player.isInitialized && !released) player.volume = effectiveVolume()

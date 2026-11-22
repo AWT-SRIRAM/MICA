@@ -5,7 +5,7 @@
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:background="@drawable/bg_widget_container"
-    android:padding="10dp">
+    android:padding="3dp">
 
     <!-- Top Section: Album Artwork + Metadata -->
     <LinearLayout

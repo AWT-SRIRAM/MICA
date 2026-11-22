@@ -3,6 +3,7 @@ package app.msplayer.offline
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -150,12 +151,37 @@ fun MicaShieldBrowserScreen(
     var detectedSubtitleUrl by remember { mutableStateOf<String?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
 
-    BackHandler {
-        if (webViewRef?.canGoBack() == true) {
-            webViewRef?.goBack()
+    fun navigateBackSafely() {
+        val wv = webViewRef ?: run { onBack(); return }
+        if (!wv.canGoBack()) {
+            onBack()
+            return
+        }
+        val list = wv.copyBackForwardList()
+        val currIdx = list.currentIndex
+        if (currIdx <= 0) {
+            onBack()
+            return
+        }
+        var stepBack = -1
+        while (currIdx + stepBack >= 0) {
+            val item = list.getItemAtIndex(currIdx + stepBack)
+            val host = Uri.parse(item.url).host
+            if (MicaAdShield.isAdHost(host) || item.url == currentUrl) {
+                stepBack--
+            } else {
+                break
+            }
+        }
+        if (currIdx + stepBack >= 0) {
+            wv.goBackOrForward(stepBack)
         } else {
             onBack()
         }
+    }
+
+    BackHandler {
+        navigateBackSafely()
     }
 
     DisposableEffect(Unit) {
@@ -182,7 +208,7 @@ fun MicaShieldBrowserScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = {
-                    if (webViewRef?.canGoBack() == true) webViewRef?.goBack() else onBack()
+                    navigateBackSafely()
                 }) {
                     Icon(Icons.Rounded.ArrowBack, "Back", tint = Color.White)
                 }
@@ -273,9 +299,35 @@ fun MicaShieldBrowserScreen(
                                     }
                                 }
                             }
+
+                            @JavascriptInterface
+                            fun onSubtitleFound(subUrl: String, label: String) {
+                                if (subUrl.isNotBlank() && !subUrl.startsWith("blob:")) {
+                                    post {
+                                        detectedSubtitleUrl = subUrl
+                                    }
+                                }
+                            }
                         }, "MicaSniffer")
 
                         webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?
+                            ): Boolean {
+                                val reqUrl = request?.url ?: return false
+                                val host = reqUrl.host
+                                if (MicaAdShield.isAdHost(host)) {
+                                    post { blockedCount++ }
+                                    return true
+                                }
+                                val urlStr = reqUrl.toString()
+                                if (!urlStr.startsWith("http://") && !urlStr.startsWith("https://")) {
+                                    return true
+                                }
+                                return false
+                            }
+
                             override fun shouldInterceptRequest(
                                 view: WebView?,
                                 request: WebResourceRequest?
@@ -355,21 +407,34 @@ fun MicaShieldBrowserScreen(
                                 // Inject YouTube skip script
                                 view?.evaluateJavascript(MicaAdShield.YOUTUBE_SKIP_SCRIPT, null)
 
-                                // Inject HTML5 video & iframe stream listener for anime & cartoons
+                                // Inject HTML5 video, iframe & subtitle track listener for anime & cartoons (ReaperClubz)
                                 val videoSniffScript = """
                                     (function() {
-                                        function checkVideo() {
+                                        function checkVideoAndSubs() {
                                             var vList = document.querySelectorAll('video');
                                             for (var i = 0; i < vList.length; i++) {
                                                 var v = vList[i];
                                                 var s = v.src || (v.querySelector('source') ? v.querySelector('source').src : '');
                                                 if (s && s.startsWith('http')) {
                                                     window.MicaSniffer.onVideoFound(s, document.title);
-                                                    return;
+                                                }
+                                                var tracks = v.querySelectorAll('track');
+                                                for (var j = 0; j < tracks.length; j++) {
+                                                    var t = tracks[j];
+                                                    if (t.src && t.src.startsWith('http')) {
+                                                        window.MicaSniffer.onSubtitleFound(t.src, t.label || t.srclang || 'Subtitles');
+                                                    }
+                                                }
+                                            }
+                                            var allTracks = document.querySelectorAll('track');
+                                            for (var k = 0; k < allTracks.length; k++) {
+                                                var trk = allTracks[k];
+                                                if (trk.src && trk.src.startsWith('http')) {
+                                                    window.MicaSniffer.onSubtitleFound(trk.src, trk.label || 'Subtitles');
                                                 }
                                             }
                                         }
-                                        setInterval(checkVideo, 1200);
+                                        setInterval(checkVideoAndSubs, 1200);
                                     })();
                                 """.trimIndent()
                                 view?.evaluateJavascript(videoSniffScript, null)
