@@ -916,124 +916,138 @@ fun MusicPlayerScreen(
 
             Spacer(Modifier.height(14.dp))
 
-            // 6. Bottom Utilities Row: Cast | Lyrics | Download | Share (Screenshot_20261119_132515.jpg)
+            // 6. Bottom Utilities Row: Cast & Lyrics on LEFT, Download & Share on RIGHT (Screenshot_20261119_132515.jpg)
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceAround,
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Cast
-                IconButton(
-                    onClick = { panel = "Cast" },
-                    modifier = Modifier.size(38.dp)
+                // Left Group: Cast & Lyrics
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_cast_flaticon),
-                        contentDescription = "Cast & Output Devices",
-                        tint = Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-
-                // Karaoke Lyrics
-                val hasLyrics = lyrics.isNotEmpty()
-                IconButton(
-                    onClick = { panel = "Lyrics" },
-                    modifier = Modifier.size(38.dp)
-                ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_lyrics_flaticon),
-                        contentDescription = "Lyrics",
-                        tint = if (panel == "Lyrics" || hasLyrics) Accent else Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-
-                // Download
-                val activeDownloads by AudioDownloadManager.activeDownloads.collectAsState()
-                val isDlDone = AudioDownloadManager.isDownloaded(title, artist)
-                val dlProgress = activeDownloads[item.sourceVideoId] ?: activeDownloads.values.find { it.title == title }
-                val isDlActive = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed
-                IconButton(
-                    onClick = {
-                        if (isDlDone) {
-                            activity.toast("Already downloaded to storage")
-                        } else if (isDlActive) {
-                            activity.toast("Download in progress...")
-                        } else if (item.sourceVideoId.isNotBlank()) {
-                            AudioDownloadManager.downloadSong(
-                                activity,
-                                scope,
-                                item.sourceVideoId,
-                                title,
-                                artist,
-                                item.thumbUri ?: ""
-                            )
-                        } else if (item.uri.startsWith("http")) {
-                            scope.launch {
-                                val ytMatch = runCatching { YtMusicClient.searchSongs("$title $artist").firstOrNull() }.getOrNull()
-                                if (ytMatch != null) {
-                                    AudioDownloadManager.downloadSong(
-                                        activity,
-                                        scope,
-                                        ytMatch.videoId,
-                                        ytMatch.title,
-                                        ytMatch.artist,
-                                        ytMatch.thumbUrl
-                                    )
-                                } else {
-                                    activity.toast("Cannot download stream directly")
-                                }
-                            }
-                        } else {
-                            activity.toast("Local file already on device")
-                        }
-                    },
-                    modifier = Modifier.size(38.dp)
-                ) {
-                    if (isDlActive) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = Color.White,
-                            strokeWidth = 2.dp
-                        )
-                    } else {
+                    // Cast
+                    IconButton(
+                        onClick = { panel = "Cast" },
+                        modifier = Modifier.size(38.dp)
+                    ) {
                         Icon(
-                            painter = painterResource(R.drawable.ic_download_flaticon),
-                            contentDescription = "Download",
-                            tint = if (isDlDone) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
+                            painter = painterResource(R.drawable.ic_cast_flaticon),
+                            contentDescription = "Cast & Output Devices",
+                            tint = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    // Karaoke Lyrics
+                    val hasLyrics = lyrics.isNotEmpty()
+                    IconButton(
+                        onClick = { panel = "Lyrics" },
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_lyrics_flaticon),
+                            contentDescription = "Lyrics",
+                            tint = if (panel == "Lyrics" || hasLyrics) Accent else Color.White.copy(alpha = 0.85f),
                             modifier = Modifier.size(22.dp)
                         )
                     }
                 }
 
-                // Share
-                IconButton(
-                    onClick = {
-                        val shareLink = if (item.uri.startsWith("http")) {
-                            if (item.uri.contains("googlevideo") || item.uri.contains("youtube")) {
-                                "https://music.youtube.com/search?q=" + java.net.URLEncoder.encode("$title $artist", "UTF-8")
-                            } else {
-                                item.uri
-                            }
-                        } else {
-                            "Track: $title by $artist (Playing in MICA)"
-                        }
-                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "Listening to $title on MICA")
-                            putExtra(Intent.EXTRA_TEXT, "Now playing: $title - $artist\n$shareLink")
-                        }
-                        activity.startActivity(Intent.createChooser(shareIntent, "Share Track via"))
-                    },
-                    modifier = Modifier.size(38.dp)
+                // Right Group: Download & Share
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_share_flaticon),
-                        contentDescription = "Share",
-                        tint = Color.White.copy(alpha = 0.85f),
-                        modifier = Modifier.size(22.dp)
-                    )
+                    // Download
+                    val activeDownloads by AudioDownloadManager.activeDownloads.collectAsState()
+                    val isDlDone = AudioDownloadManager.isDownloaded(title, artist)
+                    val dlProgress = activeDownloads[item.sourceVideoId] ?: activeDownloads.values.find { it.title == title }
+                    val isDlActive = dlProgress != null && !dlProgress.isComplete && !dlProgress.isFailed
+                    IconButton(
+                        onClick = {
+                            if (isDlDone) {
+                                activity.toast("Already downloaded to storage")
+                            } else if (isDlActive) {
+                                activity.toast("Download in progress...")
+                            } else if (item.sourceVideoId.isNotBlank()) {
+                                AudioDownloadManager.downloadSong(
+                                    activity,
+                                    scope,
+                                    item.sourceVideoId,
+                                    title,
+                                    artist,
+                                    item.thumbUri ?: ""
+                                )
+                            } else if (item.uri.startsWith("http")) {
+                                scope.launch {
+                                    val ytMatch = runCatching { YtMusicClient.searchSongs("$title $artist").firstOrNull() }.getOrNull()
+                                    if (ytMatch != null) {
+                                        AudioDownloadManager.downloadSong(
+                                            activity,
+                                            scope,
+                                            ytMatch.videoId,
+                                            ytMatch.title,
+                                            ytMatch.artist,
+                                            ytMatch.thumbUrl
+                                        )
+                                    } else {
+                                        activity.toast("Cannot download stream directly")
+                                    }
+                                }
+                            } else {
+                                activity.toast("Local file already on device")
+                            }
+                        },
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        if (isDlActive) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_download_flaticon),
+                                contentDescription = "Download",
+                                tint = if (isDlDone) Color(0xFF10B981) else Color.White.copy(alpha = 0.85f),
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+
+                    // Share
+                    IconButton(
+                        onClick = {
+                            val shareLink = if (item.uri.startsWith("http")) {
+                                if (item.uri.contains("googlevideo") || item.uri.contains("youtube")) {
+                                    "https://music.youtube.com/search?q=" + java.net.URLEncoder.encode("$title $artist", "UTF-8")
+                                } else {
+                                    item.uri
+                                }
+                            } else {
+                                "Track: $title by $artist (Playing in MICA)"
+                            }
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "Listening to $title on MICA")
+                                putExtra(Intent.EXTRA_TEXT, "Now playing: $title - $artist\n$shareLink")
+                            }
+                            activity.startActivity(Intent.createChooser(shareIntent, "Share Track via"))
+                        },
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_share_flaticon),
+                            contentDescription = "Share",
+                            tint = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
             }
 
