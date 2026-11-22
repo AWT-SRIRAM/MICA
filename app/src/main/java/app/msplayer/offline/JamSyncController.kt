@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -51,8 +52,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -306,6 +309,7 @@ object JamSyncController {
         leaveJam()
         val cleanInput = hostInput.trim().uppercase()
         val isDirectIp = cleanInput.contains(".")
+        val formattedCode = if (isDirectIp || cleanInput.startsWith("JAM-")) cleanInput else "JAM-$cleanInput"
         val cleanSuffix = cleanInput.removePrefix("JAM-").removePrefix("#").lowercase()
         val topic = "mica_jam_$cleanSuffix"
         val ctlTopic = "${topic}_ctl"
@@ -313,11 +317,11 @@ object JamSyncController {
 
         _sessionState.value = JamSessionState(
             role = JamRole.LISTENER,
-            roomCode = cleanInput,
+            roomCode = formattedCode,
             hostAddress = cleanInput,
             isConnected = true,
             listenerCount = 1,
-            statusText = "Connected to Jam Room ($cleanInput)",
+            statusText = "Connected to Jam Room ($formattedCode)",
         )
 
         clientJob = jamScope.launch {
@@ -761,7 +765,7 @@ fun JamSyncDialog(
                     } else {
                         // Join Tab
                         Text(
-                            text = "Enter your friend's 6-character room code (e.g. JAM-2B01) or direct IP to sync playback instantly.",
+                            text = "Enter your friend's room number (e.g. 3213 or 8957) or direct IP to sync playback.",
                             color = Color.White.copy(alpha = 0.7f),
                             fontSize = 13.sp,
                             lineHeight = 19.sp,
@@ -771,9 +775,44 @@ fun JamSyncDialog(
 
                         OutlinedTextField(
                             value = joinCodeInput,
-                            onValueChange = { joinCodeInput = it.uppercase() },
-                            placeholder = { Text("e.g. JAM-2B01 or 192.168.43.1", color = Color.White.copy(alpha = 0.4f), fontSize = 13.sp) },
+                            onValueChange = { input ->
+                                val clean = input.uppercase().removePrefix("JAM-").removePrefix("JAM -").removePrefix("JAM").removePrefix("-").trim()
+                                if (clean.length <= 15) {
+                                    joinCodeInput = clean
+                                }
+                            },
+                            prefix = {
+                                if (!joinCodeInput.contains(".")) {
+                                    Text(
+                                        text = "JAM - ",
+                                        color = Color(0xFF818CF8),
+                                        fontSize = 17.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontFamily = FontFamily.Monospace,
+                                        letterSpacing = 1.sp,
+                                    )
+                                }
+                            },
+                            placeholder = {
+                                Text(
+                                    text = if (joinCodeInput.contains(".")) "192.168.43.1" else "3213",
+                                    color = Color.White.copy(alpha = 0.35f),
+                                    fontSize = 17.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    letterSpacing = 2.sp,
+                                )
+                            },
                             singleLine = true,
+                            textStyle = TextStyle(
+                                color = Color.White,
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                letterSpacing = 2.sp,
+                            ),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Ascii
+                            ),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedTextColor = Color.White,
                                 unfocusedTextColor = Color.White,
@@ -799,7 +838,12 @@ fun JamSyncDialog(
                                 )
                                 .clickable(enabled = joinCodeInput.isNotBlank()) {
                                     if (service != null && joinCodeInput.isNotBlank()) {
-                                        JamSyncController.joinJam(scope, joinCodeInput, service)
+                                        val targetCode = if (joinCodeInput.contains(".") || joinCodeInput.startsWith("JAM-")) {
+                                            joinCodeInput
+                                        } else {
+                                            "JAM-$joinCodeInput"
+                                        }
+                                        JamSyncController.joinJam(scope, targetCode, service)
                                     }
                                 },
                             contentAlignment = Alignment.Center,
