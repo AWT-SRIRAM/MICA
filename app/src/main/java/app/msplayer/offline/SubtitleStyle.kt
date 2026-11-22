@@ -28,12 +28,13 @@ data class SubtitleStyle(
         "--freetype-outline-thickness=${outline.coerceIn(0, 6)}",
         "--freetype-outline-color=${borderColor and 0xFFFFFF}",
         "--freetype-outline-opacity=${borderOpacity.coerceIn(0, 255)}",
-        "--freetype-shadow-color=0", "--freetype-shadow-opacity=${shadow.coerceIn(0, 255)}",
-        "--freetype-shadow-distance=${if (outline > 0) (shadowOffset.coerceIn(0, 3)) else shadowOffset.coerceIn(0, 10)}",
+        "--freetype-shadow-color=0",
+        "--freetype-shadow-opacity=0",
+        "--freetype-shadow-distance=0",
         "--freetype-shadow-angle=315",
         "--freetype-background-color=${backgroundColor and 0xFFFFFF}",
         "--freetype-background-opacity=${if (background) backgroundOpacity.coerceIn(0, 255) else 0}",
-        "--sub-margin=${legacyMargin?.coerceIn(0, 360) ?: (bottomMargin.coerceAtLeast(16) * 3).coerceIn(36, 180)}",
+        "--sub-margin=${legacyMargin?.coerceIn(0, 360) ?: 28}",
         // VLC's subtitle demuxer converts BOM-marked UTF-16 lines to UTF-8 first.
         // Asking subsdec to decode those lines as UTF-16 would decode them twice.
         "--subsdec-encoding=${if (encoding == "UTF-16") "UTF-8" else encoding.takeIf { it in encodings.values } ?: ""}",

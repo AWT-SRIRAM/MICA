@@ -42,6 +42,7 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Security
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -52,6 +53,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +65,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
 import java.net.URI
 
@@ -167,6 +172,72 @@ fun MicaShieldBrowserScreen(
     var detectedStream by remember { mutableStateOf<DetectedStream?>(null) }
     var detectedSubtitleUrl by remember { mutableStateOf<String?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
+
+    val scope = rememberCoroutineScope()
+    var isResolvingStream by remember { mutableStateOf(false) }
+    var lastResolvedUrl by remember { mutableStateOf("") }
+    var autoLaunchedStreamUrl by remember { mutableStateOf("") }
+
+    fun autoLaunchInMica(stream: DetectedStream) {
+        if (stream.url.isBlank() || stream.url == autoLaunchedStreamUrl) return
+        autoLaunchedStreamUrl = stream.url
+        // Immediately pause and mute all HTML5 audio/video inside WebView to prevent dual audio!
+        webViewRef?.evaluateJavascript(
+            "document.querySelectorAll('video, audio').forEach(function(el) { el.pause(); el.muted = true; });",
+            null
+        )
+        val cleanTitle = (stream.title.ifBlank { pageTitle })
+            .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
+            .replace(Regex("""(?i)^watch\s+"""), "")
+            .trim()
+        val mediaItem = MediaItem(
+            uri = stream.url,
+            title = cleanTitle.ifBlank { "Playing Stream" },
+            audio = false,
+            folder = "Stream Sniffer",
+            subtitleUri = detectedSubtitleUrl
+        )
+        onPlayInMica(mediaItem)
+    }
+
+    fun isYouTubeWatchUrl(u: String?): Boolean {
+        if (u.isNullOrBlank()) return false
+        val clean = u.lowercase()
+        return (clean.contains("youtube.com/watch") || clean.contains("youtu.be/") || clean.contains("youtube.com/shorts/")) &&
+            !clean.contains("accounts.google.com")
+    }
+
+    fun playInMicaDirect(rawUrl: String, customTitle: String? = null) {
+        if (rawUrl.isBlank() || rawUrl == lastResolvedUrl || isResolvingStream) return
+        isResolvingStream = true
+        lastResolvedUrl = rawUrl
+        // Immediately pause and mute all HTML5 audio/video inside WebView to prevent dual audio!
+        webViewRef?.evaluateJavascript(
+            "document.querySelectorAll('video, audio').forEach(function(el) { el.pause(); el.muted = true; });",
+            null
+        )
+        scope.launch {
+            val resolved = withContext(Dispatchers.IO) {
+                StreamResolver.resolve(rawUrl)
+            }
+            isResolvingStream = false
+            if (resolved.streamUrl.isNotBlank()) {
+                val cleanTitle = (customTitle?.takeIf { it.isNotBlank() } ?: resolved.title)
+                    .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
+                    .replace(Regex("""(?i)^watch\s+"""), "")
+                    .trim()
+                val mediaItem = MediaItem(
+                    uri = resolved.streamUrl,
+                    title = cleanTitle.ifBlank { "Playing Stream" },
+                    audio = false,
+                    folder = "Stream Sniffer",
+                    subtitleUri = resolved.subtitleUrl ?: detectedSubtitleUrl,
+                    streamUserAgent = resolved.userAgent
+                )
+                onPlayInMica(mediaItem)
+            }
+        }
+    }
 
     DisposableEffect(Unit) {
         webViewRef?.onResume()
@@ -328,10 +399,12 @@ fun MicaShieldBrowserScreen(
                                             .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
                                             .replace(Regex("""(?i)^watch\s+"""), "")
                                             .trim()
-                                        detectedStream = DetectedStream(
+                                        val s = DetectedStream(
                                             url = videoUrl,
                                             title = clean.ifBlank { "Playing Stream" }
                                         )
+                                        detectedStream = s
+                                        autoLaunchInMica(s)
                                     }
                                 }
                             }
@@ -341,6 +414,15 @@ fun MicaShieldBrowserScreen(
                                 if (subUrl.isNotBlank() && !subUrl.startsWith("blob:")) {
                                     post {
                                         detectedSubtitleUrl = subUrl
+                                    }
+                                }
+                            }
+
+                            @JavascriptInterface
+                            fun onYouTubeWatch(watchUrl: String, watchTitle: String) {
+                                post {
+                                    if (isYouTubeWatchUrl(watchUrl)) {
+                                        playInMicaDirect(watchUrl, watchTitle)
                                     }
                                 }
                             }
@@ -358,10 +440,26 @@ fun MicaShieldBrowserScreen(
                                     return true
                                 }
                                 val urlStr = reqUrl.toString()
+                                if (isYouTubeWatchUrl(urlStr)) {
+                                    playInMicaDirect(urlStr, view?.title ?: pageTitle)
+                                    return true
+                                }
                                 if (!urlStr.startsWith("http://") && !urlStr.startsWith("https://")) {
                                     return true
                                 }
                                 return false
+                            }
+
+                            override fun doUpdateVisitedHistory(
+                                view: WebView?,
+                                url: String?,
+                                isReload: Boolean
+                            ) {
+                                super.doUpdateVisitedHistory(view, url, isReload)
+                                val u = url ?: return
+                                if (isYouTubeWatchUrl(u)) {
+                                    playInMicaDirect(u, view?.title ?: pageTitle)
+                                }
                             }
 
                             override fun shouldInterceptRequest(
@@ -394,10 +492,12 @@ fun MicaShieldBrowserScreen(
                                     if (detectedStream?.url != urlStr) {
                                         post {
                                             if (detectedStream?.url != urlStr) {
-                                                detectedStream = DetectedStream(
+                                                val s = DetectedStream(
                                                     url = urlStr,
                                                     title = view?.title ?: pageTitle
                                                 )
+                                                detectedStream = s
+                                                autoLaunchInMica(s)
                                             }
                                         }
                                     }
@@ -448,11 +548,28 @@ fun MicaShieldBrowserScreen(
                                 // Inject YouTube skip script
                                 view?.evaluateJavascript(MicaAdShield.YOUTUBE_SKIP_SCRIPT, null)
 
+                                if (isYouTubeWatchUrl(url)) {
+                                    playInMicaDirect(url.orEmpty(), pageTitle)
+                                }
+
                                 // Inject HTML5 video, iframe & subtitle track listener for anime & cartoons (ReaperClubz)
                                 val videoSniffScript = """
                                     (function() {
                                         if (window._micaSniffInit) return;
                                         window._micaSniffInit = true;
+                                        // YouTube Mobile SPA & link interception
+                                        window.addEventListener('yt-navigate-finish', function() {
+                                            var u = window.location.href;
+                                            if (u.indexOf('/watch') !== -1 || u.indexOf('/shorts') !== -1) {
+                                                window.MicaSniffer.onYouTubeWatch(u, document.title || '');
+                                            }
+                                        });
+                                        document.addEventListener('click', function(e) {
+                                            var a = e.target.closest('a');
+                                            if (a && a.href && (a.href.indexOf('/watch') !== -1 || a.href.indexOf('/shorts') !== -1)) {
+                                                window.MicaSniffer.onYouTubeWatch(a.href, a.innerText || document.title || '');
+                                            }
+                                        }, true);
                                         function getCleanPageTitle() {
                                             var heading = document.querySelector('h1, h2, .anime-title, .title, .film-name, .entry-title');
                                             var raw = (heading ? (heading.innerText || heading.textContent) : '') || document.title || '';
@@ -649,6 +766,46 @@ fun MicaShieldBrowserScreen(
                     ) {
                         Icon(Icons.Rounded.Close, "Dismiss", tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(18.dp))
                     }
+                }
+            }
+        }
+
+        // Animated Resolving Stream Indicator: "Opening in MICA Video Player..."
+        AnimatedVisibility(
+            visible = isResolvingStream,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 16.dp, start = 16.dp, end = 16.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xFF1E293B))
+                    .border(1.2.dp, Color(0xFF38BDF8), RoundedCornerShape(20.dp))
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(26.dp),
+                    color = Color(0xFF38BDF8),
+                    strokeWidth = 2.8.dp
+                )
+                Column {
+                    Text(
+                        "Opening in MICA Video Player...",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "Resolving high quality stream & hardware acceleration",
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = 11.5.sp
+                    )
                 }
             }
         }

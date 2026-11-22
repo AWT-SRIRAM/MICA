@@ -542,7 +542,7 @@ class MainActivity : ComponentActivity() {
                 (incomingIntent?.getStringExtra("target_tab") == "Audio" && incomingIntent?.getBooleanExtra("show_player", false) == true)
 
         if (isWidgetAction) {
-            showPlayer = true
+            showPlayer = false
             pendingTargetTab = "Audio"
             targetTabTrigger++
             val prefs = getSharedPreferences("mica_widget_prefs", Context.MODE_PRIVATE)
@@ -5623,117 +5623,148 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             onTouch = { touch() },
                             onOpenChapters = { openPlayerMenu("Chapters") },
                         )
-                        Row(
-                            Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 0.dp, bottom = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(64.dp)
+                                .padding(horizontal = 12.dp, vertical = 0.dp),
+                            contentAlignment = Alignment.Center,
                         ) {
-                            val lockSrc = remember { MutableInteractionSource() }
-                            val prevSrc = remember { MutableInteractionSource() }
-                            val playSrc = remember { MutableInteractionSource() }
-                            val nextSrc = remember { MutableInteractionSource() }
-                            val aspectSrc = remember { MutableInteractionSource() }
-                            val rotSrc = remember { MutableInteractionSource() }
-                            IconButton(
-                                onClick = {
-                                    locked = true
-                                    controls = false
-                                },
-                                interactionSource = lockSrc,
-                                modifier = Modifier.iosLiquidPress(lockSrc, scaleDown = 0.88f),
+                            // Left Zone (Lock)
+                            Row(
+                                modifier = Modifier.align(Alignment.CenterStart),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(Icons.Default.LockOpen, "Lock controls", tint = Color.White)
-                            }
-                            Spacer(Modifier.weight(1f))
-                            IconButton(
-                                onClick = {
-                                    service.previous()
-                                    touch()
-                                },
-                                interactionSource = prevSrc,
-                                modifier = Modifier.iosLiquidPress(prevSrc, scaleDown = 0.86f),
-                            ) {
-                                Icon(
-                                    Icons.Default.SkipPrevious,
-                                    "Previous",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(34.dp),
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    service.toggle()
-                                    touch()
-                                },
-                                interactionSource = playSrc,
-                                modifier = Modifier
-                                    .padding(horizontal = 14.dp)
-                                    .size(60.dp)
-                                    .iosLiquidPress(playSrc, scaleDown = 0.86f),
-                            ) {
-                                Icon(
-                                    if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                    if (state.playing) "Pause" else "Play",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(52.dp),
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    service.next()
-                                    touch()
-                                },
-                                interactionSource = nextSrc,
-                                modifier = Modifier.iosLiquidPress(nextSrc, scaleDown = 0.86f),
-                            ) {
-                                Icon(Icons.Default.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(34.dp))
-                            }
-                            Spacer(Modifier.weight(1f))
-                            val ccSrc = remember { MutableInteractionSource() }
-                            // CC Subtitle Size Button (Bottom Bar Placement)
-                            Box(
-                                modifier = Modifier
-                                    .size(36.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .border(1.2.dp, Color.White.copy(alpha = 0.85f), RoundedCornerShape(8.dp))
-                                    .clickable(
-                                        interactionSource = ccSrc,
-                                        indication = ripple(bounded = true, color = Color.White)
-                                    ) {
-                                        touch()
-                                        stepSubtitleScale(up = true)
+                                val lockSrc = remember { MutableInteractionSource() }
+                                IconButton(
+                                    onClick = {
+                                        locked = true
+                                        controls = false
                                     },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    "CC",
-                                    color = Color.White,
-                                    fontSize = 11.5.sp,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    letterSpacing = 0.5.sp
-                                )
+                                    interactionSource = lockSrc,
+                                    modifier = Modifier.iosLiquidPress(lockSrc, scaleDown = 0.88f),
+                                ) {
+                                    Icon(Icons.Default.LockOpen, "Lock controls", tint = Color.White)
+                                }
                             }
-                            Spacer(Modifier.width(16.dp))
-                            IconButton(
-                                onClick = {
-                                    val nextAspect = aspectOption.next()
-                                    zoom = 1f
-                                    panX = 0f
-                                    panY = 0f
-                                    service.setAspectMode(nextAspect)
-                                    touch()
-                                    hint(PlayerFeedback.AspectRatio(nextAspect.label))
-                                },
-                                interactionSource = aspectSrc,
-                                modifier = Modifier.iosLiquidPress(aspectSrc, scaleDown = 0.88f),
+
+                            // Center Zone (Prev | Play/Pause | Next) - Mathematically Locked at Display 50% Midpoint
+                            Row(
+                                modifier = Modifier.align(Alignment.Center),
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(Icons.Default.AspectRatio, "Aspect ratio", tint = Color.White)
+                                val prevSrc = remember { MutableInteractionSource() }
+                                val playSrc = remember { MutableInteractionSource() }
+                                val nextSrc = remember { MutableInteractionSource() }
+                                IconButton(
+                                    onClick = {
+                                        service.previous()
+                                        touch()
+                                    },
+                                    interactionSource = prevSrc,
+                                    modifier = Modifier.iosLiquidPress(prevSrc, scaleDown = 0.86f),
+                                ) {
+                                    Icon(
+                                        Icons.Default.SkipPrevious,
+                                        "Previous",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(34.dp),
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        service.toggle()
+                                        touch()
+                                    },
+                                    interactionSource = playSrc,
+                                    modifier = Modifier
+                                        .padding(horizontal = 14.dp)
+                                        .size(60.dp)
+                                        .iosLiquidPress(playSrc, scaleDown = 0.86f),
+                                ) {
+                                    Icon(
+                                        if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                        if (state.playing) "Pause" else "Play",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(52.dp),
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        service.next()
+                                        touch()
+                                    },
+                                    interactionSource = nextSrc,
+                                    modifier = Modifier.iosLiquidPress(nextSrc, scaleDown = 0.86f),
+                                ) {
+                                    Icon(Icons.Default.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(34.dp))
+                                }
                             }
-                            IconButton(
-                                onClick = { activity.rotateVideo() },
-                                interactionSource = rotSrc,
-                                modifier = Modifier.iosLiquidPress(rotSrc, scaleDown = 0.88f),
+
+                            // Right Zone (CC | AspectRatio | ScreenRotation)
+                            Row(
+                                modifier = Modifier.align(Alignment.CenterEnd),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Icon(Icons.Default.ScreenRotation, "Rotate screen", tint = Color.White)
+                                val ccSrc = remember { MutableInteractionSource() }
+                                val isCcActive = subtitleResizeMode
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (isCcActive) Color(0xFF00A8FF).copy(alpha = 0.25f) else Color.Transparent)
+                                        .border(
+                                            1.5.dp,
+                                            if (isCcActive) Color(0xFF00A8FF) else Color.White.copy(alpha = 0.85f),
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable(
+                                            interactionSource = ccSrc,
+                                            indication = ripple(bounded = true, color = Color.White)
+                                        ) {
+                                            touch()
+                                            subtitleResizeMode = !subtitleResizeMode
+                                            if (subtitleResizeMode) {
+                                                hint(PlayerFeedback.Message("Subtitle Resize ON • Drag screen up/down"))
+                                            } else {
+                                                hint(PlayerFeedback.Message("Subtitle Resize OFF"))
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "CC",
+                                        color = if (isCcActive) Color(0xFF00A8FF) else Color.White,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+                                val aspectSrc = remember { MutableInteractionSource() }
+                                IconButton(
+                                    onClick = {
+                                        val nextAspect = aspectOption.next()
+                                        zoom = 1f
+                                        panX = 0f
+                                        panY = 0f
+                                        service.setAspectMode(nextAspect)
+                                        touch()
+                                        hint(PlayerFeedback.AspectRatio(nextAspect.label))
+                                    },
+                                    interactionSource = aspectSrc,
+                                    modifier = Modifier.iosLiquidPress(aspectSrc, scaleDown = 0.88f),
+                                ) {
+                                    Icon(Icons.Default.AspectRatio, "Aspect ratio", tint = Color.White)
+                                }
+                                val rotSrc = remember { MutableInteractionSource() }
+                                IconButton(
+                                    onClick = { activity.rotateVideo() },
+                                    interactionSource = rotSrc,
+                                    modifier = Modifier.iosLiquidPress(rotSrc, scaleDown = 0.88f),
+                                ) {
+                                    Icon(Icons.Default.ScreenRotation, "Rotate screen", tint = Color.White)
+                                }
                             }
                         }
                     }

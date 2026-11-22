@@ -3198,9 +3198,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
             val surface = layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles) ?: return@post
             val scaleFactor = (scalePercent / 100f).coerceIn(0.5f, 3.0f)
             surface.pivotX = surface.width / 2f
-            surface.pivotY = surface.height.toFloat()
+            surface.pivotY = surface.height * 0.92f
             surface.scaleX = scaleFactor
-            surface.scaleY = scaleFactor * (style.lineSpacing / 100f).coerceIn(0.8f, 2.0f)
+            surface.scaleY = scaleFactor
         }
     }
 

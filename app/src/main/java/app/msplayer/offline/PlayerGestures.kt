@@ -116,7 +116,7 @@ fun Modifier.videoGestures(
                         event.changes.forEach { it.consume() }
                         val deltaY = pan.y
                         if (abs(deltaY) > 0.4f) {
-                            gestureSubScale = (gestureSubScale - deltaY * 0.35f).coerceIn(50f, 250f)
+                            gestureSubScale = (gestureSubScale - deltaY * 0.35f).coerceIn(50f, 300f)
                             val roundedScale = gestureSubScale.toInt()
                             subScaleCallback(roundedScale)
                             feedbackNow(PlayerFeedback.SubtitleScale(roundedScale))
