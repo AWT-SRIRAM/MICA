@@ -81,8 +81,12 @@ object MicaAdShield {
         "adversal.com", "adzerk.net", "affiliatetracking.com", "clicksor.com",
         "ero-advertising.com", "feedjit.com", "histats.com", "imrworldwide.com",
         "kontera.com", "media.net", "statcounter.com", "trafficshop.com",
-        "yandexadexchange.net", "zergnet.com", "track.adform.net", "disqus.com"
+        "yandexadexchange.net", "zergnet.com", "track.adform.net", "disqus.com",
+        "ay267.com"
     )
+
+    // Pattern to catch numbered ad redirect domains like ay123.com, ay456.com etc.
+    private val adRedirectPattern = Regex("""^ay\d+\.com$""", RegexOption.IGNORE_CASE)
 
     fun preload(context: Context) {
         // Pre-warm ad-blocking HashSet
@@ -92,14 +96,26 @@ object MicaAdShield {
         if (host.isNullOrBlank()) return false
         val clean = host.lowercase().trim()
         if (clean in blockedHosts) return true
-        return blockedHosts.any { bad -> clean.endsWith(".$bad") }
+        if (blockedHosts.any { bad -> clean.endsWith(".$bad") }) return true
+        // Block numbered ad redirect domains like ay123.com, ay456.com
+        if (adRedirectPattern.matches(clean)) return true
+        // Block common ad redirect pattern hosts
+        val parts = clean.split('.')
+        if (parts.size >= 2) {
+            val domain = parts[parts.size - 2]
+            if (domain.matches(Regex("""^(redirect|click|track|pop|ads?)\d*$"""))) return true
+        }
+        return false
     }
 
     val COSMETIC_CSS = """
         iframe[id*='google_ads'], .adsbygoogle, [class*='ad-banner'], 
         [id*='ad-banner'], .ad-container, .ad-box, [class*='sponsor'], 
         [id*='sponsor'], div[class*='ad_'], div[id*='ad_'], .banner-ad,
-        .pop-ad, .popup-overlay, #disqus_thread { 
+        .pop-ad, .popup-overlay, #disqus_thread,
+        .modal-backdrop, [class*='telegram'], [class*='Telegram'],
+        [class*='app-download'], [class*='download-app'],
+        [class*='mobile-app'], div[class*='popup'] { 
             display: none !important; 
             visibility: hidden !important; 
             height: 0 !important; 
@@ -154,13 +170,22 @@ fun MicaShieldBrowserScreen(
     fun navigateBackSafely() {
         val wv = webViewRef ?: run { onBack(); return }
         if (!wv.canGoBack()) {
-            onBack()
+            // If we're on the initial URL, exit; otherwise go back to the initial URL
+            if (currentUrl == initialUrl || currentUrl.isBlank()) {
+                onBack()
+            } else {
+                wv.loadUrl(initialUrl)
+            }
             return
         }
         val list = wv.copyBackForwardList()
         val currIdx = list.currentIndex
         if (currIdx <= 0) {
-            onBack()
+            if (currentUrl == initialUrl || currentUrl.isBlank()) {
+                onBack()
+            } else {
+                wv.loadUrl(initialUrl)
+            }
             return
         }
         var stepBack = -1
@@ -176,7 +201,8 @@ fun MicaShieldBrowserScreen(
         if (currIdx + stepBack >= 0) {
             wv.goBackOrForward(stepBack)
         } else {
-            onBack()
+            // All history entries were ad redirects; reload the initial URL instead of exiting
+            wv.loadUrl(initialUrl)
         }
     }
 

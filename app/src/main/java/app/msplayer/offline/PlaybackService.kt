@@ -193,18 +193,11 @@ class PlaybackService : MediaBrowserServiceCompat() {
         val layout = videoLayout ?: return
         layout.post {
             val surface = layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles) ?: return@post
-            val style = SubtitleStyle.load(this)
-            val location = IntArray(2)
-            surface.getLocationInWindow(location)
-            val controlsLift = if (visible) subtitleControlsTop?.let { top ->
-                ((location[1] - surface.translationY + surface.height - top + 8 * resources.displayMetrics.density) / surface.height.coerceAtLeast(1)).coerceIn(0f,1f)
-            } ?: .28f else 0f
-            val fraction = if (state.value.plainSubtitle) {
-                (if (style.legacyMargin == null) style.bottomMargin / 100f else 0f) + controlsLift
-            } else 0f
-            // Never allow positive translationY to shift subtitles downwards off the screen/bezel
-            val targetTranslationY = -(surface.height * fraction).coerceAtLeast(0f)
-            surface.translationY = targetTranslationY
+            // Keep the hardware SurfaceView stably anchored - never translate or scale it.
+            // SurfaceView.translationY moves the punch-through hole away from the hardware
+            // surface, causing subtitles to be clipped/invisible on streams after controls hide.
+            // Subtitle positioning is handled natively by LibVLC (--sub-margin, --freetype-fontsize).
+            surface.translationY = 0f
             surface.scaleX = 1f
             surface.scaleY = 1f
         }
@@ -1208,7 +1201,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
                                 .replace(".mkv", "", true)
                                 .replace(".mp4", "", true)
                                 .trim()
-                            if (clean.isNotBlank() && curItm != null) {
+                            // Filter out social/channel handles like @HDTalkies, @YoGi_Anime
+                            if (clean.isNotBlank() && !clean.startsWith("@") && curItm != null) {
                                 effectiveItem = curItm.copy(title = clean)
                             }
                         }
@@ -1294,9 +1288,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     }
                 MediaPlayer.Event.EndReached -> {
                     val elapsedPlaybackMs = SystemClock.elapsedRealtime() - trackPlayStartTime
-                    val isImmediateFailure = elapsedPlaybackMs in 1..1800L && state.value.position <= 2500L
+                    val isImmediateFailure = elapsedPlaybackMs in 1..2500L
                     if (isImmediateFailure) {
-                        android.util.Log.w("MSPlayer", "EndReached within ${elapsedPlaybackMs}ms - stream load failure!")
+                        android.util.Log.w("MSPlayer", "EndReached within ${elapsedPlaybackMs}ms (pos=${state.value.position}) - HLS live-edge or stream load failure!")
                         val currentItem = state.value.item
                         val isStream = currentItem != null && (PlaybackRules.isStreamUrl(currentItem.uri) || isLazyOnlineUri(currentItem.uri))
                         if (isStream && !retried) {
@@ -1822,15 +1816,18 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     } else Media(vlc, uri)
                     media.setHWDecoderEnabled(decoderMode != "Software", decoderMode == "Hardware")
                     if (PlaybackRules.isStreamUrl(activeItem.uri)) {
-                        media.addOption(":network-caching=400")
-                        media.addOption(":live-caching=400")
+                        media.addOption(":network-caching=2000")
                         media.addOption(":clock-jitter=0")
                         media.addOption(":clock-synchro=0")
                         media.addOption(":http-reconnect=1")
                         media.addOption(":http-forward-cookies")
-                        val isYtStream = activeItem.uri.contains("googlevideo.com") || activeItem.uri.contains("youtube.com")
+                        // Force HLS VOD streams to start at the first segment, not the live edge
+                        media.addOption(":no-hls-live-edge")
+                        media.addOption(":hls-live-edge=0")
                         val streamUa = activeItem.streamUserAgent.ifBlank {
-                            if (isYtStream) {
+                            if (activeItem.folder == "Stream Sniffer") {
+                                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                            } else if (activeItem.uri.contains("manifest/hls_variant")) {
                                 "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
                             } else {
                                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -1846,7 +1843,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
                                 PlaybackRules.resume(it.position, activeItem.duration, it.watched)
                             }
                             ?: 0
-                    if (start > 0) media.addOption(":start-time=${start / 1000.0}")
+                    // Always set :start-time explicitly, including 0.0, so HLS never defaults to live edge
+                    media.addOption(":start-time=${(start / 1000.0).coerceAtLeast(0.0)}")
                     resumeAnchor = start.takeIf { it > 0 }
                     val folderPrefs = if (!activeItem.audio && !PlaybackRules.isStreamUrl(activeItem.uri) && Store.folderMemoryEnabled(this@PlaybackService) && activeItem.folder.isNotBlank()) {
                         Store.folderMemory(this@PlaybackService, activeItem.folder)
@@ -3145,6 +3143,13 @@ class PlaybackService : MediaBrowserServiceCompat() {
             updateSubtitlePlacement(controlsVisible)
             return
         }
+        // For active network streams, do NOT tear down LibVLC — it destroys the HTTP connection.
+        // Instead, just update the subtitle placement and let LibVLC handle the style natively.
+        val currentItem = state.value.item
+        if (currentItem != null && PlaybackRules.isStreamUrl(currentItem.uri)) {
+            updateSubtitlePlacement(controlsVisible)
+            return
+        }
         endTemporarySpeed()
         val prior = state.value.copy(playing = state.value.playing && !requestedPause)
         if (prior.item == null) return
@@ -3278,11 +3283,15 @@ class PlaybackService : MediaBrowserServiceCompat() {
         val item = current.item ?: return
         val complete =
             watched || finished || PlaybackRules.completed(current.position, current.duration)
+        // For stream URLs, never save a near-end position that would cause resume at the live edge
+        val isStream = PlaybackRules.isStreamUrl(item.uri)
+        val effectivePosition = if (isStream && (complete || current.duration <= 0L || current.position >= current.duration - 5000L)) 0L
+            else if (complete) 0 else current.position
         val row =
             SavedMedia().apply {
                 uri = item.uri
                 title = item.title
-                position = if (complete) 0 else current.position
+                position = effectivePosition
                 updated = System.currentTimeMillis()
                 this.watched = complete
             }
@@ -3478,18 +3487,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     private fun shouldShowNotification(): Boolean {
         val itm = state.value.item ?: return false
-        if (itm.audio) return true
-        if (PlaybackRules.isStreamUrl(itm.uri) ||
-            itm.uri.startsWith("http://") ||
-            itm.uri.startsWith("https://") ||
-            itm.uri.startsWith("resolve://") ||
-            itm.uri.startsWith("yt_") ||
-            itm.uri.startsWith("saavn_") ||
-            itm.folder == "Network Streams"
-        ) {
-            return true
-        }
-        return false
+        // Only show notification for audio playback; video stays inside the app with no notification
+        return itm.audio
     }
 
     private fun foreground() {

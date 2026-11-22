@@ -49,6 +49,7 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.*
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
@@ -1060,6 +1061,45 @@ fun App(activity: MainActivity) {
             }
         )
         return
+    }
+
+    // 0.75s Quick Startup Splash: "MICA ONE — the universe of entertainment"
+    var splashVisible by remember { mutableStateOf(true) }
+    val splashAlpha by animateFloatAsState(
+        targetValue = if (splashVisible) 1f else 0f,
+        animationSpec = tween(durationMillis = 250),
+        label = "splashFade"
+    )
+    LaunchedEffect(Unit) {
+        delay(750L)
+        splashVisible = false
+    }
+    if (splashAlpha > 0f) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0A0D14))
+                .alpha(splashAlpha),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    "MICA ONE",
+                    color = Color.White,
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 4.sp
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "the universe of entertainment",
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 14.sp,
+                    letterSpacing = 1.5.sp
+                )
+            }
+        }
+        if (splashVisible) return
     }
 
     val service = activity.service
@@ -3548,7 +3588,7 @@ fun MediaRow(
                     item.title,
                     color = if (isPlaying) palette.accent else if (seen) palette.textSecondary else palette.textPrimary,
                     fontSize = 14.5.sp,
-                    maxLines = 2,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
@@ -3841,7 +3881,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                                 else "Disabled — enable for Control Center art & controls",
                                 color = if (notificationsOn) palette.accentSecondary else warnColor,
                                 fontSize = 12.sp,
-                                maxLines = 2,
+                                maxLines = 3,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
@@ -3867,7 +3907,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                                     "Allow display over apps for Dynamic Island without double notification",
                                     color = warnColor,
                                     fontSize = 12.sp,
-                                    maxLines = 2,
+                                    maxLines = 3,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
@@ -3896,7 +3936,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                                     else "Disabled — uses native system capsule",
                                     color = if (islandOn) palette.accentSecondary else palette.textSecondary,
                                     fontSize = 12.sp,
-                                    maxLines = 2,
+                                    maxLines = 3,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
@@ -4119,7 +4159,7 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                                 "Resume playback, Auto PiP, Background audio, All files access, Seek step, Repeat, Decoder",
                                 color = palette.textSecondary,
                                 fontSize = 11.5.sp,
-                                maxLines = 2,
+                                maxLines = 3,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
@@ -5214,7 +5254,8 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 state.item?.uri?.substringAfterLast('/')?.substringBefore('?') ?: ""
                             }
                             val displayTitle = if (rawTitle.contains('.')) rawTitle.substringBeforeLast('.') else rawTitle
-                            val finalTitle = displayTitle.ifBlank { state.item?.artist.orEmpty().ifBlank { "Playing Stream" } }
+                            val cleanDisplayTitle = displayTitle.replace(Regex("""^@[A-Za-z0-9_]+[\s\-_]*"""), "").trim().ifBlank { displayTitle }
+                            val finalTitle = cleanDisplayTitle.ifBlank { state.item?.artist.orEmpty().ifBlank { "Playing Stream" } }
                             Text(
                                 finalTitle,
                                 color = Color.White,
@@ -5246,9 +5287,10 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 }
                             ) {
                                 Icon(
-                                    painter = painterResource(R.drawable.ic_subtitles_styled),
+                                    painter = painterResource(R.drawable.ic_flaticon_transcript),
                                     contentDescription = "Subtitles",
-                                    tint = if (service.areSubtitlesEnabled()) Accent else Color.White
+                                    tint = if (service.areSubtitlesEnabled()) Accent else Color.White,
+                                    modifier = Modifier.size(24.dp)
                                 )
                             }
                             val decoderTag = if (state.decoder == "Software") "SW" else if (state.decoder == "Hardware") "HW" else "HW+"
@@ -5498,14 +5540,14 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                             hint(PlayerFeedback.Message("Subtitle Resize: OFF (Gestures locked)"))
                                         }
                                     }
-                                    .padding(horizontal = 7.dp, vertical = 4.dp),
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(
-                                    painter = painterResource(R.drawable.ic_cc_flaticon),
+                                    painter = painterResource(R.drawable.ic_flaticon_cc),
                                     contentDescription = "Subtitle Resize Mode",
                                     tint = if (subtitleResizeMode) Color.Black else Color.White,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(24.dp)
                                 )
                             }
                             val isYtStream = state.item?.let {
@@ -6830,7 +6872,7 @@ fun OnlineSubtitlesDialog(
                                     color = Color.White,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Medium,
-                                    maxLines = 2,
+                                    maxLines = 3,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -7986,7 +8028,7 @@ fun ChaptersDialog(
                                 color = Color.White,
                                 fontSize = 14.sp,
                                 fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-                                maxLines = 2,
+                                maxLines = 3,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f),
                             )

@@ -128,6 +128,14 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             )
             views.setOnClickPendingIntent(R.id.widget_root, openAppPi)
             views.setOnClickPendingIntent(R.id.widget_top_section, openAppPi)
+            views.setOnClickPendingIntent(R.id.widget_meta_container, openAppPi)
+            views.setOnClickPendingIntent(R.id.widget_album_art, openAppPi)
+            views.setOnClickPendingIntent(R.id.widget_track_title, openAppPi)
+            views.setOnClickPendingIntent(R.id.widget_track_artist, openAppPi)
+            views.setOnClickPendingIntent(R.id.widget_timeline_container, openAppPi)
+            views.setOnClickPendingIntent(R.id.widget_progress_bar, openAppPi)
+            views.setOnClickPendingIntent(R.id.widget_time_elapsed, openAppPi)
+            views.setOnClickPendingIntent(R.id.widget_time_total, openAppPi)
 
             // 5 Symmetric Control Buttons
             views.setOnClickPendingIntent(
