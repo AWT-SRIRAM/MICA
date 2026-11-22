@@ -481,7 +481,29 @@ class MainActivity : ComponentActivity() {
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        enableHighRefreshRate()
+        applyRefreshRateSettings()
+    }
+
+    fun applyRefreshRateSettings() {
+        val highRefresh = Store.prefs(this).getBoolean("enable_high_refresh_rate", false)
+        if (highRefresh) {
+            enableHighRefreshRate()
+        } else {
+            // Default 60fps: cuts GPU load in half, prevents heating, and ensures rock-solid stability across all devices
+            val params = window.attributes
+            var changed = false
+            if (params.preferredRefreshRate != 60f) {
+                params.preferredRefreshRate = 60f
+                changed = true
+            }
+            if (params.preferredDisplayModeId != 0) {
+                params.preferredDisplayModeId = 0
+                changed = true
+            }
+            if (changed) {
+                window.attributes = params
+            }
+        }
     }
 
     private fun enableHighRefreshRate() {
@@ -513,16 +535,47 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun handleWidgetPlayback(incomingIntent: Intent?) {
+        val widgetPlayUri = incomingIntent?.getStringExtra("widget_play_uri")
+        if (!widgetPlayUri.isNullOrBlank()) {
+            showPlayer = true
+            pendingTargetTab = "Audio"
+            targetTabTrigger++
+            lifecycleScope.launch {
+                var attempts = 0
+                while (service == null && attempts++ < 25) delay(40L)
+                val s = service ?: return@launch
+                val currentItem = s.state.value.item
+                if (currentItem?.uri == widgetPlayUri) {
+                    if (!s.state.value.playing) s.play()
+                } else {
+                    val track = audios.firstOrNull { it.uri == widgetPlayUri }
+                    if (track != null) {
+                        s.open(listOf(track), track)
+                    } else if (currentItem != null && currentItem.audio) {
+                        if (!s.state.value.playing) s.play()
+                    }
+                }
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         FeedCacheManager.preloadAll(this)
         volumeControlStream = AudioManager.STREAM_MUSIC
         GlassTheme.init(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        enableHighRefreshRate()
-        val (cachedV, cachedA) = LibraryCache.load(this)
-        if (cachedV.isNotEmpty()) videos = cachedV
-        if (cachedA.isNotEmpty()) audios = cachedA
+        applyRefreshRateSettings()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val (cachedV, cachedA) = LibraryCache.load(this@MainActivity)
+            if (cachedV.isNotEmpty() || cachedA.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    if (videos.isEmpty()) videos = cachedV
+                    if (audios.isEmpty()) audios = cachedA
+                }
+            }
+        }
         showPlayer =
             savedInstanceState?.getBoolean("player") ?: intent.getBooleanExtra("show_player", false)
         showIntroScreen = !IntroManager.isIntroCompleted(this)
@@ -530,6 +583,7 @@ class MainActivity : ComponentActivity() {
             pendingTargetTab = it
             targetTabTrigger++
         }
+        handleWidgetPlayback(intent)
         extractIncomingMedia(intent)
         startService(Intent(this, PlaybackService::class.java))
         bindService(Intent(this, PlaybackService::class.java), connection, BIND_AUTO_CREATE)
@@ -663,6 +717,7 @@ class MainActivity : ComponentActivity() {
             pendingTargetTab = it
             targetTabTrigger++
         }
+        handleWidgetPlayback(intent)
     }
 
     private var wasAllFilesGranted = false
@@ -688,7 +743,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         service?.setAppInForeground(true)
-        enableHighRefreshRate()
+        applyRefreshRateSettings()
         if (showPlayer) service?.resumeVideoSurface()
         val nowAllFiles = hasAllFilesAccess()
         if (service?.requiresAllFilesPermission?.value == true && nowAllFiles) {
@@ -940,9 +995,11 @@ class MainActivity : ComponentActivity() {
         if (!forceScan && scanJob?.isActive == true) return scanJob
         scanJob?.cancel()
         val job =
-            lifecycleScope.launch {
-                if (videos.isEmpty() || forceScan) scanning = true
-                libraryError = null
+            lifecycleScope.launch(Dispatchers.IO) {
+                withContext(Dispatchers.Main) {
+                    if (videos.isEmpty() || forceScan) scanning = true
+                    libraryError = null
+                }
                 try {
                     if (forceScan) {
                         Library.invalidateScanCache()
@@ -954,15 +1011,21 @@ class MainActivity : ComponentActivity() {
                     val extra = if (tree != null) scanTree(Uri.parse(tree)) else emptyList()
                     val newVideos = (v + extra.filter { !it.audio }).distinctBy { it.uri }
                     val newAudios = (a + extra.filter { it.audio }).distinctBy { it.uri }
-                    videos = newVideos
-                    audios = newAudios
+                    withContext(Dispatchers.Main) {
+                        videos = newVideos
+                        audios = newAudios
+                    }
                     LibraryCache.save(this@MainActivity, newVideos, newAudios)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    libraryError = "Some files could not be scanned. ${e.message}"
+                    withContext(Dispatchers.Main) {
+                        libraryError = "Some files could not be scanned. ${e.message}"
+                    }
                 } finally {
-                    scanning = false
+                    withContext(Dispatchers.Main) {
+                        scanning = false
+                    }
                 }
             }
         scanJob = job
@@ -1063,22 +1126,22 @@ fun App(activity: MainActivity) {
         return
     }
 
-    // 0.75s Quick Startup Splash: App Logo, "MICA ONE", "the universe of entertainment", and "SRIRAM S"
+    // 1.5s Visible Startup Splash: Pure Black Background, Pure White Logo & Typography, and Prestigious SRIRAM S Creator Badge
     var splashVisible by remember { mutableStateOf(true) }
     val splashAlpha by animateFloatAsState(
         targetValue = if (splashVisible) 1f else 0f,
-        animationSpec = tween(durationMillis = 250),
+        animationSpec = tween(durationMillis = 350),
         label = "splashFade"
     )
     LaunchedEffect(Unit) {
-        delay(750L)
+        delay(1500L)
         splashVisible = false
     }
     if (splashAlpha > 0f) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0A0D14))
+                .background(Color.Black)
                 .alpha(splashAlpha),
             contentAlignment = Alignment.Center
         ) {
@@ -1087,32 +1150,57 @@ fun App(activity: MainActivity) {
                     painter = painterResource(R.drawable.ic_mica_app_logo),
                     contentDescription = "MICA Logo",
                     modifier = Modifier
-                        .size(72.dp)
-                        .clip(RoundedCornerShape(18.dp))
+                        .size(80.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(22.dp))
                 )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(18.dp))
                 Text(
                     "MICA ONE",
                     color = Color.White,
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.Bold,
+                    fontSize = 34.sp,
+                    fontWeight = FontWeight.ExtraBold,
                     letterSpacing = 4.sp
                 )
                 Spacer(Modifier.height(6.dp))
                 Text(
                     "the universe of entertainment",
-                    color = Color.White.copy(alpha = 0.65f),
-                    fontSize = 13.5.sp,
-                    letterSpacing = 1.5.sp
+                    color = Color.White.copy(alpha = 0.75f),
+                    fontSize = 13.sp,
+                    letterSpacing = 2.sp
                 )
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    "SRIRAM S",
-                    color = Color.White.copy(alpha = 0.5f),
-                    fontSize = 12.sp,
-                    letterSpacing = 2.5.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                Spacer(Modifier.height(20.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color.White.copy(alpha = 0.08f))
+                        .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(24.dp))
+                        .padding(horizontal = 16.dp, vertical = 7.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            "✦",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                        )
+                        Text(
+                            "CREATED BY SRIRAM S",
+                            color = Color.White,
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 2.5.sp
+                        )
+                        Text(
+                            "✦",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
             }
         }
         if (splashVisible) return
@@ -1761,14 +1849,18 @@ private fun LibraryHome(
                                     it.folder !in hidden && (curFolder == null || it.folder == curFolder)
                                 }
                         }
-                        val curFiltered = curRaw.filter {
-                            search.isBlank() || it.title.contains(search, true) || it.folder.contains(search, true)
+                        val curFiltered = remember(curRaw, search) {
+                            curRaw.filter {
+                                search.isBlank() || it.title.contains(search, true) || it.folder.contains(search, true)
+                            }
                         }
-                        val curItems = when (sort) {
-                            "Date" -> curFiltered.sortedByDescending { it.added }
-                            "Size" -> curFiltered.sortedByDescending { it.size }
-                            "Duration" -> curFiltered.sortedByDescending { it.duration }
-                            else -> curFiltered.sortedBy { it.title.lowercase() }
+                        val curItems = remember(curFiltered, sort) {
+                            when (sort) {
+                                "Date" -> curFiltered.sortedByDescending { it.added }
+                                "Size" -> curFiltered.sortedByDescending { it.size }
+                                "Duration" -> curFiltered.sortedByDescending { it.duration }
+                                else -> curFiltered.sortedBy { it.title.lowercase() }
+                            }
                         }
                         if (curTab == "Settings") {
                             SettingsScreen(activity, onSettingsChanged = { onBumpRefresh() })
@@ -3996,6 +4088,44 @@ fun SettingsScreen(activity: MainActivity, onSettingsChanged: () -> Unit = {}) {
                     }
                 }
             }
+            item(key = "display_performance") {
+                var highRefreshRate by remember(epoch) {
+                    mutableStateOf(prefs.getBoolean("enable_high_refresh_rate", false))
+                }
+                SettingsGlassCard(palette) {
+                    Text(
+                        "Display & Performance",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = palette.accent,
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text("High Refresh Rate (120Hz)", color = palette.textPrimary, fontSize = 14.5.sp)
+                            Text(
+                                if (highRefreshRate) "Enabled — ultra-fluid 120Hz animations for flagship displays"
+                                else "Standard 60fps (Default) — saves battery and ensures smooth stability across all devices",
+                                color = if (highRefreshRate) palette.accentSecondary else palette.textSecondary,
+                                fontSize = 12.sp,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Switch(
+                            checked = highRefreshRate,
+                            onCheckedChange = { enabled ->
+                                highRefreshRate = enabled
+                                prefs.edit().putBoolean("enable_high_refresh_rate", enabled).apply()
+                                activity.applyRefreshRateSettings()
+                            },
+                        )
+                    }
+                }
+            }
             item(key = "languages") {
                 SettingsGlassCard(palette) {
                     Text("Languages", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = palette.accent)
@@ -5540,28 +5670,6 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 Icon(Icons.Default.SkipNext, "Next", tint = Color.White, modifier = Modifier.size(34.dp))
                             }
                             Spacer(Modifier.weight(1f))
-                            val subToggleSrc = remember { MutableInteractionSource() }
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(if (subtitleResizeMode) Color.White else Color.Transparent)
-                                    .border(1.2.dp, Color.White, RoundedCornerShape(6.dp))
-                                    .clickable(interactionSource = subToggleSrc, indication = ripple()) {
-                                        subtitleResizeMode = !subtitleResizeMode
-                                        touch()
-                                    }
-                                    .padding(horizontal = 7.dp, vertical = 3.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    "CC",
-                                    color = if (subtitleResizeMode) Color.Black else Color.White,
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 11.5.sp,
-                                    letterSpacing = 0.5.sp
-                                )
-                            }
-                            Spacer(Modifier.width(10.dp))
                             IconButton(
                                 onClick = {
                                     val nextAspect = aspectOption.next()

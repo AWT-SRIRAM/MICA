@@ -168,6 +168,11 @@ fun MicaShieldBrowserScreen(
     var detectedSubtitleUrl by remember { mutableStateOf<String?>(null) }
     var canGoBack by remember { mutableStateOf(false) }
 
+    DisposableEffect(Unit) {
+        webViewRef?.onResume()
+        onDispose { }
+    }
+
     fun navigateBackSafely() {
         val wv = webViewRef ?: run { onBack(); return }
         if (!wv.canGoBack()) {
@@ -368,7 +373,6 @@ fun MicaShieldBrowserScreen(
 
                                 // 1. Ad & Tracker Interception
                                 if (MicaAdShield.isAdHost(host)) {
-                                    post { blockedCount++ }
                                     return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
                                 }
 
@@ -387,11 +391,15 @@ fun MicaShieldBrowserScreen(
                                     urlStr.contains("/hls/", ignoreCase = true)
 
                                 if (isVideoCandidate && !urlStr.contains(".js") && !urlStr.contains(".css") && !urlStr.contains(".png") && !urlStr.contains(".jpg")) {
-                                    post {
-                                        detectedStream = DetectedStream(
-                                            url = urlStr,
-                                            title = view?.title ?: pageTitle
-                                        )
+                                    if (detectedStream?.url != urlStr) {
+                                        post {
+                                            if (detectedStream?.url != urlStr) {
+                                                detectedStream = DetectedStream(
+                                                    url = urlStr,
+                                                    title = view?.title ?: pageTitle
+                                                )
+                                            }
+                                        }
                                     }
                                 }
 
@@ -404,8 +412,10 @@ fun MicaShieldBrowserScreen(
                                     urlStr.contains("/captions/", ignoreCase = true)
 
                                 if (isSubtitleCandidate && !urlStr.contains(".js") && !urlStr.contains(".css") && !urlStr.contains(".png") && !urlStr.contains(".jpg")) {
-                                    post {
-                                        detectedSubtitleUrl = urlStr
+                                    if (detectedSubtitleUrl != urlStr) {
+                                        post {
+                                            detectedSubtitleUrl = urlStr
+                                        }
                                     }
                                 }
 
@@ -441,6 +451,8 @@ fun MicaShieldBrowserScreen(
                                 // Inject HTML5 video, iframe & subtitle track listener for anime & cartoons (ReaperClubz)
                                 val videoSniffScript = """
                                     (function() {
+                                        if (window._micaSniffInit) return;
+                                        window._micaSniffInit = true;
                                         function getCleanPageTitle() {
                                             var heading = document.querySelector('h1, h2, .anime-title, .title, .film-name, .entry-title');
                                             var raw = (heading ? (heading.innerText || heading.textContent) : '') || document.title || '';
@@ -471,7 +483,7 @@ fun MicaShieldBrowserScreen(
                                                 }
                                             }
                                         }
-                                        setInterval(checkVideoAndSubs, 1200);
+                                        setInterval(checkVideoAndSubs, 1500);
                                     })();
                                 """.trimIndent()
                                 view?.evaluateJavascript(videoSniffScript, null)
@@ -596,7 +608,6 @@ fun MicaShieldBrowserScreen(
                                 "document.querySelectorAll('video, audio').forEach(function(el) { el.pause(); el.muted = true; });",
                                 null
                             )
-                            webViewRef?.onPause()
                             onPlayInMica(mediaItem)
                         }
                         .padding(horizontal = 16.dp, vertical = 12.dp),

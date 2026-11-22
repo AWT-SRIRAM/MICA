@@ -23,6 +23,7 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
         private var lastIsPlaying = false
         private var lastTitle = "MICA"
         private var lastArtist = "The Universe of Entertainment"
+        private var lastTrackUri: String? = null
         private var lastArt: Bitmap? = null
         private var lastPosMs = 0L
         private var lastDurMs = 0L
@@ -38,11 +39,13 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             posMs: Long = 0L,
             durMs: Long = 0L,
             isLiked: Boolean = false,
-            isRepeat: Boolean = false
+            isRepeat: Boolean = false,
+            trackUri: String? = null
         ) {
             lastIsPlaying = isPlaying
             lastTitle = title.ifBlank { "MICA" }
             lastArtist = artist.ifBlank { "The Universe of Entertainment" }
+            if (!trackUri.isNullOrBlank()) lastTrackUri = trackUri
             lastArt = artBitmap
             lastPosMs = posMs
             lastDurMs = durMs
@@ -114,11 +117,12 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
                 views.setImageViewResource(R.id.widget_album_art, R.mipmap.ic_ms_logo)
             }
 
-            // Tap widget -> Open MICA App directly to Music / Audio tab
+            // Tap widget -> Open MICA App directly to Music / Audio tab and play current song
             val openAppIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra("target_tab", "Audio")
-                putExtra("show_player", false)
+                putExtra("show_player", true)
+                putExtra("widget_play_uri", lastTrackUri)
             }
             val openAppPi = PendingIntent.getActivity(
                 context,

@@ -1603,7 +1603,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     if (!item.subtitleUri.isNullOrBlank()) {
                         if (!item.audio) {
                             runCatching {
-                                player.addSlave(org.videolan.libvlc.interfaces.IMedia.Slave.Type.Subtitle, item.subtitleUri, true)
+                                player.addSlave(org.videolan.libvlc.interfaces.IMedia.Slave.Type.Subtitle, item.subtitleUri, false)
                             }
                         }
                         scope.launch(Dispatchers.IO) {
@@ -2632,7 +2632,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     fun updateSubtitleTextAt(position: Long) {
         val primaryHwTrack = resolvePrimaryHwTrack()
-        if (primaryHwTrack >= 0) {
+        val hasSoftwareCues = autoSubCues.isNotEmpty() || legacyFolderCues.isNotEmpty() || selectedSubTracks.any { cuesForTrackId(it).isNotEmpty() }
+        if (primaryHwTrack >= 0 || (player.spuTrack >= 0 && !hasSoftwareCues)) {
             // When LibVLC native SPU is rendering subtitles (e.g. online video streams or bitmap PGS/VobSub),
             // mute the Compose StrokeView text overlay so subtitles never render twice!
             if (activeSubtitleText.value != null || dualSubtitleLines.value.primary != null || dualSubtitleLines.value.secondary != null) {
@@ -2640,6 +2641,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 dualSubtitleLines.value = SubtitleOverlayLines(primary = null, secondary = null)
             }
             return
+        }
+        // When software StrokeView has active cues, ensure LibVLC native SPU is turned off so they never overlap!
+        if (hasSoftwareCues && player.spuTrack >= 0) {
+            player.spuTrack = -1
         }
         val effectivePos = position - state.value.subtitleDelay
         val secondaryTracks = selectedSubTracks.filter { it != primaryHwTrack }
@@ -3666,7 +3671,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
                 posMs = state.value.position,
                 durMs = state.value.duration,
                 isLiked = currentTrackLiked,
-                isRepeat = repeatMode.value != "off"
+                isRepeat = repeatMode.value != "off",
+                trackUri = curItem.uri
             )
         }
     }
