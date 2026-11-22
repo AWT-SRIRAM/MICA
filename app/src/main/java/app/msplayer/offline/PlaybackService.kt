@@ -1816,7 +1816,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     } else Media(vlc, uri)
                     media.setHWDecoderEnabled(decoderMode != "Software", decoderMode == "Hardware")
                     if (PlaybackRules.isStreamUrl(activeItem.uri)) {
-                        media.addOption(":network-caching=2000")
+                        media.addOption(":network-caching=6000")
                         media.addOption(":clock-jitter=0")
                         media.addOption(":clock-synchro=0")
                         media.addOption(":http-reconnect=1")
@@ -2632,8 +2632,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
 
     fun updateSubtitleTextAt(position: Long) {
         val primaryHwTrack = resolvePrimaryHwTrack()
-        val hasSoftwareStreamCues = 9999 in selectedSubTracks || autoSubCues.isNotEmpty()
-        if (primaryHwTrack >= 0 && !hasSoftwareStreamCues) {
+        if (primaryHwTrack >= 0) {
             // When LibVLC native SPU is rendering subtitles (e.g. online video streams or bitmap PGS/VobSub),
             // mute the Compose StrokeView text overlay so subtitles never render twice!
             if (activeSubtitleText.value != null || dualSubtitleLines.value.primary != null || dualSubtitleLines.value.secondary != null) {

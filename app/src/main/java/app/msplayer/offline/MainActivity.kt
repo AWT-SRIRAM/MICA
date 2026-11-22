@@ -1063,7 +1063,7 @@ fun App(activity: MainActivity) {
         return
     }
 
-    // 0.75s Quick Startup Splash: "MICA ONE — the universe of entertainment"
+    // 0.75s Quick Startup Splash: App Logo, "MICA ONE", "the universe of entertainment", and "SRIRAM S"
     var splashVisible by remember { mutableStateOf(true) }
     val splashAlpha by animateFloatAsState(
         targetValue = if (splashVisible) 1f else 0f,
@@ -1083,6 +1083,14 @@ fun App(activity: MainActivity) {
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Image(
+                    painter = painterResource(R.mipmap.ic_ms_logo),
+                    contentDescription = "MICA Logo",
+                    modifier = Modifier
+                        .size(72.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                )
+                Spacer(Modifier.height(16.dp))
                 Text(
                     "MICA ONE",
                     color = Color.White,
@@ -1090,12 +1098,20 @@ fun App(activity: MainActivity) {
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 4.sp
                 )
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
                 Text(
                     "the universe of entertainment",
-                    color = Color.White.copy(alpha = 0.6f),
-                    fontSize = 14.sp,
+                    color = Color.White.copy(alpha = 0.65f),
+                    fontSize = 13.5.sp,
                     letterSpacing = 1.5.sp
+                )
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "SRIRAM S",
+                    color = Color.White.copy(alpha = 0.5f),
+                    fontSize = 12.sp,
+                    letterSpacing = 2.5.sp,
+                    fontWeight = FontWeight.Medium
                 )
             }
         }
@@ -5287,10 +5303,9 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 }
                             ) {
                                 Icon(
-                                    painter = painterResource(R.drawable.ic_flaticon_transcript),
+                                    Icons.Default.Subtitles,
                                     contentDescription = "Subtitles",
-                                    tint = if (service.areSubtitlesEnabled()) Accent else Color.White,
-                                    modifier = Modifier.size(24.dp)
+                                    tint = Color.White
                                 )
                             }
                             val decoderTag = if (state.decoder == "Software") "SW" else if (state.decoder == "Hardware") "HW" else "HW+"
@@ -5528,58 +5543,25 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                             val subToggleSrc = remember { MutableInteractionSource() }
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(if (subtitleResizeMode) Accent else Color.White.copy(alpha = 0.12f))
-                                    .border(0.8.dp, if (subtitleResizeMode) Accent else Color.White.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (subtitleResizeMode) Color.White else Color.Transparent)
+                                    .border(1.2.dp, Color.White, RoundedCornerShape(6.dp))
                                     .clickable(interactionSource = subToggleSrc, indication = ripple()) {
                                         subtitleResizeMode = !subtitleResizeMode
                                         touch()
-                                        if (subtitleResizeMode) {
-                                            hint(PlayerFeedback.Message("Subtitle Resize: ON (Drag screen to scale)"))
-                                        } else {
-                                            hint(PlayerFeedback.Message("Subtitle Resize: OFF (Gestures locked)"))
-                                        }
                                     }
-                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    .padding(horizontal = 7.dp, vertical = 3.dp),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_flaticon_cc),
-                                    contentDescription = "Subtitle Resize Mode",
-                                    tint = if (subtitleResizeMode) Color.Black else Color.White,
-                                    modifier = Modifier.size(24.dp)
+                                Text(
+                                    "CC",
+                                    color = if (subtitleResizeMode) Color.Black else Color.White,
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 11.5.sp,
+                                    letterSpacing = 0.5.sp
                                 )
                             }
-                            val isYtStream = state.item?.let {
-                                it.uri.contains("googlevideo.com") || it.uri.startsWith("yt_") || it.sourceVideoId.isNotBlank() || (it.folder == "Network Streams" && it.uri.contains("youtu"))
-                            } == true
-                            if (isYtStream) {
-                                val hdSrc = remember { MutableInteractionSource() }
-                                IconButton(
-                                    onClick = {
-                                        touch()
-                                        showQualityMenu = true
-                                    },
-                                    interactionSource = hdSrc,
-                                    modifier = Modifier.iosLiquidPress(hdSrc, scaleDown = 0.88f),
-                                ) {
-                                    Box(
-                                        Modifier
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(Color.White.copy(alpha = 0.12f))
-                                            .border(0.8.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
-                                            .padding(horizontal = 7.dp, vertical = 4.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            painter = painterResource(R.drawable.ic_hd_flaticon),
-                                            contentDescription = "HD Quality",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                }
-                            }
+                            Spacer(Modifier.width(10.dp))
                             IconButton(
                                 onClick = {
                                     val nextAspect = aspectOption.next()

@@ -13,6 +13,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -497,6 +498,67 @@ fun MicaShieldBrowserScreen(
             )
         }
 
+        // Animated loading skeleton overlay: replaces dead black screen with informative MICA Shield loader
+        AnimatedVisibility(
+            visible = isLoading && loadingProgress < 85,
+            enter = fadeIn(),
+            exit = fadeOut(tween(250)),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = 56.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF0A0E1A)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    modifier = Modifier.padding(32.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(60.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF1E293B))
+                            .border(1.5.dp, Color(0xFF10B981).copy(alpha = 0.6f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Rounded.Security,
+                            contentDescription = "Shield",
+                            tint = Color(0xFF10B981),
+                            modifier = Modifier.size(30.dp)
+                        )
+                    }
+                    Text(
+                        pageTitle.ifBlank { title },
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "Securing connection & blocking ads...",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 12.5.sp
+                    )
+                    LinearProgressIndicator(
+                        progress = { (loadingProgress.coerceAtLeast(10) / 100f).coerceIn(0.1f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth(0.55f)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                        color = Color(0xFF10B981),
+                        trackColor = Color(0xFF1E293B)
+                    )
+                }
+            }
+        }
+
         // Animated Stream Sniffer Floating Banner: "▶ Play in Mica Video Player"
         AnimatedVisibility(
             visible = detectedStream != null,
@@ -529,6 +591,12 @@ fun MicaShieldBrowserScreen(
                                 folder = "Stream Sniffer",
                                 subtitleUri = detectedSubtitleUrl
                             )
+                            // Immediately pause and mute all HTML5 audio/video inside WebView to prevent dual audio!
+                            webViewRef?.evaluateJavascript(
+                                "document.querySelectorAll('video, audio').forEach(function(el) { el.pause(); el.muted = true; });",
+                                null
+                            )
+                            webViewRef?.onPause()
                             onPlayInMica(mediaItem)
                         }
                         .padding(horizontal = 16.dp, vertical = 12.dp),

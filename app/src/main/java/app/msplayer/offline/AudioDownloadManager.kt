@@ -303,16 +303,21 @@ object AudioDownloadManager {
         return name.replace(Regex("""[\\/:*?"<>|]"""), "_").trim()
     }
 
-    fun getTargetFile(title: String, artist: String): File {
+    fun getTargetFile(title: String, artist: String, isMp3: Boolean = false): File {
         val cleanTitle = sanitizeFilename(title.ifBlank { "Track" })
         val cleanArtist = sanitizeFilename(artist.ifBlank { "Unknown" })
-        val filename = if (cleanArtist != "Unknown") "$cleanTitle - $cleanArtist.m4a" else "$cleanTitle.m4a"
+        val ext = if (isMp3) "mp3" else "m4a"
+        val filename = if (cleanArtist != "Unknown") "$cleanTitle - $cleanArtist.$ext" else "$cleanTitle.$ext"
         return File(getDownloadDir(), filename)
     }
 
     fun isDownloaded(title: String, artist: String): Boolean {
-        val file = getTargetFile(title, artist)
-        return file.exists() && file.length() > 32 * 1024L
+        val cleanTitle = sanitizeFilename(title.ifBlank { "Track" })
+        val cleanArtist = sanitizeFilename(artist.ifBlank { "Unknown" })
+        val prefix = if (cleanArtist != "Unknown") "$cleanTitle - $cleanArtist" else cleanTitle
+        val fM4a = File(getDownloadDir(), "$prefix.m4a")
+        val fMp3 = File(getDownloadDir(), "$prefix.mp3")
+        return (fM4a.exists() && fM4a.length() > 32 * 1024L) || (fMp3.exists() && fMp3.length() > 32 * 1024L)
     }
 
     fun downloadSong(
@@ -328,19 +333,26 @@ object AudioDownloadManager {
             return
         }
 
-        val targetFile = getTargetFile(title, artist)
-        if (targetFile.exists() && targetFile.length() > 32 * 1024L) {
+        if (isDownloaded(title, artist)) {
             Toast.makeText(context, "Song already exists on device", Toast.LENGTH_SHORT).show()
             return
         }
 
         // Initialize progress
         _activeDownloads.value = _activeDownloads.value + (videoId to DownloadProgress(videoId, title, 0.05f))
-        Toast.makeText(context, "Downloading \"$title\"...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Downloading in 320 kbps: \"$title\"...", Toast.LENGTH_SHORT).show()
 
         scope.launch(Dispatchers.IO) {
             try {
-                val streamUrl = YtMusicClient.resolveStreamUrl(videoId)
+                // High-fidelity 320kbps resolution via JioSaavn primary engine (falls back to AudioStreamResolver/YT)
+                val jio = runCatching { JioSaavnClient.resolve320kbps(title, artist) }.getOrNull()
+                val streamUrl = if (jio != null && jio.streamUrl.isNotBlank()) {
+                    jio.streamUrl
+                } else {
+                    val resolved = AudioStreamResolver.resolveBestStream(title, artist, videoId, thumbUrl, context = context)
+                    resolved?.streamUrl?.takeIf { it.isNotBlank() } ?: YtMusicClient.resolveStreamUrl(videoId)
+                }
+
                 if (streamUrl.isNullOrBlank()) {
                     withContext(Dispatchers.Main) {
                         _activeDownloads.value = _activeDownloads.value + (videoId to DownloadProgress(videoId, title, 0f, isFailed = true))
@@ -348,6 +360,9 @@ object AudioDownloadManager {
                     }
                     return@launch
                 }
+
+                val isMp3Stream = streamUrl.contains(".mp3", ignoreCase = true)
+                val targetFile = getTargetFile(title, artist, isMp3 = isMp3Stream)
 
                 val conn = URL(streamUrl).openConnection() as HttpURLConnection
                 conn.connectTimeout = 10000
