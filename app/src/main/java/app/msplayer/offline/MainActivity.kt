@@ -925,15 +925,27 @@ class MainActivity : ComponentActivity() {
         activeBrowserUrl = Pair(url, title)
     }
 
-    fun playStream(url: String, title: String, thumbUrl: String = "", isVideo: Boolean = true) {
+    fun playStream(
+        url: String,
+        title: String,
+        thumbUrl: String = "",
+        isVideo: Boolean = true,
+        userAgent: String? = null,
+        subtitleUrl: String? = null
+    ) {
         val item = MediaItem(
             uri = url,
             title = title,
             audio = !isVideo,
             folder = "Network Streams",
-            thumbUri = thumbUrl.ifBlank { null }
+            thumbUri = thumbUrl.ifBlank { null },
+            streamUserAgent = userAgent.orEmpty(),
+            subtitleUri = subtitleUrl
         )
         startMedia(listOf(item), item)
+        if (!subtitleUrl.isNullOrBlank()) {
+            loadStreamSubtitlesAsync(subtitleUrl)
+        }
     }
 
     fun loadStreamSubtitlesAsync(subtitleUrl: String?) {
@@ -5350,7 +5362,6 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                     val updated = subtitleStyle.copy(scale = newScale)
                                     updated.save(activity)
                                     subtitleStyle = updated
-                                    service.subtitleStyle(updated)
                                     service.updateSubtitleScale(newScale)
                                 },
                                 subtitleResizeMode = subtitleResizeMode,
@@ -6622,7 +6633,7 @@ fun NativeSubtitleOverlay(
                                 if (newScale != style.scale) {
                                     val updated = style.copy(scale = newScale)
                                     updated.save(context)
-                                    service.subtitleStyle(updated)
+                                    service.updateSubtitleScale(newScale)
                                     hudText = "Subtitle Size: $newScale%"
                                     hudJob?.cancel()
                                     hudJob = scope.launch { delay(900); hudText = null }

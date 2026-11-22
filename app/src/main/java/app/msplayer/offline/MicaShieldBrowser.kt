@@ -477,16 +477,19 @@ fun MicaShieldBrowserScreen(
                                 // 2. Video Stream Sniffer (.m3u8 / .mp4 / video streams / anime / cartoons)
                                 val urlStr = reqUrl.toString()
                                 val path = reqUrl.path?.lowercase() ?: ""
-                                val isVideoCandidate = path.endsWith(".m3u8") ||
+                                val isYtHost = host?.contains("youtube.com", ignoreCase = true) == true ||
+                                    host?.contains("googlevideo.com", ignoreCase = true) == true
+                                val isVideoCandidate = !isYtHost && (
+                                    path.endsWith(".m3u8") ||
                                     path.endsWith(".mp4") ||
                                     path.endsWith(".mkv") ||
                                     urlStr.contains(".m3u8", ignoreCase = true) ||
                                     urlStr.contains(".mp4", ignoreCase = true) ||
-                                    urlStr.contains("videoplayback", ignoreCase = true) ||
                                     urlStr.contains("/stream/", ignoreCase = true) ||
                                     urlStr.contains("get_video", ignoreCase = true) ||
                                     urlStr.contains("master.m3u8", ignoreCase = true) ||
                                     urlStr.contains("/hls/", ignoreCase = true)
+                                )
 
                                 if (isVideoCandidate && !urlStr.contains(".js") && !urlStr.contains(".css") && !urlStr.contains(".png") && !urlStr.contains(".jpg")) {
                                     if (detectedStream?.url != urlStr) {

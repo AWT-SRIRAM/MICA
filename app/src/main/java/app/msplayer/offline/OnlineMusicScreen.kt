@@ -442,7 +442,14 @@ fun OnlineMusicScreen(
                     val resolved = StreamResolver.resolve(q)
                     if (resolved.streamUrl.isNotBlank()) {
                         if (resolved.isVideo) {
-                            activity.playStream(resolved.streamUrl, resolved.title, resolved.thumbUrl)
+                            activity.playStream(
+                                url = resolved.streamUrl,
+                                title = resolved.title,
+                                thumbUrl = resolved.thumbUrl,
+                                isVideo = true,
+                                userAgent = resolved.userAgent,
+                                subtitleUrl = resolved.subtitleUrl
+                            )
                         } else {
                             val track = YtTrack(
                                 videoId = resolved.streamUrl,

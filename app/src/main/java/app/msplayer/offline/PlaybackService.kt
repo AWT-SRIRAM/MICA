@@ -193,13 +193,13 @@ class PlaybackService : MediaBrowserServiceCompat() {
         val layout = videoLayout ?: return
         layout.post {
             val surface = layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles) ?: return@post
-            // Keep the hardware SurfaceView stably anchored - never translate or scale it.
-            // SurfaceView.translationY moves the punch-through hole away from the hardware
-            // surface, causing subtitles to be clipped/invisible on streams after controls hide.
-            // Subtitle positioning is handled natively by LibVLC (--sub-margin, --freetype-fontsize).
             surface.translationY = 0f
-            surface.scaleX = 1f
-            surface.scaleY = 1f
+            val currentScale = SubtitleStyle.load(this@PlaybackService).scale
+            val scaleFactor = (currentScale / 100f).coerceIn(0.5f, 3.0f)
+            surface.pivotX = surface.width / 2f
+            surface.pivotY = surface.height * 0.92f
+            surface.scaleX = scaleFactor
+            surface.scaleY = scaleFactor
         }
     }
 
@@ -633,6 +633,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
     private var notifSyncJob: Job? = null
     private var bufferingWatchdog: Job? = null
     private var lastIslandTickAt = 0L
+    private var lastWidgetTickAt = 0L
     private var currentTrackLiked = false
     val isCurrentTrackLiked = MutableStateFlow(false)
     private var likedTrackUri: String? = null
@@ -845,6 +846,12 @@ class PlaybackService : MediaBrowserServiceCompat() {
         layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)?.apply {
             setZOrderMediaOverlay(true)
             holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+            val currentScale = SubtitleStyle.load(this@PlaybackService).scale
+            val scaleFactor = (currentScale / 100f).coerceIn(0.5f, 3.0f)
+            pivotX = width / 2f
+            pivotY = height * 0.92f
+            scaleX = scaleFactor
+            scaleY = scaleFactor
             addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSubtitlePlacement(controlsVisible) }
         }
         videoAttached = true
@@ -1110,6 +1117,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
                             if (!appInForeground && state.value.item?.audio == true && now - lastIslandTickAt >= 500L) {
                                 lastIslandTickAt = now
                                 updateDynamicIsland()
+                            }
+                            if (state.value.item?.audio == true && state.value.playing && now - lastWidgetTickAt >= 950L) {
+                                lastWidgetTickAt = now
+                                MicaMusicWidgetProvider.updateTimeline(this@PlaybackService, posNow, state.value.duration)
                             }
                         }
                         if (now - lastDiagAt >= 1000L) {
@@ -1825,10 +1836,10 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         media.addOption(":no-hls-live-edge")
                         media.addOption(":hls-live-edge=0")
                         val streamUa = activeItem.streamUserAgent.ifBlank {
-                            if (activeItem.folder == "Stream Sniffer") {
-                                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-                            } else if (activeItem.uri.contains("manifest/hls_variant")) {
+                            if (activeItem.uri.contains("manifest/hls_variant") || activeItem.uri.contains("googlevideo.com")) {
                                 "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
+                            } else if (activeItem.folder == "Stream Sniffer") {
+                                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
                             } else {
                                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                             }
@@ -2083,6 +2094,9 @@ class PlaybackService : MediaBrowserServiceCompat() {
         if (result < 0) { clearSeek(); return false }
         state.value = state.value.copy(position = target)
         timeline.value = PlaybackTimeline(target, player.length, true, true)
+        if (isAudio) {
+            MicaMusicWidgetProvider.updateTimeline(this@PlaybackService, target, player.length)
+        }
         if (parsedCues.isNotEmpty() || selectedSubTracks.isNotEmpty()) {
             updateSubtitleTextAt(target)
         }

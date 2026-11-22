@@ -66,6 +66,34 @@ class MicaMusicWidgetProvider : AppWidgetProvider() {
             }
         }
 
+        fun updateTimeline(
+            context: Context,
+            posMs: Long,
+            durMs: Long
+        ) {
+            val appWidgetManager = AppWidgetManager.getInstance(context) ?: return
+            val componentName = ComponentName(context, MicaMusicWidgetProvider::class.java)
+            val widgetIds = appWidgetManager.getAppWidgetIds(componentName)
+            if (widgetIds == null || widgetIds.isEmpty()) return
+
+            lastPosMs = posMs
+            if (durMs > 0L) lastDurMs = durMs
+
+            val safeDur = lastDurMs.coerceAtLeast(1L)
+            val progressPercent = ((posMs.coerceAtLeast(0L).toDouble() / safeDur.toDouble()) * 100).toInt().coerceIn(0, 100)
+
+            val partialViews = RemoteViews(context.packageName, R.layout.widget_mica_music)
+            partialViews.setProgressBar(R.id.widget_progress_bar, 100, progressPercent, false)
+            partialViews.setTextViewText(R.id.widget_time_elapsed, formatDuration(posMs))
+            if (durMs > 0L) {
+                partialViews.setTextViewText(R.id.widget_time_total, formatDuration(durMs))
+            }
+
+            for (widgetId in widgetIds) {
+                appWidgetManager.partiallyUpdateAppWidget(widgetId, partialViews)
+            }
+        }
+
         private fun formatDuration(ms: Long): String {
             if (ms <= 0L) return "00:00"
             val totalSec = ms / 1000
