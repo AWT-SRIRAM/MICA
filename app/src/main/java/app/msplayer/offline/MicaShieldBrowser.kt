@@ -292,9 +292,13 @@ fun MicaShieldBrowserScreen(
                             fun onVideoFound(videoUrl: String, videoTitle: String) {
                                 if (videoUrl.isNotBlank() && !videoUrl.startsWith("blob:")) {
                                     post {
+                                        val clean = (if (videoTitle.isNotBlank()) videoTitle else pageTitle)
+                                            .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
+                                            .replace(Regex("""(?i)^watch\s+"""), "")
+                                            .trim()
                                         detectedStream = DetectedStream(
                                             url = videoUrl,
-                                            title = videoTitle.ifBlank { pageTitle }
+                                            title = clean.ifBlank { "Playing Stream" }
                                         )
                                     }
                                 }
@@ -410,13 +414,19 @@ fun MicaShieldBrowserScreen(
                                 // Inject HTML5 video, iframe & subtitle track listener for anime & cartoons (ReaperClubz)
                                 val videoSniffScript = """
                                     (function() {
+                                        function getCleanPageTitle() {
+                                            var heading = document.querySelector('h1, h2, .anime-title, .title, .film-name, .entry-title');
+                                            var raw = (heading ? (heading.innerText || heading.textContent) : '') || document.title || '';
+                                            return raw.replace(/[-|]\s*reaper.*/i, '').replace(/^watch\s+/i, '').trim();
+                                        }
                                         function checkVideoAndSubs() {
+                                            var cleanTitle = getCleanPageTitle();
                                             var vList = document.querySelectorAll('video');
                                             for (var i = 0; i < vList.length; i++) {
                                                 var v = vList[i];
                                                 var s = v.src || (v.querySelector('source') ? v.querySelector('source').src : '');
                                                 if (s && s.startsWith('http')) {
-                                                    window.MicaSniffer.onVideoFound(s, document.title);
+                                                    window.MicaSniffer.onVideoFound(s, cleanTitle);
                                                 }
                                                 var tracks = v.querySelectorAll('track');
                                                 for (var j = 0; j < tracks.length; j++) {
@@ -482,9 +492,13 @@ fun MicaShieldBrowserScreen(
                         )
                         .border(1.dp, Color.White.copy(alpha = 0.35f), RoundedCornerShape(20.dp))
                         .clickable {
+                            val cleanTitle = (stream.title.ifBlank { pageTitle })
+                                .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
+                                .replace(Regex("""(?i)^watch\s+"""), "")
+                                .trim()
                             val mediaItem = MediaItem(
                                 uri = stream.url,
-                                title = stream.title.ifBlank { pageTitle },
+                                title = cleanTitle.ifBlank { "Playing Stream" },
                                 audio = false,
                                 folder = "Stream Sniffer",
                                 subtitleUri = detectedSubtitleUrl

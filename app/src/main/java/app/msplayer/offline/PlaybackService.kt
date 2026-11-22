@@ -171,7 +171,13 @@ class PlaybackService : MediaBrowserServiceCompat() {
         applyVolume()
         bindPlayerEvents()
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
-        videoLayout?.takeIf { !surfaceSuspended }?.let { player.attachViews(it, null, useTexture, true) }
+        videoLayout?.takeIf { !surfaceSuspended }?.let {
+            player.attachViews(it, null, true, useTexture)
+            it.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)?.apply {
+                setZOrderMediaOverlay(true)
+                holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+            }
+        }
         openCurrent(prior.position, restore = false, keepSubtitleChoice = true)
     }
 
@@ -690,11 +696,11 @@ class PlaybackService : MediaBrowserServiceCompat() {
         fun performAttachAndRedraw() {
             if (released || surfaceSuspended) return
             val useTexture = Store.prefs(this@PlaybackService).getBoolean("use_texture_view", false)
+            player.attachViews(layout, null, true, useTexture)
             layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)?.apply {
                 setZOrderMediaOverlay(true)
                 holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
             }
-            player.attachViews(layout, null, useTexture, true)
             videoAttached = true
             layout.post {
                 if (!released && !surfaceSuspended) {
@@ -840,7 +846,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         surfaceSuspended = false
         player.setUseOrientationFromBounds(true)
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
-        player.attachViews(layout, null, useTexture, true)
+        player.attachViews(layout, null, true, useTexture)
         enforceCenterGravity(layout)
         applyHighRefreshPresentation(layout)
         layout.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)?.apply {
@@ -1185,7 +1191,35 @@ class PlaybackService : MediaBrowserServiceCompat() {
                     bufferingWatchdog?.cancel()
                     Library.videoPlaybackActive.value = state.value.item?.audio == false
                     val realLen = player.length.takeIf { it > 0L } ?: state.value.duration
-                    state.value = state.value.copy(playing = true, buffering = false, error = null, duration = realLen)
+                    val curItm = state.value.item
+                    val curTitle = curItm?.title.orEmpty()
+                    val isGeneric = curTitle.isBlank() || curTitle.equals("Network Stream", true) ||
+                        curTitle.equals("Playing Stream", true) || curTitle.equals("Stream Sniffer", true) ||
+                        curTitle.matches(Regex("""^[0-9a-fA-F_ -]+$""")) ||
+                        curTitle.endsWith(".mp4", ignoreCase = true) || curTitle.endsWith(".mkv", ignoreCase = true)
+                    var effectiveItem = curItm
+                    if (isGeneric) {
+                        val metaTitle = player.media?.getMeta(org.videolan.libvlc.interfaces.IMedia.Meta.Title)?.trim()
+                        if (!metaTitle.isNullOrBlank()) {
+                            val clean = metaTitle
+                                .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
+                                .replace(Regex("""(?i)^watch\s+"""), "")
+                                .replace('_', ' ')
+                                .replace(".mkv", "", true)
+                                .replace(".mp4", "", true)
+                                .trim()
+                            if (clean.isNotBlank() && curItm != null) {
+                                effectiveItem = curItm.copy(title = clean)
+                            }
+                        }
+                    }
+                    state.value = state.value.copy(
+                        playing = true,
+                        buffering = false,
+                        error = null,
+                        duration = realLen,
+                        item = effectiveItem ?: state.value.item
+                    )
                     refreshTracks()
                     player.currentVideoTrack?.let { video ->
                         val dimensions = metadataDimensions ?: PlaybackRules.displayDimensions(video.width, video.height, video.orientation, video.sarNum, video.sarDen)
@@ -3132,7 +3166,13 @@ class PlaybackService : MediaBrowserServiceCompat() {
         applyVolume()
         bindPlayerEvents()
         val useTexture = Store.prefs(this).getBoolean("use_texture_view", false)
-        videoLayout?.takeIf { !surfaceSuspended }?.let { player.attachViews(it, null, useTexture, true) }
+        videoLayout?.takeIf { !surfaceSuspended }?.let {
+            player.attachViews(it, null, true, useTexture)
+            it.findViewById<android.view.SurfaceView>(org.videolan.R.id.surface_subtitles)?.apply {
+                setZOrderMediaOverlay(true)
+                holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
+            }
+        }
         openCurrent(prior.position, restore = false, keepSubtitleChoice = true)
     }
 
@@ -3522,6 +3562,7 @@ class PlaybackService : MediaBrowserServiceCompat() {
         likedTrackUri = item.uri
         updateSession(forceState = true)
         updateDynamicIsland()
+        updateNotification()
         scope.launch(Dispatchers.IO) {
             runCatching {
                 val dao = Store.db(this@PlaybackService).dao()

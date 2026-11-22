@@ -243,13 +243,20 @@ object StreamResolver {
                     .find(cd)?.groupValues?.getOrNull(1)?.let { runCatching { URLDecoder.decode(it, "UTF-8") }.getOrDefault(it) }
 
                 val isKnownVideoExt = listOf(".mp4", ".mkv", ".webm", ".mov", ".avi", ".ts", ".m3u8", ".mpd").any { finalUrl.contains(it, ignoreCase = true) }
+                val pageSlug = Uri.parse(cleanUrl).lastPathSegment?.removeSuffix(".html")?.removeSuffix(".php")?.replace('-', ' ')?.replace('_', ' ')?.trim()
                 // If URL redirected to or serves binary media directly:
                 if (cType.startsWith("video/") || cType.startsWith("audio/") || cType.contains("octet-stream") || cType.contains("matroska") || isKnownVideoExt) {
-                    val rawName = cdFilename ?: Uri.parse(finalUrl).lastPathSegment?.substringBefore('?') ?: "Network Stream"
-                    val cleanTitle = rawName.replace('_', ' ').replace(".mkv", "", true).replace(".mp4", "", true).trim()
+                    val rawName = cdFilename ?: (if (!pageSlug.isNullOrBlank() && !pageSlug.matches(Regex("""^[0-9a-fA-F_ -]+$"""))) pageSlug else Uri.parse(finalUrl).lastPathSegment?.substringBefore('?')) ?: "Network Stream"
+                    val cleanTitle = rawName
+                        .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
+                        .replace(Regex("""(?i)^watch\s+"""), "")
+                        .replace('_', ' ')
+                        .replace(".mkv", "", true)
+                        .replace(".mp4", "", true)
+                        .trim()
                     return@runCatching ResolvedStream(
                         streamUrl = finalUrl,
-                        title = cleanTitle,
+                        title = cleanTitle.ifBlank { "Playing Stream" },
                         isVideo = !cType.startsWith("audio/")
                     )
                 }
@@ -276,6 +283,9 @@ object StreamResolver {
                 val fileNameRegex = Regex("""(?:const|var|let)\s*(?:FILE_NAME|fileName|file_name)\s*=\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
                 val foundTitle = fileNameRegex.find(html)?.groupValues?.getOrNull(1)
 
+                val h1Regex = Regex("""<h1[^>]*>(.*?)</h1>""", RegexOption.IGNORE_CASE)
+                val h1Title = h1Regex.find(html)?.groupValues?.getOrNull(1)?.replace(Regex("<[^>]*>"), "")?.trim()
+
                 val titleTagRegex = Regex("""<title>(?:Watch\s+)?(.*?)</title>""", RegexOption.IGNORE_CASE)
                 val htmlTitle = titleTagRegex.find(html)?.groupValues?.getOrNull(1)?.trim()
 
@@ -284,12 +294,18 @@ object StreamResolver {
                 val absSub = foundSub?.let { if (it.startsWith("http://") || it.startsWith("https://")) it else URL(URL(cleanUrl), it).toString() }
 
                 if (!foundStream.isNullOrBlank()) {
-                    val rawTitle = extractedTitle ?: foundTitle ?: cdFilename ?: htmlTitle ?: Uri.parse(foundStream).lastPathSegment?.substringBefore('?') ?: "Network Stream"
-                    val cleanTitle = rawTitle.replace('_', ' ').replace(".mkv", "", true).replace(".mp4", "", true).trim()
+                    val rawTitle = extractedTitle ?: h1Title ?: foundTitle ?: cdFilename ?: htmlTitle ?: pageSlug ?: Uri.parse(foundStream).lastPathSegment?.substringBefore('?') ?: "Network Stream"
+                    val cleanTitle = rawTitle
+                        .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
+                        .replace(Regex("""(?i)^watch\s+"""), "")
+                        .replace('_', ' ')
+                        .replace(".mkv", "", true)
+                        .replace(".mp4", "", true)
+                        .trim()
                     val absStream = if (foundStream.startsWith("http://") || foundStream.startsWith("https://")) foundStream else URL(URL(cleanUrl), foundStream).toString()
                     ResolvedStream(
                         streamUrl = absStream,
-                        title = cleanTitle,
+                        title = cleanTitle.ifBlank { "Playing Stream" },
                         isVideo = true,
                         subtitleUrl = absSub
                     )

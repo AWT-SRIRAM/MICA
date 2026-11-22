@@ -113,12 +113,19 @@ fun Modifier.videoGestures(
                         // Subtitle Resize Mode is ACTIVE:
                         // Vertical dragging anywhere on screen scales subtitles.
                         // Screen zoom, pan, volume, brightness, and seek are completely locked out.
+                        event.changes.forEach { it.consume() }
                         val deltaY = pan.y
                         if (abs(deltaY) > 0.4f) {
                             gestureSubScale = (gestureSubScale - deltaY * 0.35f).coerceIn(50f, 250f)
                             val roundedScale = gestureSubScale.toInt()
                             subScaleCallback(roundedScale)
                             feedbackNow(PlayerFeedback.SubtitleScale(roundedScale))
+                        }
+                        if (event.changes.none { it.pressed }) {
+                            if (abs(x) < viewConfiguration.touchSlop && abs(y) < viewConfiguration.touchSlop) {
+                                tapNow()
+                            }
+                            break
                         }
                         continue
                     }

@@ -58,7 +58,7 @@ data class IntroSlide(
 
 val introSlides = listOf(
     IntroSlide(
-        title = "Welcome to Mica One",
+        title = "Welcome to MICA ONE",
         subtitle = "The Universe of Entertainment",
         description = "Crafted with passion for pristine sound, cinematic 4K video, and ad-free streaming in one lightning-fast player.",
         icon = Icons.Rounded.GraphicEq,
@@ -88,7 +88,7 @@ val introSlides = listOf(
     IntroSlide(
         title = "Honest Permissions & Storage",
         subtitle = "Why We Need Your Permission",
-        description = "We believe in authentic user privacy. Mica needs media access strictly on your phone to organize your songs and videos, and notification access for seamless lock screen playback controls. Nothing ever leaves your device.",
+        description = "We believe in authentic user privacy. MICA needs media access strictly on your phone to organize your songs and videos, and notification access for seamless lock screen playback controls. Nothing ever leaves your device.",
         icon = Icons.Rounded.FolderOpen,
         accentColor = Color(0xFF10B981),
         isPermissionSlide = true,
@@ -344,7 +344,7 @@ fun IntroOnboardingScreen(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = if (isLastPage) "Enter Mica One" else "Continue",
+                        text = if (isLastPage) "Enter MICA ONE" else "Continue",
                         color = Color.White,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,

@@ -5246,9 +5246,9 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
                                 }
                             ) {
                                 Icon(
-                                    Icons.Default.ClosedCaption,
+                                    painter = painterResource(R.drawable.ic_subtitles_styled),
                                     contentDescription = "Subtitles",
-                                    tint = if (state.subtitleTrack != null) Accent else Color.White
+                                    tint = if (service.areSubtitlesEnabled()) Accent else Color.White
                                 )
                             }
                             val decoderTag = if (state.decoder == "Software") "SW" else if (state.decoder == "Hardware") "HW" else "HW+"
