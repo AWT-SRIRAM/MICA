@@ -114,6 +114,8 @@ object JamSyncController {
     private var clientSocket: Socket? = null
     private val activeClients = CopyOnWriteArrayList<Socket>()
     private val clientWriters = CopyOnWriteArrayList<PrintWriter>()
+    private var pendingInitialSyncPos: Long? = null
+    private var currentService: PlaybackService? = null
 
     fun getLocalIpAddress(): String {
         var fallbackIp: String? = null
@@ -173,6 +175,7 @@ object JamSyncController {
 
     fun startHost(scope: CoroutineScope? = null, service: PlaybackService) {
         leaveJam()
+        currentService = service
         val ip = getLocalIpAddress()
         val randomSuffix = (1000..9999).random().toString()
         val roomCode = "JAM-$randomSuffix"
@@ -255,7 +258,8 @@ object JamSyncController {
                         broadcastToClients(payload)
                         NtfyRelay.publish(topic, payload)
 
-                        delay(1200)
+                        // Tight broadcast cadence (350ms) during active playback for low sync drift
+                        delay(if (playing) 350L else 1200L)
                     }
                 }
 
@@ -307,6 +311,8 @@ object JamSyncController {
 
     fun joinJam(scope: CoroutineScope? = null, hostInput: String, service: PlaybackService) {
         leaveJam()
+        currentService = service
+        pendingInitialSyncPos = null
         val cleanInput = hostInput.trim().uppercase()
         val isDirectIp = cleanInput.contains(".")
         val formattedCode = if (isDirectIp || cleanInput.startsWith("JAM-")) cleanInput else "JAM-$cleanInput"
@@ -325,11 +331,11 @@ object JamSyncController {
         )
 
         clientJob = jamScope.launch {
-            // 1. Heartbeat loop: sends PING to Host immediately, then every 5s
+            // 1. Heartbeat loop: sends PING to Host immediately, then every 4s
             launch {
                 while (isActive) {
                     NtfyRelay.publish(ctlTopic, """{"action":"PING","peerId":"$myPeerId"}""")
-                    delay(5000L)
+                    delay(4000L)
                 }
             }
 
@@ -399,8 +405,11 @@ object JamSyncController {
                     val isPlaying = json.optBoolean("playing", false)
                     val hostPeerCount = json.optInt("peerCount", 1)
                     val serverTime = json.optLong("serverTime", System.currentTimeMillis())
-                    val latency = (System.currentTimeMillis() - serverTime).coerceIn(0L, 2000L)
-                    val compensatedPos = targetPos + (if (isPlaying) latency else 0L)
+
+                    // Accurate transit latency compensation (SSE typically 40-70ms)
+                    val rawDiff = System.currentTimeMillis() - serverTime
+                    val transitLatency = if (rawDiff in 10L..350L) rawDiff else 60L
+                    val compensatedPos = targetPos + (if (isPlaying) transitLatency else 0L)
 
                     // On listener: total participants = host (1) + peers
                     val displayPeers = (hostPeerCount + 1).coerceAtLeast(1)
@@ -422,13 +431,53 @@ object JamSyncController {
                                 folder = "MICA Jam Room",
                                 audio = true,
                             )
-                            service.open(listOf(jamItem), jamItem, autoPlay = true)
+                            pendingInitialSyncPos = compensatedPos
+                            service.open(listOf(jamItem), jamItem, autoPlay = isPlaying)
                         }
 
-                        // Sync position if drifted > 900ms
+                        // High-precision sync engine: Catch-up on buffering, snap-seek on large drift, micro-rate steer on minor drift
                         val currentPos = service.player.time
-                        if (abs(currentPos - compensatedPos) > 900L) {
-                            service.player.time = compensatedPos
+                        if (pendingInitialSyncPos != null) {
+                            if (service.player.isPlaying && currentPos > 0L) {
+                                service.player.time = compensatedPos
+                                pendingInitialSyncPos = null
+                            }
+                        } else {
+                            val drift = compensatedPos - currentPos // > 0 means receiver is behind, < 0 means ahead
+                            val absDrift = abs(drift)
+
+                            if (isPlaying) {
+                                when {
+                                    // Large drift (> 500ms): Snap seek to host position immediately
+                                    absDrift > 500L -> {
+                                        service.player.time = compensatedPos
+                                        if (service.player.rate != 1.0f) {
+                                            service.player.rate = 1.0f
+                                        }
+                                    }
+                                    // Minor drift (60ms to 500ms): Micro-rate steering (tempo adjustment with no audio pops/stutter)
+                                    absDrift > 60L -> {
+                                        val steerRate = if (drift > 0) 1.04f else 0.96f
+                                        if (service.player.rate != steerRate) {
+                                            service.player.rate = steerRate
+                                        }
+                                    }
+                                    // In tight sync (< 60ms): Keep normal playback speed
+                                    else -> {
+                                        if (service.player.rate != 1.0f) {
+                                            service.player.rate = 1.0f
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Host paused: align position exactly
+                                if (abs(currentPos - targetPos) > 60L) {
+                                    service.player.time = targetPos
+                                }
+                                if (service.player.rate != 1.0f) {
+                                    service.player.rate = 1.0f
+                                }
+                            }
                         }
 
                         // Sync play / pause
@@ -485,6 +534,10 @@ object JamSyncController {
         clientJob?.cancel()
         serverJob = null
         clientJob = null
+
+        pendingInitialSyncPos = null
+        runCatching { currentService?.player?.rate = 1.0f }
+        currentService = null
 
         runCatching { serverSocket?.close() }
         serverSocket = null
