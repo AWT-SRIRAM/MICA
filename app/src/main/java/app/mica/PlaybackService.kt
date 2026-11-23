@@ -1202,19 +1202,37 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         curTitle.matches(Regex("""^[0-9a-fA-F_ -]+$""")) ||
                         curTitle.endsWith(".mp4", ignoreCase = true) || curTitle.endsWith(".mkv", ignoreCase = true)
                     var effectiveItem = curItm
-                    if (isGeneric) {
+                    // Clean local file title from spam tags like @Filmbox_Studios or extensions
+                    if (curItm != null && !PlaybackRules.isStreamUrl(curItm.uri)) {
+                        val base = curItm.title
+                            .replace(Regex("""(?i)^@[A-Za-z0-9_]+[\s\-_]*"""), "")
+                            .replace(Regex("""(?i)\.mkv$"""), "")
+                            .replace(Regex("""(?i)\.mp4$"""), "")
+                            .trim()
+                        if (base.isNotBlank() && base != curItm.title) {
+                            effectiveItem = curItm.copy(title = base)
+                        }
+                    } else if (isGeneric) {
                         val metaTitle = player.media?.getMeta(org.videolan.libvlc.interfaces.IMedia.Meta.Title)?.trim()
                         if (!metaTitle.isNullOrBlank()) {
-                            val clean = metaTitle
-                                .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
-                                .replace(Regex("""(?i)^watch\s+"""), "")
-                                .replace('_', ' ')
-                                .replace(".mkv", "", true)
-                                .replace(".mp4", "", true)
-                                .trim()
-                            // Filter out social/channel handles like @HDTalkies, @YoGi_Anime
-                            if (clean.isNotBlank() && !clean.startsWith("@") && curItm != null) {
-                                effectiveItem = curItm.copy(title = clean)
+                            val isSpamMeta = metaTitle.contains("join", ignoreCase = true) ||
+                                    metaTitle.contains("@") ||
+                                    metaTitle.contains("t.me", ignoreCase = true) ||
+                                    metaTitle.contains("telegram", ignoreCase = true) ||
+                                    metaTitle.contains("http", ignoreCase = true) ||
+                                    metaTitle.contains("www", ignoreCase = true) ||
+                                    metaTitle.contains("filmbox", ignoreCase = true)
+                            if (!isSpamMeta) {
+                                val clean = metaTitle
+                                    .replace(Regex("""(?i)\s*[-|]\s*reaper.*"""), "")
+                                    .replace(Regex("""(?i)^watch\s+"""), "")
+                                    .replace('_', ' ')
+                                    .replace(".mkv", "", true)
+                                    .replace(".mp4", "", true)
+                                    .trim()
+                                if (clean.isNotBlank() && !clean.startsWith("@") && curItm != null) {
+                                    effectiveItem = curItm.copy(title = clean)
+                                }
                             }
                         }
                     }

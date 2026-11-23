@@ -913,9 +913,11 @@ object YtMusicClient {
                             }
                             "IOS" -> {
                                 put("clientName", "IOS")
-                                put("clientVersion", "19.29.1")
+                                put("clientVersion", "21.26.4")
                                 put("deviceMake", "Apple")
                                 put("deviceModel", "iPhone16,2")
+                                put("osName", "iPhone")
+                                put("osVersion", "18_3_2")
                                 put("hl", "en")
                                 put("gl", "IN")
                             }
@@ -1075,9 +1077,11 @@ object YtMusicClient {
                         when (clientType) {
                             "IOS" -> {
                                 put("clientName", "IOS")
-                                put("clientVersion", "19.29.1")
+                                put("clientVersion", "21.26.4")
                                 put("deviceMake", "Apple")
                                 put("deviceModel", "iPhone16,2")
+                                put("osName", "iPhone")
+                                put("osVersion", "18_3_2")
                                 put("hl", "en")
                                 put("gl", "IN")
                             }
@@ -1180,13 +1184,22 @@ object YtMusicClient {
                     }
                     val videoStreams = obj.optJSONArray("videoStreams")
                     if (videoStreams != null && videoStreams.length() > 0) {
-                        for (i in videoStreams.length() - 1 downTo 0) {
+                        var bestStream: YtResolvedStream? = null
+                        var bestScore = 0
+                        for (i in 0 until videoStreams.length()) {
                             val v = videoStreams.optJSONObject(i) ?: continue
                             val streamUrl = v.optString("url", "")
-                            if (streamUrl.isNotBlank()) {
-                                return YtResolvedStream(streamUrl, USER_AGENT_WEB, isVideo = true, title = pTitle, author = pAuthor, thumbUrl = pThumb, subtitleUrl = pSubUrl)
+                            if (streamUrl.isBlank()) continue
+                            val isVideoOnly = v.optBoolean("videoOnly", false)
+                            val quality = v.optString("quality", "")
+                            val qNum = Regex("""\d+""").find(quality)?.value?.toIntOrNull() ?: 0
+                            val score = if (!isVideoOnly) qNum + 10000 else qNum
+                            if (score > bestScore) {
+                                bestScore = score
+                                bestStream = YtResolvedStream(streamUrl, USER_AGENT_WEB, isVideo = true, title = pTitle, author = pAuthor, thumbUrl = pThumb, subtitleUrl = pSubUrl)
                             }
                         }
+                        if (bestStream != null) return bestStream
                     }
                 }
             } catch (_: Exception) {}

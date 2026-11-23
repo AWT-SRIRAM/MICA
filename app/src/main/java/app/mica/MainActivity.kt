@@ -971,8 +971,13 @@ class MainActivity : ComponentActivity() {
                 if (conn.responseCode in 200..299) {
                     val body = conn.inputStream.bufferedReader().use { it.readText() }
                     val cues = PlaybackRules.parseSubtitleCues(body)
-                    if (cues.isNotEmpty()) {
-                        withContext(Dispatchers.Main) {
+                    val subFile = java.io.File(cacheDir, "stream_subtitles.vtt")
+                    runCatching { subFile.writeText(body) }
+                    withContext(Dispatchers.Main) {
+                        if (subFile.exists() && subFile.length() > 0) {
+                            service?.addSubtitle(subFile.absolutePath, selectExtra = true)
+                        }
+                        if (cues.isNotEmpty()) {
                             service?.loadAutoSubCues(cues, userTriggered = false)
                         }
                     }
@@ -3721,9 +3726,15 @@ fun MediaRow(
     ) {
         Thumbnail(resolved, if (item.audio) Modifier.size(48.dp) else Modifier.width(84.dp).height(48.dp))
         Column(Modifier.weight(1f).padding(start = 10.dp)) {
+            val cleanDisplayTitle = item.title
+                .replace(Regex("""(?i)^@[A-Za-z0-9_]+[\s\-_]*"""), "")
+                .replace(Regex("""(?i)\.mkv$"""), "")
+                .replace(Regex("""(?i)\.mp4$"""), "")
+                .trim()
+                .ifBlank { item.title }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    item.title,
+                    cleanDisplayTitle,
                     color = if (isPlaying) palette.accent else if (seen) palette.textSecondary else palette.textPrimary,
                     fontSize = 14.5.sp,
                     maxLines = 1,

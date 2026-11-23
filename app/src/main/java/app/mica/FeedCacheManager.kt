@@ -1,4 +1,4 @@
-﻿package app.mica
+package app.mica
 
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
@@ -58,11 +58,16 @@ object FeedCacheManager {
 
     private suspend fun refreshOnlineFeeds(context: Context) = withContext(Dispatchers.IO) {
         try {
-            // Fetch top trending hits (Global + Personalized)
+            val savedLangs = Store.prefs(context).getStringSet("online_languages_v1", setOf("Tamil")) ?: setOf("Tamil")
+            val primaryLang = savedLangs.firstOrNull { it.equals("Tamil", true) } ?: savedLangs.firstOrNull() ?: "Tamil"
+            val query = if (primaryLang.equals("Tamil", true)) "Latest Tamil Hit Songs 2026 Anirudh" else "$primaryLang Top Hit Songs 2026"
+
+            // Fetch top trending hits personalized for user's language preference (Tamil by default)
             val freshHits = runCatching {
-                val ytHits = YtMusicClient.searchSongs("Top Trending Songs 2026")
+                val ytHits = YtMusicClient.searchSongs(query)
                 if (ytHits.isNotEmpty()) ytHits else {
-                    JioSaavnClient.searchSongs("Top Trending Hits").map { s ->
+                    val saavnQuery = if (primaryLang.equals("Tamil", true)) "Tamil Top Hits 2026" else "$primaryLang Top Hits"
+                    JioSaavnClient.searchSongs(saavnQuery).map { s ->
                         YtTrack(
                             videoId = "saavn_${s.id}",
                             title = s.title,
@@ -83,7 +88,7 @@ object FeedCacheManager {
 
             // Fetch playlists
             val freshPlaylists = runCatching {
-                YtMusicClient.searchPlaylists("Tamil Hits Playlist")
+                YtMusicClient.searchPlaylists(if (primaryLang.equals("Tamil", true)) "Tamil Hits Playlist 2026" else "$primaryLang Hits Playlist")
             }.getOrDefault(emptyList())
 
             if (freshPlaylists.isNotEmpty()) {
@@ -97,7 +102,13 @@ object FeedCacheManager {
     private fun loadFromDisk(context: Context) {
         runCatching {
             val hits = loadListFromDisk(context, "feed_top_hits.json") { ytTrackFromJson(it) }
-            if (hits.isNotEmpty()) _cachedTopHits.value = hits
+            val hasNonTamilSpam = hits.any { it.title.contains("Instagram", true) || it.title.contains("Deewaniyat", true) || it.artist.contains("Dhanda", true) }
+            if (hits.isNotEmpty() && !hasNonTamilSpam) {
+                _cachedTopHits.value = hits
+            } else {
+                _cachedTopHits.value = defaultCuratedHits()
+                runCatching { File(context.cacheDir, "feed_top_hits.json").delete() }
+            }
 
             val playlists = loadListFromDisk(context, "feed_playlists.json") { playlistCardFromJson(it) }
             if (playlists.isNotEmpty()) _cachedTrendingPlaylists.value = playlists
