@@ -34,7 +34,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.*
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.lazy.grid.*
@@ -2754,7 +2754,7 @@ private fun LibraryHome(
                 var dragSlot by remember { mutableStateOf<Float?>(null) }
                 val animatedSlot by animateFloatAsState(
                     targetValue = dragSlot ?: activeIdx.toFloat(),
-                    animationSpec = if (dragSlot != null) spring(stiffness = Spring.StiffnessHigh) else spring(dampingRatio = 0.72f, stiffness = 480f),
+                    animationSpec = if (dragSlot != null) spring(stiffness = Spring.StiffnessHigh) else spring(dampingRatio = 0.74f, stiffness = 580f),
                     label = "crystalDockSlot",
                 )
                 val lensScale by animateFloatAsState(
@@ -2829,8 +2829,20 @@ private fun LibraryHome(
                                     .fillMaxHeight()
                                     .clip(CircleShape)
                                     .iosLiquidPress(tabSrc, scaleDown = 0.90f, sheenAlpha = 0.14f)
-                                    .clickable(interactionSource = tabSrc, indication = null) {
-                                        switchDockTab(name)
+                                    .pointerInput(name) {
+                                        detectTapGestures(
+                                            onPress = { offset ->
+                                                switchDockTab(name)
+                                                val press = PressInteraction.Press(offset)
+                                                tabSrc.emit(press)
+                                                val released = tryAwaitRelease()
+                                                if (released) {
+                                                    tabSrc.emit(PressInteraction.Release(press))
+                                                } else {
+                                                    tabSrc.emit(PressInteraction.Cancel(press))
+                                                }
+                                            }
+                                        )
                                     }
                                     .padding(vertical = 3.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally,
