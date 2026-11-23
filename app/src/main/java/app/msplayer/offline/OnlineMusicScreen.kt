@@ -104,20 +104,35 @@ fun rememberRemoteBitmap(url: String?): Bitmap? {
                         withContext(Dispatchers.Main) { bitmap = cached }
                         return@withContext
                     }
-                    val loaded = runCatching {
-                        val conn = (URL(realUrl).openConnection() as HttpURLConnection).apply {
-                            connectTimeout = 4000
-                            readTimeout = 4000
-                            instanceFollowRedirects = true
-                            setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                            setRequestProperty("Connection", "keep-alive")
-                        }
-                        val bytes = conn.inputStream.use { it.readBytes() }
-                        val opts = BitmapFactory.Options().apply {
-                            inPreferredConfig = Bitmap.Config.RGB_565
-                        }
-                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-                    }.getOrNull()
+                    val fetchBitmap: (String) -> Bitmap? = { targetUrl ->
+                        runCatching {
+                            val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+                                connectTimeout = 4000
+                                readTimeout = 4000
+                                instanceFollowRedirects = true
+                                setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                                setRequestProperty("Connection", "keep-alive")
+                            }
+                            if (conn.responseCode in 200..299) {
+                                val bytes = conn.inputStream.use { it.readBytes() }
+                                val opts = BitmapFactory.Options().apply {
+                                    inPreferredConfig = Bitmap.Config.RGB_565
+                                }
+                                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                            } else null
+                        }.getOrNull()
+                    }
+
+                    var loaded = fetchBitmap(realUrl)
+                    // If 500x500 fails (e.g. JioSaavn CDN returns 404 for older tracks), fallback to 150x150
+                    if (loaded == null && realUrl.contains("500x500.jpg")) {
+                        loaded = fetchBitmap(realUrl.replace("500x500.jpg", "150x150.jpg"))
+                    }
+                    // If YouTube maxresdefault fails, fallback to hqdefault
+                    if (loaded == null && realUrl.contains("maxresdefault.jpg")) {
+                        loaded = fetchBitmap(realUrl.replace("maxresdefault.jpg", "hqdefault.jpg"))
+                    }
+
                     if (loaded != null) {
                         OnlineImageCache.put(realUrl, loaded)
                         OnlineImageCache.put(url, loaded)
@@ -179,21 +194,7 @@ fun OnlineMusicScreen(
     }
 
     LaunchedEffect(searchQuery, isSearchFocused) {
-        if (userSelectedSuggestion || !isSearchFocused) {
-            if (userSelectedSuggestion) userSelectedSuggestion = false
-            showSuggestions = false
-            return@LaunchedEffect
-        }
-        val trimmed = searchQuery.trim()
-        if (trimmed.length >= 2) {
-            delay(150L)
-            val list = YtMusicClient.getSearchSuggestions(trimmed)
-            searchSuggestions = list
-            showSuggestions = isSearchFocused && list.isNotEmpty()
-        } else {
-            searchSuggestions = emptyList()
-            showSuggestions = false
-        }
+        showSuggestions = false
     }
     var showLanguageModal by remember { mutableStateOf(false) }
     var showJamDialog by remember { mutableStateOf(false) }
@@ -209,10 +210,10 @@ fun OnlineMusicScreen(
     var isLoadingPlaylistTracks by remember { mutableStateOf(false) }
     var searchedPlaylists by remember { mutableStateOf<List<PlaylistCard>>(emptyList()) }
 
-    // Persistent language preferences (Default: Tamil + English)
+    // Persistent language preferences (Default: Tamil)
     val availableLanguages = listOf("Tamil", "English", "Telugu", "Hindi", "Malayalam", "Punjabi", "Kannada")
     var selectedLanguages by remember {
-        val saved = Store.prefs(context).getStringSet("online_languages_v1", setOf("Tamil", "English")) ?: setOf("Tamil", "English")
+        val saved = Store.prefs(context).getStringSet("online_languages_v1", setOf("Tamil")) ?: setOf("Tamil")
         mutableStateOf(saved)
     }
 
@@ -243,12 +244,18 @@ fun OnlineMusicScreen(
     }
 
     val categories = remember(palette.mode) {
-        when (palette.mode) {
-            AppThemeMode.WHITE_LIQUID_GLASS -> listOf("✨ For You", "🎬 Videos", "💎 Hi-Res FLAC", "Spotify", "☀️ Crystal Pop", "🎸 Acoustic Glass", "🌿 Fresh Morning", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Bollywood")
-            AppThemeMode.LIGHT -> listOf("✨ For You", "🎬 Videos", "💎 Hi-Res FLAC", "Spotify", "☀️ Daylight Hits", "🎵 Feel Good", "🎸 Acoustic", "Popular Artists", "Tamil Hits", "English Pop", "Trending", "Kollywood")
-            AppThemeMode.DARK_LIQUID_GLASS -> listOf("✨ For You", "🎬 Videos", "💎 Hi-Res FLAC", "Spotify", "🌙 Midnight Glass", "🌌 Lo-Fi Chill", "🔊 Deep Bass", "Popular Artists", "Tamil OST & BGM", "Trending", "Kollywood", "EDM")
-            AppThemeMode.DARK -> listOf("✨ For You", "🎬 Videos", "💎 Hi-Res FLAC", "Spotify", "🖤 Night Drive", "🔥 Mass BGM", "🎧 Hip-Hop & EDM", "Popular Artists", "Tamil Hits", "Trending", "Kollywood", "Lo-Fi")
-        }
+        listOf(
+            "✨ For You",
+            "🎬 Videos",
+            "💎 Hi-Res FLAC",
+            "#tamil dance",
+            "#tamil pop",
+            "🎵 Feel Good",
+            "#trending",
+            "Popular Artists",
+            "Kollywood",
+            "Spotify"
+        )
     }
 
     fun recordPlayedArtist(artistName: String) {
@@ -482,14 +489,25 @@ fun OnlineMusicScreen(
         }
         isSearching = true
         scope.launch {
+            val primaryLang = selectedLanguages.firstOrNull { it.equals("Tamil", true) } ?: selectedLanguages.firstOrNull() ?: "Tamil"
+            val langQuery = if (!q.contains(primaryLang, ignoreCase = true)) "$q $primaryLang" else ""
+
             if (activeCategory == "Playlists") {
                 val jioDef = async { JioSaavnClient.searchPlaylists(q) }
                 val ytDef = async { YtMusicClient.searchPlaylists(q) }
+                val jioLangDef = async { if (langQuery.isNotBlank()) JioSaavnClient.searchPlaylists(langQuery) else emptyList() }
+                val ytLangDef = async { if (langQuery.isNotBlank()) YtMusicClient.searchPlaylists(langQuery) else emptyList() }
                 val jio = runCatching { jioDef.await() }.getOrDefault(emptyList())
                 val yt = runCatching { ytDef.await() }.getOrDefault(emptyList())
-                searchedPlaylists = (yt + jio).distinctBy { it.title.lowercase() }
+                val jioLang = runCatching { jioLangDef.await() }.getOrDefault(emptyList())
+                val ytLang = runCatching { ytLangDef.await() }.getOrDefault(emptyList())
+                searchedPlaylists = (jioLang + ytLang + jio + yt).distinctBy { it.title.lowercase() }
             } else {
                 val ytDef = async { runCatching { YtMusicClient.searchSongs(q) }.getOrDefault(emptyList()) }
+                val ytLangDef = async {
+                    if (langQuery.isNotBlank()) runCatching { YtMusicClient.searchSongs(langQuery) }.getOrDefault(emptyList())
+                    else emptyList()
+                }
                 val jioDef = async {
                     runCatching {
                         JioSaavnClient.searchSongs(q).map { s ->
@@ -498,24 +516,73 @@ fun OnlineMusicScreen(
                                 title = s.title,
                                 artist = s.artist,
                                 thumbUrl = s.thumbUrl,
-                                directStreamUrl = s.streamUrl
+                                directStreamUrl = s.streamUrl,
+                                language = s.language
                             )
                         }
                     }.getOrDefault(emptyList())
                 }
+                val jioLangDef = async {
+                    if (langQuery.isNotBlank()) {
+                        runCatching {
+                            JioSaavnClient.searchSongs(langQuery).map { s ->
+                                YtTrack(
+                                    videoId = "saavn_${s.id}",
+                                    title = s.title,
+                                    artist = s.artist,
+                                    thumbUrl = s.thumbUrl,
+                                    directStreamUrl = s.streamUrl,
+                                    language = s.language
+                                )
+                            }
+                        }.getOrDefault(emptyList())
+                    } else emptyList()
+                }
+
                 val ytResults = ytDef.await()
+                val ytLangResults = ytLangDef.await()
                 val jioResults = jioDef.await()
-                val enrichedYt = ytResults.map { yt ->
+                val jioLangResults = jioLangDef.await()
+
+                val allBaseYt = (ytLangResults + ytResults).distinctBy { it.videoId }
+                val allBaseJio = (jioLangResults + jioResults).distinctBy { it.videoId }
+
+                val enrichedYt = allBaseYt.map { yt ->
                     if (yt.artist.equals("Unknown", true) || yt.artist.isBlank()) {
-                        val match = jioResults.find { it.title.equals(yt.title, true) || it.title.contains(yt.title, true) || yt.title.contains(it.title, true) }
+                        val match = allBaseJio.find { it.title.equals(yt.title, true) || it.title.contains(yt.title, true) || yt.title.contains(it.title, true) }
                         if (match != null && match.artist.isNotBlank() && !match.artist.equals("Unknown", true)) {
                             yt.copy(artist = match.artist)
                         } else yt
                     } else yt
                 }
-                val results = if (enrichedYt.isNotEmpty()) {
-                    FeedCacheManager.run { (enrichedYt + jioResults).deduplicated() }
-                } else FeedCacheManager.run { jioResults.deduplicated() }
+
+                // 1. Language-preferred tracks first (Tamil preference prioritized)
+                val langFiltered = (allBaseJio + enrichedYt).filter {
+                    it.language.equals(primaryLang, ignoreCase = true) ||
+                    it.title.contains(primaryLang, ignoreCase = true) ||
+                    it.artist.contains(primaryLang, ignoreCase = true)
+                }
+                val preferredLanguageTracks = (jioLangResults + ytLangResults + langFiltered).distinctBy { it.title.lowercase().trim() }
+
+                // 2. Broader results appended after
+                val broaderTracks = (enrichedYt + allBaseJio).filterNot { tr ->
+                    preferredLanguageTracks.any { it.title.equals(tr.title, ignoreCase = true) }
+                }
+
+                var results = FeedCacheManager.run { (preferredLanguageTracks + broaderTracks).deduplicated() }
+                if (results.isEmpty() && userInitiated) {
+                    val geminiQueries = GeminiRecommender.recommendMusicQueries(context, topPersonalArtists, preferredLanguage = primaryLang, mood = q)
+                    val topRec = geminiQueries.firstOrNull()
+                    if (!topRec.isNullOrBlank()) {
+                        val recYt = runCatching { YtMusicClient.searchSongs(topRec) }.getOrDefault(emptyList())
+                        val recJio = runCatching {
+                            JioSaavnClient.searchSongs(topRec).map { s ->
+                                YtTrack(videoId = "saavn_${s.id}", title = s.title, artist = s.artist, thumbUrl = s.thumbUrl, directStreamUrl = s.streamUrl, language = s.language)
+                            }
+                        }.getOrDefault(emptyList())
+                        results = FeedCacheManager.run { (recJio + recYt).deduplicated() }
+                    }
+                }
                 if (results.isNotEmpty()) {
                     searchResults = results
                     OnlineMusicCache.put(context, q, results)
@@ -594,6 +661,19 @@ fun OnlineMusicScreen(
             isSearching = false
             return
         }
+        if (cat == "✨ For You") {
+            scope.launch {
+                val geminiQueries = GeminiRecommender.recommendMusicQueries(context, topPersonalArtists, "Tamil")
+                val chosenQuery = geminiQueries.randomOrNull() ?: run {
+                    val discoverySeeds = listOf("Melody Hits", "Radio Mix", "Unplugged", "Chill Vibes", "Acoustic Hits", "Essentials", "Top Tracks")
+                    val seedVibe = discoverySeeds.random()
+                    val pickedArtists = if (topPersonalArtists.isNotEmpty()) topPersonalArtists.shuffled().take(2).joinToString(" ") else "Anirudh AR Rahman"
+                    "Tamil $pickedArtists $seedVibe 2026"
+                }
+                performSearch(chosenQuery, userInitiated = false)
+            }
+            return
+        }
         val cached = OnlineMusicCache.get(context, cat)
         if (cached != null && cached.isNotEmpty()) {
             searchResults = FeedCacheManager.run { cached.deduplicated() }
@@ -615,33 +695,30 @@ fun OnlineMusicScreen(
                 else if ("Tamil" in selectedLanguages) "Latest Tamil Hit Songs 2026"
                 else "Top Global Hits 2026"
             }
-            "✨ For You" -> {
-                val discoverySeeds = listOf("Melody Hits", "Radio Mix", "Unplugged", "Chill Vibes", "Acoustic Hits", "Essentials", "Top Tracks")
-                val seedVibe = discoverySeeds.random()
-                val pickedArtists = if (topPersonalArtists.isNotEmpty()) topPersonalArtists.shuffled().take(2).joinToString(" ") else ""
-                if (pickedArtists.isNotBlank()) "$pickedArtists $seedVibe"
-                else "$langHint $themeHint $seedVibe 2026"
-            }
+            "Top Hits" -> "Top Tamil Hit Songs 2026 Anirudh"
+            "Playlists" -> "Tamil Hit Playlists 2026"
+            "🎬 Videos" -> "Tamil HD Video Songs 2026 Anirudh"
+            "#tamil dance", "Tamil Dance" -> "Tamil Dance Hit Songs 2026"
+            "#tamil pop", "Tamil Pop" -> "Tamil Indie Pop Songs 2026"
+            "#feel good", "Feel Good", "🎵 Feel Good" -> "Tamil Feel Good Melody Songs 2026"
+            "#trending", "Trending" -> "Tamil Trending Viral Songs 2026"
+            "Popular Artists" -> "Anirudh AR Rahman Harris Jayaraj Best Hits"
+            "Kollywood" -> "Kollywood Hitlist Anirudh AR Rahman Yuvan"
             "Spotify" -> "Spotify Global Top Hits 2026 Viral"
             "☀️ Crystal Pop", "☀️ Daylight Hits" -> "$langHint Bright Pop Feel Good Songs 2026"
             "🎸 Acoustic Glass", "🎸 Acoustic" -> "$langHint Acoustic Unplugged Melody Hits"
             "🌿 Fresh Morning" -> "$langHint Fresh Morning Chill Melodies"
-            "🎵 Feel Good" -> "$langHint Happy Feel Good Hits 2026"
             "🌙 Midnight Glass" -> "$langHint Late Night Chill Slowed Melodies"
             "🌌 Lo-Fi Chill", "Lo-Fi" -> "$langHint Lo-Fi Chill Slowed Reverb"
             "🔊 Deep Bass" -> "$langHint Deep Bass Boosted EDM Hits"
             "🖤 Night Drive" -> "$langHint Night Drive Synthwave Chill Hits"
             "🔥 Mass BGM", "Tamil OST & BGM" -> "Anirudh Vikram Jailer Leo Mass BGM OST"
             "🎧 Hip-Hop & EDM" -> "Top Hip Hop EDM Party Hits 2026"
-            "Top Hits" -> "Top 50 Chartbusters 2026"
-            "Popular Artists" -> "Anirudh AR Rahman Harris Jayaraj Best Hits"
             "Tamil Hits" -> "Latest Tamil Hit Songs 2026 Anirudh"
             "English Pop" -> "Top English Pop Hits 2026"
-            "Trending" -> "Viral Trending Songs 2026"
-            "Kollywood" -> "Kollywood Hitlist Anirudh AR Rahman Yuvan"
             "Bollywood" -> "Top Bollywood Songs Arijit Singh"
             "EDM" -> "EDM Party Hits 2026"
-            else -> "$cat Songs 2026"
+            else -> "$cat Tamil Songs 2026"
         }
         performSearch(query, userInitiated = false)
     }
@@ -733,95 +810,7 @@ fun OnlineMusicScreen(
             )
         }
 
-        // Search History Dropdown (Matching Screenshot_20261120_065043.jpg)
-        if (isSearchFocused && searchQuery.isBlank() && searchHistory.isNotEmpty()) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.96f) else Color(0xF0181F2A))
-                    .border(0.8.dp, palette.cardBorder, RoundedCornerShape(16.dp))
-                    .padding(vertical = 4.dp)
-            ) {
-                searchHistory.forEach { histItem ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                userSelectedSuggestion = true
-                                searchQuery = histItem
-                                showSuggestions = false
-                                isSearchFocused = false
-                                focusManager.clearFocus()
-                                performSearch(histItem, userInitiated = true)
-                            }
-                            .padding(horizontal = 14.dp, vertical = 9.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Rounded.History, "History", tint = palette.textSecondary.copy(alpha = 0.7f), modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Text(histItem, color = palette.textPrimary, fontSize = 14.sp, modifier = Modifier.weight(1f))
-                        IconButton(
-                            onClick = { removeFromSearchHistory(histItem) },
-                            modifier = Modifier.size(26.dp)
-                        ) {
-                            Icon(Icons.Rounded.Close, "Remove", tint = palette.textSecondary.copy(alpha = 0.6f), modifier = Modifier.size(15.dp))
-                        }
-                        Spacer(Modifier.width(4.dp))
-                        IconButton(
-                            onClick = {
-                                userSelectedSuggestion = true
-                                searchQuery = histItem
-                            },
-                            modifier = Modifier.size(26.dp)
-                        ) {
-                            Icon(Icons.Rounded.NorthWest, "Fill query", tint = palette.textSecondary.copy(alpha = 0.6f), modifier = Modifier.size(15.dp))
-                        }
-                    }
-                }
-            }
-        }
 
-        if (showSuggestions && searchSuggestions.isNotEmpty()) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 2.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (glassEnabled && palette.isLight) Color.White.copy(alpha = 0.96f) else Color(0xF0181F2A))
-                    .border(0.8.dp, palette.cardBorder, RoundedCornerShape(16.dp))
-                    .padding(vertical = 4.dp)
-            ) {
-                searchSuggestions.forEach { suggestion ->
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                userSelectedSuggestion = true
-                                searchQuery = suggestion
-                                showSuggestions = false
-                                performSearch(suggestion, userInitiated = true)
-                            }
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Rounded.Search, null, tint = palette.accent, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Text(suggestion, color = palette.textPrimary, fontSize = 13.5.sp, modifier = Modifier.weight(1f))
-                        IconButton(
-                            onClick = {
-                                userSelectedSuggestion = true
-                                searchQuery = suggestion
-                            },
-                            modifier = Modifier.size(24.dp)
-                        ) {
-                            Icon(Icons.Rounded.NorthWest, "Fill query", tint = palette.textSecondary.copy(alpha = 0.6f), modifier = Modifier.size(14.dp))
-                        }
-                    }
-                }
-            }
-        }
 
         // Category & Language Chips Row with Liquid Glass Surfaces
         LazyRow(
@@ -1606,16 +1595,34 @@ fun OnlineMusicScreen(
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("Results for \"$searchQuery\"", color = palette.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                Text(
+                                    "Results for \"$searchQuery\"",
+                                    color = palette.textPrimary,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false).padding(end = 8.dp)
+                                )
                                 AssistChip(
                                     onClick = {
                                         searchQuery = ""
                                         selectedPlaylist = null
                                         loadCategoryTracks(activeCategory)
                                     },
-                                    label = { Text("Clear ✕", color = palette.accent, fontSize = 12.sp, fontWeight = FontWeight.Bold) },
+                                    label = {
+                                        Text(
+                                            "Clear ✕",
+                                            color = palette.accent,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    },
                                     colors = AssistChipDefaults.assistChipColors(containerColor = palette.accent.copy(alpha = 0.12f)),
-                                    border = BorderStroke(1.dp, palette.accent.copy(alpha = 0.35f))
+                                    border = BorderStroke(1.dp, palette.accent.copy(alpha = 0.35f)),
+                                    modifier = Modifier.wrapContentWidth()
                                 )
                             }
                         }

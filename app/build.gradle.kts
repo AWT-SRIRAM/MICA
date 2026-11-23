@@ -52,7 +52,7 @@ android {
         }
     }
     buildTypes {
-        debug { applicationIdSuffix = ".debug"; manifestPlaceholders["appLabel"] = "MS PLAYER DEBUG" }
+        debug { applicationIdSuffix = ".debug"; manifestPlaceholders["appLabel"] = "MICA" }
         release { isMinifyEnabled = false; if(signingConfigs.findByName("localTest") != null) signingConfig=signingConfigs.getByName("localTest") } }
     lint { abortOnError = true }
 }

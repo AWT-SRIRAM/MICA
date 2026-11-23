@@ -250,7 +250,18 @@ object PlaybackRules {
                     i++
                 }
                 if (textBuilder.isNotEmpty()) {
-                    cues += SubtitleCue(startMs, endMs, textBuilder.toString())
+                    val clean = textBuilder.toString()
+                        .replace(Regex("""<[^>]+>"""), "")
+                        .replace("&amp;", "&")
+                        .replace("&quot;", "\"")
+                        .replace("&#39;", "'")
+                        .replace("&apos;", "'")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .trim()
+                    if (clean.isNotEmpty()) {
+                        cues += SubtitleCue(startMs, endMs, clean)
+                    }
                 }
                 continue
             }

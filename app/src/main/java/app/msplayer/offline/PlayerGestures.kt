@@ -91,9 +91,9 @@ fun Modifier.videoGestures(
             try {
                 while (true) {
                     val remaining = (400 - (android.os.SystemClock.uptimeMillis() - start)).coerceAtLeast(1)
-                    val event = if (mode == 0 && service.state.value.playing) withTimeoutOrNull(remaining) { awaitPointerEvent() } else awaitPointerEvent()
+                    val event = if (mode == 0 && service.state.value.playing && !subResizeModeNow) withTimeoutOrNull(remaining) { awaitPointerEvent() } else awaitPointerEvent()
                     if (event == null) {
-                        if (service.beginTemporarySpeed()) {
+                        if (!subResizeModeNow && service.beginTemporarySpeed()) {
                             mode = 5
                             speedStartX = x
                             speedAnchorRate = if (baseRate >= 1.5f) (baseRate + 0.5f).coerceAtMost(4.0f) else 1.5f

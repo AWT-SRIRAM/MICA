@@ -10,6 +10,7 @@ import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
@@ -20,6 +21,7 @@ data class JioTrack(
     val durationText: String = "",
     val thumbUrl: String = "",
     val streamUrl: String = "",
+    val language: String = "",
 )
 
 object JioSaavnClient {
@@ -143,6 +145,7 @@ object JioSaavnClient {
                         val artist = extractArtist(item)
                         val durationSec = item.optInt("duration", 0)
                         val durationText = if (durationSec > 0) "${durationSec / 60}:${(durationSec % 60).toString().padStart(2, '0')}" else ""
+                        val language = item.optString("language", "").lowercase(Locale.ROOT)
                         var img = item.optString("image", "")
                         // Upgrade to 500x500 HD
                         img = img.replace("150x150.jpg", "500x500.jpg")
@@ -167,6 +170,7 @@ object JioSaavnClient {
                                     durationText = durationText,
                                     thumbUrl = img,
                                     streamUrl = directStream,
+                                    language = language,
                                 )
                             )
                         }

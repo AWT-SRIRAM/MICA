@@ -903,10 +903,10 @@ fun MusicPlayerScreen(
                     )
                 }
 
-                // Right Button: Sleep Timer Crescent Moon (Screenshot_20261119_132518.jpg)
+                // Right Button: Sleep Timer Crescent Moon & Stars (ic_night.xml)
                 IconButton(onClick = { panel = "Sleep" }) {
                     Icon(
-                        painter = painterResource(R.drawable.ic_timer_moon),
+                        painter = painterResource(R.drawable.ic_night),
                         contentDescription = "Sleep Timer",
                         tint = if (sleepMode != "Off") Color(0xFF1DB954) else Color.White.copy(alpha = 0.85f),
                         modifier = Modifier.size(24.dp)

@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Mica</string>
+    <string name="app_name">MICA</string>
     <string name="widget_name">MICA Music</string>
     <string name="widget_description">Interactive Spotify-style Now Playing and Quick-Pick Widget for MICA.</string>
 </resources>

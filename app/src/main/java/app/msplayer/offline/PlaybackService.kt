@@ -1610,13 +1610,8 @@ class PlaybackService : MediaBrowserServiceCompat() {
                         }
                     }
 
-                    // Fetch and load remote stream subtitles if provided
+                    // Fetch and load remote stream subtitles if provided (rendered exclusively via StrokeView engine)
                     if (!item.subtitleUri.isNullOrBlank()) {
-                        if (!item.audio) {
-                            runCatching {
-                                player.addSlave(org.videolan.libvlc.interfaces.IMedia.Slave.Type.Subtitle, item.subtitleUri, false)
-                            }
-                        }
                         scope.launch(Dispatchers.IO) {
                             runCatching {
                                 val conn = (java.net.URL(item.subtitleUri).openConnection() as java.net.HttpURLConnection).apply {

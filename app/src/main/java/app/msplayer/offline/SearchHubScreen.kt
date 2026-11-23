@@ -74,6 +74,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -138,18 +139,11 @@ fun SearchHubScreen(
 
     LaunchedEffect(searchQuery) {
         val trimmed = searchQuery.trim()
-        if (trimmed.length >= 2) {
-            delay(150L)
-            val list = YtMusicClient.getSearchSuggestions(trimmed)
-            searchSuggestions = list
-            showSuggestions = list.isNotEmpty()
-        } else {
-            searchSuggestions = emptyList()
-            showSuggestions = false
-            if (trimmed.isEmpty()) {
-                searchResults = emptyList()
-                isSearching = false
-            }
+        searchSuggestions = emptyList()
+        showSuggestions = false
+        if (trimmed.isEmpty()) {
+            searchResults = emptyList()
+            isSearching = false
         }
     }
 
@@ -163,17 +157,59 @@ fun SearchHubScreen(
         scope.launch {
             val results = withContext(Dispatchers.IO) {
                 runCatching {
-                    val yt = YtMusicClient.searchSongs(query)
-                    if (yt.isNotEmpty()) yt else {
-                        JioSaavnClient.searchSongs(query).map { s ->
-                            YtTrack(
-                                videoId = "saavn_${s.id}",
-                                title = s.title,
-                                artist = s.artist,
-                                thumbUrl = s.thumbUrl,
-                                directStreamUrl = s.streamUrl
-                            )
-                        }
+                    val langQuery = if (!query.contains("tamil", ignoreCase = true)) "$query Tamil" else query
+                    val jioLangDef = async {
+                        runCatching {
+                            JioSaavnClient.searchSongs(langQuery).map { s ->
+                                YtTrack(
+                                    videoId = "saavn_${s.id}",
+                                    title = s.title,
+                                    artist = s.artist,
+                                    thumbUrl = s.thumbUrl,
+                                    directStreamUrl = s.streamUrl,
+                                    language = s.language
+                                )
+                            }
+                        }.getOrDefault(emptyList())
+                    }
+                    val ytLangDef = async {
+                        runCatching { YtMusicClient.searchSongs(langQuery) }.getOrDefault(emptyList())
+                    }
+                    val jioRawDef = async {
+                        runCatching {
+                            JioSaavnClient.searchSongs(query).map { s ->
+                                YtTrack(
+                                    videoId = "saavn_${s.id}",
+                                    title = s.title,
+                                    artist = s.artist,
+                                    thumbUrl = s.thumbUrl,
+                                    directStreamUrl = s.streamUrl,
+                                    language = s.language
+                                )
+                            }
+                        }.getOrDefault(emptyList())
+                    }
+                    val ytRawDef = async {
+                        runCatching { YtMusicClient.searchSongs(query) }.getOrDefault(emptyList())
+                    }
+                    val jioLang = jioLangDef.await()
+                    val ytLang = ytLangDef.await()
+                    val jioRaw = jioRawDef.await()
+                    val ytRaw = ytRawDef.await()
+                    val combined = (jioLang + ytLang + jioRaw + ytRaw).distinctBy { it.videoId }
+                    if (combined.isNotEmpty()) combined else {
+                        // Gemini Preference Recommendations Fallback
+                        val geminiRecs = GeminiRecommender.recommendMusicQueries(context, emptyList(), preferredLanguage = "Tamil", mood = query)
+                        val recQuery = geminiRecs.firstOrNull()
+                        if (!recQuery.isNullOrBlank()) {
+                            val recYt = runCatching { YtMusicClient.searchSongs(recQuery) }.getOrDefault(emptyList())
+                            val recJio = runCatching {
+                                JioSaavnClient.searchSongs(recQuery).map { s ->
+                                    YtTrack(videoId = "saavn_${s.id}", title = s.title, artist = s.artist, thumbUrl = s.thumbUrl, directStreamUrl = s.streamUrl, language = s.language)
+                                }
+                            }.getOrDefault(emptyList())
+                            (recJio + recYt).distinctBy { it.videoId }
+                        } else emptyList()
                     }
                 }.getOrDefault(emptyList())
             }

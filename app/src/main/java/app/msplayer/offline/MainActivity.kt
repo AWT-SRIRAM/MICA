@@ -3726,7 +3726,7 @@ fun MediaRow(
                     item.title,
                     color = if (isPlaying) palette.accent else if (seen) palette.textSecondary else palette.textPrimary,
                     fontSize = 14.5.sp,
-                    maxLines = 3,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
@@ -5080,6 +5080,13 @@ fun PlayerScreen(activity: MainActivity, service: PlaybackService, state: Player
     }
     var subtitleStyle by remember { mutableStateOf(SubtitleStyle.load(activity)) }
     var subtitleResizeMode by remember { mutableStateOf(false) }
+    // Automatically disable CC resize mode after 5 seconds of video playing
+    LaunchedEffect(subtitleResizeMode, state.playing) {
+        if (subtitleResizeMode && state.playing) {
+            delay(5000L)
+            subtitleResizeMode = false
+        }
+    }
     var feedback by remember { mutableStateOf<PlayerFeedback?>(null) }
     var zoom by remember { mutableFloatStateOf(1f) }
     var panX by remember { mutableFloatStateOf(0f) }
@@ -6621,34 +6628,6 @@ fun NativeSubtitleOverlay(
 
     Box(
         modifier = modifier
-            .then(
-                if (hasActiveSub) {
-                    Modifier.pointerInput(style) {
-                        detectTransformGestures { _, pan, _, _ ->
-                            totalDragY += pan.y
-                            if (kotlin.math.abs(totalDragY) > 20f) {
-                                val step = if (totalDragY < 0) 5 else -5
-                                totalDragY = 0f
-                                val newScale = (style.scale + step).coerceIn(50, 300)
-                                if (newScale != style.scale) {
-                                    val updated = style.copy(scale = newScale)
-                                    updated.save(context)
-                                    service.updateSubtitleScale(newScale)
-                                    hudText = "Subtitle Size: $newScale%"
-                                    hudJob?.cancel()
-                                    hudJob = scope.launch { delay(900); hudText = null }
-                                }
-                            } else {
-                                totalDragX += pan.x
-                                if (kotlin.math.abs(totalDragX) > 80f) {
-                                    service.seekCue(totalDragX > 0)
-                                    totalDragX = 0f
-                                }
-                            }
-                        }
-                    }
-                } else Modifier
-            )
     ) {
         AndroidView(
             factory = { ctx ->

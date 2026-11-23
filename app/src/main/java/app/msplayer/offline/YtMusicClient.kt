@@ -33,6 +33,7 @@ data class YtTrack(
     val durationText: String = "",
     val thumbUrl: String = "",
     val directStreamUrl: String = "",
+    val language: String = "",
 )
 
 data class ArtistCard(
@@ -865,30 +866,13 @@ object YtMusicClient {
                     }
                 }
 
-                // 1. Multiplexed combined formats first (itag 22 = 720p, itag 18 = 360p - rock-solid direct MP4 in LibVLC)
-                val formats = streamingData.optJSONArray("formats")
-                if (formats != null) {
-                    var bestVideoUrl: String? = null
-                    var bestHeight = 0
-                    for (i in 0 until formats.length()) {
-                        val f = formats.optJSONObject(i) ?: continue
-                        val directUrl = f.optString("url", "")
-                        val height = f.optInt("height", 0)
-                        if (directUrl.isNotBlank() && height >= bestHeight) {
-                            bestVideoUrl = directUrl
-                            bestHeight = height
-                        }
-                    }
-                    if (bestVideoUrl != null) return YtResolvedStream(bestVideoUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
-                }
-
-                // 2. Apple HLS manifest fallback (adaptive multi-resolution)
+                // 1. Apple HLS manifest first (adaptive multi-resolution up to 1080p, 1440p, 4K with HW+ acceleration in LibVLC)
                 val hlsUrl = streamingData.optString("hlsManifestUrl", "")
                 if (hlsUrl.isNotBlank()) {
                     return YtResolvedStream(hlsUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
                 }
 
-                // 3. Adaptive video format fallback
+                // 2. High-resolution adaptive video formats (1080p / 1440p / 2160p)
                 val adaptive = streamingData.optJSONArray("adaptiveFormats")
                 if (adaptive != null) {
                     var bestAdaptiveUrl: String? = null
@@ -905,7 +889,45 @@ object YtMusicClient {
                             }
                         }
                     }
-                    if (bestAdaptiveUrl != null) return YtResolvedStream(bestAdaptiveUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb)
+                    if (bestAdaptiveUrl != null && bestAdaptHeight >= 1080) {
+                        return YtResolvedStream(bestAdaptiveUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
+                    }
+                }
+
+                // 3. Multiplexed combined formats fallback (itag 22 = 720p, itag 18 = 360p)
+                val formats = streamingData.optJSONArray("formats")
+                if (formats != null) {
+                    var bestVideoUrl: String? = null
+                    var bestHeight = 0
+                    for (i in 0 until formats.length()) {
+                        val f = formats.optJSONObject(i) ?: continue
+                        val directUrl = f.optString("url", "")
+                        val height = f.optInt("height", 0)
+                        if (directUrl.isNotBlank() && height >= bestHeight) {
+                            bestVideoUrl = directUrl
+                            bestHeight = height
+                        }
+                    }
+                    if (bestVideoUrl != null) return YtResolvedStream(bestVideoUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
+                }
+
+                // 4. Any remaining adaptive video format fallback
+                if (adaptive != null) {
+                    var bestAdaptiveUrl: String? = null
+                    var bestAdaptHeight = 0
+                    for (i in 0 until adaptive.length()) {
+                        val f = adaptive.optJSONObject(i) ?: continue
+                        val mime = f.optString("mimeType", "")
+                        if (mime.contains("video")) {
+                            val directUrl = f.optString("url", "")
+                            val height = f.optInt("height", 0)
+                            if (directUrl.isNotBlank() && height >= bestAdaptHeight) {
+                                bestAdaptiveUrl = directUrl
+                                bestAdaptHeight = height
+                            }
+                        }
+                    }
+                    if (bestAdaptiveUrl != null) return YtResolvedStream(bestAdaptiveUrl, ua, isVideo = true, title = videoTitle, author = videoAuthor, thumbUrl = videoThumb, subtitleUrl = subUrl)
                 }
             }
         } catch (_: Exception) {}
