@@ -2736,79 +2736,34 @@ private fun LibraryHome(
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .height(62.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (palette.isLight) Color(0xF4FFFFFF)
-                        else Color(0xE20E1522)
-                    )
-                    .border(
-                        width = 1.dp,
-                        brush = Brush.verticalGradient(
-                            listOf(
-                                Color.White.copy(alpha = if (palette.isLight) 0.55f else 0.22f),
-                                Color.White.copy(alpha = if (palette.isLight) 0.16f else 0.06f),
-                            )
-                        ),
-                        shape = CircleShape
+                    .liquidGlassSurface(
+                        backdrop = appBackdrop,
+                        enabled = glassEnabled,
+                        shape = CircleShape,
+                        tint = if (palette.isLight) Color(0xB8FFFFFF) else Color(0x420C1524),
+                        blurRadius = 16.dp,
+                        refractionHeight = 16.dp,
+                        refractionAmount = 26.dp,
+                        chromaticAberration = true,
+                        isLight = palette.isLight,
                     )
                     .padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
-                val tabCount = dockTabs.size
-                val tabWidth = maxWidth / tabCount
+                val tabWidth = maxWidth / dockTabs.size
                 val tabWidthPx = with(density) { tabWidth.toPx().coerceAtLeast(1f) }
                 var dragSlot by remember { mutableStateOf<Float?>(null) }
-                var lastHapticIdx by remember(activeIdx) { mutableIntStateOf(activeIdx) }
-
                 val animatedSlot by animateFloatAsState(
                     targetValue = dragSlot ?: activeIdx.toFloat(),
-                    animationSpec = spring(
-                        dampingRatio = if (dragSlot != null) 0.98f else 0.80f,
-                        stiffness = if (dragSlot != null) Spring.StiffnessHigh else 750f,
-                    ),
+                    animationSpec = if (dragSlot != null) spring(stiffness = Spring.StiffnessHigh) else spring(dampingRatio = 0.72f, stiffness = 480f),
                     label = "crystalDockSlot",
                 )
-
                 val lensScale by animateFloatAsState(
                     targetValue = if (dragSlot != null) 1.06f else 1f,
-                    animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMedium),
+                    animationSpec = MotionSpec.PressSpring,
                     label = "crystalLensScale",
                 )
-
                 Box(
-                    Modifier
-                        .fillMaxSize()
-                        .pointerInput(tabWidthPx, tabCount) {
-                            detectHorizontalDragGestures(
-                                onDragStart = { offset ->
-                                    val slot = (offset.x / tabWidthPx).coerceIn(0f, (tabCount - 1).toFloat())
-                                    dragSlot = slot
-                                    val idx = slot.roundToInt().coerceIn(0, tabCount - 1)
-                                    lastHapticIdx = idx
-                                    runCatching { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
-                                },
-                                onHorizontalDrag = { change, _ ->
-                                    change.consume()
-                                    val slot = (change.position.x / tabWidthPx).coerceIn(0f, (tabCount - 1).toFloat())
-                                    dragSlot = slot
-                                    val targetIdx = slot.roundToInt().coerceIn(0, tabCount - 1)
-                                    if (targetIdx != lastHapticIdx) {
-                                        lastHapticIdx = targetIdx
-                                        runCatching { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
-                                    }
-                                },
-                                onDragEnd = {
-                                    val finalSlot = dragSlot ?: activeIdx.toFloat()
-                                    val finalIdx = finalSlot.roundToInt().coerceIn(0, tabCount - 1)
-                                    dragSlot = null
-                                    if (finalIdx != activeIdx) {
-                                        switchDockTab(dockTabs[finalIdx].first)
-                                    }
-                                },
-                                onDragCancel = {
-                                    dragSlot = null
-                                }
-                            )
-                        }
+                    Modifier.fillMaxSize()
                 ) {
                     val dropletShape = CircleShape
                     Box(
@@ -2825,26 +2780,26 @@ private fun LibraryHome(
                                 if (palette.isLight) {
                                     Brush.verticalGradient(
                                         listOf(
-                                            Color.White.copy(alpha = 0.96f),
-                                            Color(0xFFBAE6FD).copy(alpha = 0.48f),
-                                            Color.White.copy(alpha = 0.86f),
+                                            Color.White.copy(alpha = 0.94f),
+                                            Color(0xFFBAE6FD).copy(alpha = 0.36f),
+                                            Color.White.copy(alpha = 0.78f),
                                         )
                                     )
                                 } else {
                                     Brush.verticalGradient(
                                         listOf(
-                                            Color.White.copy(alpha = 0.32f),
-                                            GlassTheme.CrystalCobalt.copy(alpha = 0.38f),
-                                            Color(0xFF0A2444).copy(alpha = 0.48f),
+                                            Color.White.copy(alpha = 0.24f),
+                                            GlassTheme.CrystalCobalt.copy(alpha = 0.26f),
+                                            Color(0xFF0A2444).copy(alpha = 0.34f),
                                         )
                                     )
                                 },
                                 dropletShape,
                             )
                             .border(
-                                width = if (palette.isLight) 1.2.dp else 1.0.dp,
+                                width = if (palette.isLight) 1.1.dp else 0.9.dp,
                                 brush = liquidSpecularBrush(
-                                    accentGlow = if (palette.isLight) 0.38f else 0.62f,
+                                    accentGlow = if (palette.isLight) 0.32f else 0.55f,
                                     accentColor = if (palette.isLight) palette.accent else GlassTheme.CrystalCobalt,
                                     isLight = palette.isLight,
                                 ),
@@ -2856,31 +2811,25 @@ private fun LibraryHome(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         dockTabs.forEachIndexed { idx, (name, icon, label) ->
-                            val isSelected = (activeIdx == idx)
+                            val highlighted = (animatedSlot - idx).absoluteValue < 0.5f
+                            val tabSrc = remember { MutableInteractionSource() }
                             val itemTint by animateColorAsState(
                                 targetValue = when {
-                                    isSelected && palette.isLight -> palette.accent
-                                    isSelected -> Color(0xFF5FB0FF)
+                                    highlighted && palette.isLight -> palette.accent
+                                    highlighted -> Color(0xFF5FB0FF)
                                     palette.isLight -> Color(0xFF475569)
-                                    else -> Color.White.copy(alpha = 0.72f)
+                                    else -> Color.White.copy(alpha = 0.84f)
                                 },
-                                animationSpec = spring(stiffness = Spring.StiffnessMedium),
+                                animationSpec = MotionSpec.ColorSpring,
                                 label = "dockTabTint",
-                            )
-                            val iconScale by animateFloatAsState(
-                                targetValue = if (isSelected) 1.10f else 1.0f,
-                                animationSpec = spring(dampingRatio = 0.76f, stiffness = Spring.StiffnessMedium),
-                                label = "dockIconScale",
                             )
                             Column(
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxHeight()
                                     .clip(CircleShape)
-                                    .clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = null,
-                                    ) {
+                                    .iosLiquidPress(tabSrc, scaleDown = 0.90f, sheenAlpha = 0.14f)
+                                    .clickable(interactionSource = tabSrc, indication = null) {
                                         switchDockTab(name)
                                     }
                                     .padding(vertical = 3.dp),
@@ -2891,18 +2840,13 @@ private fun LibraryHome(
                                     icon,
                                     label,
                                     tint = itemTint,
-                                    modifier = Modifier
-                                        .size(19.dp)
-                                        .graphicsLayer {
-                                            scaleX = iconScale
-                                            scaleY = iconScale
-                                        },
+                                    modifier = Modifier.size(19.dp),
                                 )
                                 Text(
                                     label,
                                     color = itemTint,
                                     fontSize = 10.5.sp,
-                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
                                     maxLines = 1,
                                 )
                             }
