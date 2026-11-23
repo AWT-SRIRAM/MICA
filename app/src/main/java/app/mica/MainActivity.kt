@@ -2707,6 +2707,7 @@ private fun LibraryHome(
         fun switchDockTab(name: String) {
             val wasAlreadyCurrent = (tab == name)
             if (!wasAlreadyCurrent) {
+                runCatching { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
                 tabHistory.add(tab)
                 if (tabHistory.size > 25) tabHistory.removeAt(0)
             }
@@ -2725,8 +2726,8 @@ private fun LibraryHome(
         }
         AnimatedVisibility(
             visible = !isImeOpen,
-            enter = fadeIn(tween(160)),
-            exit = fadeOut(tween(160)),
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(120)),
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
             BoxWithConstraints(
@@ -2735,45 +2736,31 @@ private fun LibraryHome(
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .height(62.dp)
-                .let { base ->
-                    if (glassEnabled) {
-                        base.liquidGlassSurface(
-                            backdrop = appBackdrop,
-                            enabled = true,
-                            shape = CircleShape,
-                            tint = if (palette.isLight) Color(0xB8FFFFFF) else Color(0x420C1524),
-                            blurRadius = 16.dp,
-                            refractionHeight = 16.dp,
-                            refractionAmount = 26.dp,
-                            chromaticAberration = true,
-                            isLight = palette.isLight,
-                        )
-                    } else if (palette.isLight) {
-                        base
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.94f))
-                            .border(1.dp, palette.cardBorder, CircleShape)
-                    } else {
-                        base
-                            .clip(CircleShape)
-                            .background(Color(0xFF141923).copy(alpha = 0.96f))
-                            .border(0.9.dp, Color.White.copy(alpha = 0.16f), CircleShape)
-                    }
-                }
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-        ) {
+                    .clip(CircleShape)
+                    .background(
+                        if (palette.isLight) Color(0xF2FFFFFF)
+                        else Color(0xF0101622)
+                    )
+                    .border(
+                        1.dp,
+                        if (palette.isLight) Color(0x22000000)
+                        else Color(0x33FFFFFF),
+                        CircleShape
+                    )
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+            ) {
                 val tabWidth = maxWidth / dockTabs.size
                 val tabWidthPx = with(density) { tabWidth.toPx().coerceAtLeast(1f) }
                 var dragSlot by remember { mutableStateOf<Float?>(null) }
                 var lastHapticIdx by remember(activeIdx) { mutableIntStateOf(activeIdx) }
                 val animatedSlot by animateFloatAsState(
                     targetValue = dragSlot ?: activeIdx.toFloat(),
-                    animationSpec = if (dragSlot != null) spring(stiffness = Spring.StiffnessHigh) else spring(dampingRatio = 0.72f, stiffness = 480f),
+                    animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
                     label = "crystalDockSlot",
                 )
                 val lensScale by animateFloatAsState(
                     targetValue = if (dragSlot != null) 1.06f else 1f,
-                    animationSpec = MotionSpec.PressSpring,
+                    animationSpec = spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMedium),
                     label = "crystalLensScale",
                 )
                 Box(
@@ -2794,17 +2781,17 @@ private fun LibraryHome(
                                 if (palette.isLight) {
                                     Brush.verticalGradient(
                                         listOf(
-                                            Color.White.copy(alpha = 0.94f),
-                                            Color(0xFFBAE6FD).copy(alpha = 0.36f),
-                                            Color.White.copy(alpha = 0.78f),
+                                            Color.White.copy(alpha = 0.96f),
+                                            Color(0xFFBAE6FD).copy(alpha = 0.45f),
+                                            Color.White.copy(alpha = 0.85f),
                                         )
                                     )
                                 } else {
                                     Brush.verticalGradient(
                                         listOf(
-                                            Color.White.copy(alpha = 0.24f),
-                                            GlassTheme.CrystalCobalt.copy(alpha = 0.26f),
-                                            Color(0xFF0A2444).copy(alpha = 0.34f),
+                                            Color.White.copy(alpha = 0.28f),
+                                            GlassTheme.CrystalCobalt.copy(alpha = 0.32f),
+                                            Color(0xFF0A2444).copy(alpha = 0.42f),
                                         )
                                     )
                                 },
@@ -2813,7 +2800,7 @@ private fun LibraryHome(
                             .border(
                                 width = if (palette.isLight) 1.1.dp else 0.9.dp,
                                 brush = liquidSpecularBrush(
-                                    accentGlow = if (palette.isLight) 0.32f else 0.55f,
+                                    accentGlow = if (palette.isLight) 0.35f else 0.6f,
                                     accentColor = if (palette.isLight) palette.accent else GlassTheme.CrystalCobalt,
                                     isLight = palette.isLight,
                                 ),
@@ -2834,7 +2821,7 @@ private fun LibraryHome(
                                     palette.isLight -> Color(0xFF475569)
                                     else -> Color.White.copy(alpha = 0.84f)
                                 },
-                                animationSpec = MotionSpec.ColorSpring,
+                                animationSpec = spring(stiffness = Spring.StiffnessMedium),
                                 label = "dockTabTint",
                             )
                             Column(
@@ -2842,8 +2829,10 @@ private fun LibraryHome(
                                     .weight(1f)
                                     .fillMaxHeight()
                                     .clip(CircleShape)
-                                    .iosLiquidPress(tabSrc, scaleDown = 0.90f, sheenAlpha = 0.14f)
-                                    .clickable(interactionSource = tabSrc, indication = null) {
+                                    .clickable(
+                                        interactionSource = tabSrc,
+                                        indication = ripple(bounded = true, radius = 32.dp, color = palette.accent),
+                                    ) {
                                         switchDockTab(name)
                                     }
                                     .padding(vertical = 3.dp),
