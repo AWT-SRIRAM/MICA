@@ -2736,32 +2736,21 @@ private fun LibraryHome(
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .height(62.dp)
-                    .let { base ->
-                        if (glassEnabled) {
-                            base.liquidGlassSurface(
-                                backdrop = appBackdrop,
-                                enabled = true,
-                                shape = CircleShape,
-                                tint = if (palette.isLight) Color(0xD8FFFFFF) else Color(0x600C1524),
-                                blurRadius = 12.dp,
-                                refractionHeight = 8.dp,
-                                refractionAmount = 14.dp,
-                                chromaticAberration = false,
-                                depthEffect = true,
-                                isLight = palette.isLight,
+                    .clip(CircleShape)
+                    .background(
+                        if (palette.isLight) Color(0xF4FFFFFF)
+                        else Color(0xE20E1522)
+                    )
+                    .border(
+                        width = 1.dp,
+                        brush = Brush.verticalGradient(
+                            listOf(
+                                Color.White.copy(alpha = if (palette.isLight) 0.55f else 0.22f),
+                                Color.White.copy(alpha = if (palette.isLight) 0.16f else 0.06f),
                             )
-                        } else if (palette.isLight) {
-                            base
-                                .clip(CircleShape)
-                                .background(Color.White.copy(alpha = 0.94f))
-                                .border(1.dp, palette.cardBorder, CircleShape)
-                        } else {
-                            base
-                                .clip(CircleShape)
-                                .background(Color(0xFF141923).copy(alpha = 0.96f))
-                                .border(0.9.dp, Color.White.copy(alpha = 0.16f), CircleShape)
-                        }
-                    }
+                        ),
+                        shape = CircleShape
+                    )
                     .padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
                 val tabCount = dockTabs.size
@@ -2773,24 +2762,15 @@ private fun LibraryHome(
                 val animatedSlot by animateFloatAsState(
                     targetValue = dragSlot ?: activeIdx.toFloat(),
                     animationSpec = spring(
-                        dampingRatio = if (dragSlot != null) 0.96f else 0.76f,
-                        stiffness = if (dragSlot != null) Spring.StiffnessHigh else 650f,
+                        dampingRatio = if (dragSlot != null) 0.98f else 0.80f,
+                        stiffness = if (dragSlot != null) Spring.StiffnessHigh else 750f,
                     ),
                     label = "crystalDockSlot",
                 )
 
-                var prevAnimatedSlot by remember { mutableFloatStateOf(activeIdx.toFloat()) }
-                val slotDelta = animatedSlot - prevAnimatedSlot
-                LaunchedEffect(animatedSlot) {
-                    prevAnimatedSlot = animatedSlot
-                }
-
-                val stretchX = 1f + (slotDelta.absoluteValue * 0.18f).coerceAtMost(0.16f)
-                val stretchY = 1f - (slotDelta.absoluteValue * 0.09f).coerceAtMost(0.08f)
-
                 val lensScale by animateFloatAsState(
-                    targetValue = if (dragSlot != null) 1.07f else 1f,
-                    animationSpec = spring(dampingRatio = 0.80f, stiffness = 600f),
+                    targetValue = if (dragSlot != null) 1.06f else 1f,
+                    animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMedium),
                     label = "crystalLensScale",
                 )
 
@@ -2833,12 +2813,12 @@ private fun LibraryHome(
                     val dropletShape = CircleShape
                     Box(
                         Modifier
-                            .offset { IntOffset((animatedSlot * tabWidthPx).roundToInt(), 0) }
                             .width(tabWidth)
                             .fillMaxHeight()
                             .graphicsLayer {
-                                scaleX = lensScale * stretchX
-                                scaleY = lensScale * stretchY
+                                translationX = animatedSlot * tabWidthPx
+                                scaleX = lensScale
+                                scaleY = lensScale
                             }
                             .clip(dropletShape)
                             .background(
@@ -2853,9 +2833,9 @@ private fun LibraryHome(
                                 } else {
                                     Brush.verticalGradient(
                                         listOf(
-                                            Color.White.copy(alpha = 0.30f),
-                                            GlassTheme.CrystalCobalt.copy(alpha = 0.36f),
-                                            Color(0xFF0A2444).copy(alpha = 0.46f),
+                                            Color.White.copy(alpha = 0.32f),
+                                            GlassTheme.CrystalCobalt.copy(alpha = 0.38f),
+                                            Color(0xFF0A2444).copy(alpha = 0.48f),
                                         )
                                     )
                                 },
@@ -2876,24 +2856,21 @@ private fun LibraryHome(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         dockTabs.forEachIndexed { idx, (name, icon, label) ->
-                            val distance = (animatedSlot - idx).absoluteValue
-                            val highlighted = distance < 0.5f
-                            val proximity = (1f - distance).coerceIn(0f, 1f)
-                            val iconScale by animateFloatAsState(
-                                targetValue = 1f + proximity * 0.12f,
-                                animationSpec = spring(dampingRatio = 0.78f, stiffness = 700f),
-                                label = "dockIconScale",
-                            )
-                            val tabSrc = remember { MutableInteractionSource() }
+                            val isSelected = (activeIdx == idx)
                             val itemTint by animateColorAsState(
                                 targetValue = when {
-                                    highlighted && palette.isLight -> palette.accent
-                                    highlighted -> Color(0xFF5FB0FF)
+                                    isSelected && palette.isLight -> palette.accent
+                                    isSelected -> Color(0xFF5FB0FF)
                                     palette.isLight -> Color(0xFF475569)
-                                    else -> Color.White.copy(alpha = 0.85f)
+                                    else -> Color.White.copy(alpha = 0.72f)
                                 },
                                 animationSpec = spring(stiffness = Spring.StiffnessMedium),
                                 label = "dockTabTint",
+                            )
+                            val iconScale by animateFloatAsState(
+                                targetValue = if (isSelected) 1.10f else 1.0f,
+                                animationSpec = spring(dampingRatio = 0.76f, stiffness = Spring.StiffnessMedium),
+                                label = "dockIconScale",
                             )
                             Column(
                                 modifier = Modifier
@@ -2901,8 +2878,8 @@ private fun LibraryHome(
                                     .fillMaxHeight()
                                     .clip(CircleShape)
                                     .clickable(
-                                        interactionSource = tabSrc,
-                                        indication = ripple(bounded = true, radius = 32.dp, color = palette.accent),
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
                                     ) {
                                         switchDockTab(name)
                                     }
@@ -2925,11 +2902,8 @@ private fun LibraryHome(
                                     label,
                                     color = itemTint,
                                     fontSize = 10.5.sp,
-                                    fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                                     maxLines = 1,
-                                    modifier = Modifier.graphicsLayer {
-                                        alpha = 0.72f + proximity * 0.28f
-                                    },
                                 )
                             }
                         }
