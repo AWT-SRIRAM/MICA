@@ -2726,8 +2726,8 @@ private fun LibraryHome(
         }
         AnimatedVisibility(
             visible = !isImeOpen,
-            enter = fadeIn(tween(120)),
-            exit = fadeOut(tween(120)),
+            enter = fadeIn(tween(140)),
+            exit = fadeOut(tween(140)),
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
             BoxWithConstraints(
@@ -2736,35 +2736,99 @@ private fun LibraryHome(
                     .padding(horizontal = 16.dp, vertical = 8.dp)
                     .fillMaxWidth()
                     .height(62.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (palette.isLight) Color(0xF2FFFFFF)
-                        else Color(0xF0101622)
-                    )
-                    .border(
-                        1.dp,
-                        if (palette.isLight) Color(0x22000000)
-                        else Color(0x33FFFFFF),
-                        CircleShape
-                    )
+                    .let { base ->
+                        if (glassEnabled) {
+                            base.liquidGlassSurface(
+                                backdrop = appBackdrop,
+                                enabled = true,
+                                shape = CircleShape,
+                                tint = if (palette.isLight) Color(0xD8FFFFFF) else Color(0x600C1524),
+                                blurRadius = 12.dp,
+                                refractionHeight = 8.dp,
+                                refractionAmount = 14.dp,
+                                chromaticAberration = false,
+                                depthEffect = true,
+                                isLight = palette.isLight,
+                            )
+                        } else if (palette.isLight) {
+                            base
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.94f))
+                                .border(1.dp, palette.cardBorder, CircleShape)
+                        } else {
+                            base
+                                .clip(CircleShape)
+                                .background(Color(0xFF141923).copy(alpha = 0.96f))
+                                .border(0.9.dp, Color.White.copy(alpha = 0.16f), CircleShape)
+                        }
+                    }
                     .padding(horizontal = 4.dp, vertical = 4.dp),
             ) {
-                val tabWidth = maxWidth / dockTabs.size
+                val tabCount = dockTabs.size
+                val tabWidth = maxWidth / tabCount
                 val tabWidthPx = with(density) { tabWidth.toPx().coerceAtLeast(1f) }
                 var dragSlot by remember { mutableStateOf<Float?>(null) }
                 var lastHapticIdx by remember(activeIdx) { mutableIntStateOf(activeIdx) }
+
                 val animatedSlot by animateFloatAsState(
                     targetValue = dragSlot ?: activeIdx.toFloat(),
-                    animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow),
+                    animationSpec = spring(
+                        dampingRatio = if (dragSlot != null) 0.96f else 0.76f,
+                        stiffness = if (dragSlot != null) Spring.StiffnessHigh else 650f,
+                    ),
                     label = "crystalDockSlot",
                 )
+
+                var prevAnimatedSlot by remember { mutableFloatStateOf(activeIdx.toFloat()) }
+                val slotDelta = animatedSlot - prevAnimatedSlot
+                LaunchedEffect(animatedSlot) {
+                    prevAnimatedSlot = animatedSlot
+                }
+
+                val stretchX = 1f + (slotDelta.absoluteValue * 0.18f).coerceAtMost(0.16f)
+                val stretchY = 1f - (slotDelta.absoluteValue * 0.09f).coerceAtMost(0.08f)
+
                 val lensScale by animateFloatAsState(
-                    targetValue = if (dragSlot != null) 1.06f else 1f,
-                    animationSpec = spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMedium),
+                    targetValue = if (dragSlot != null) 1.07f else 1f,
+                    animationSpec = spring(dampingRatio = 0.80f, stiffness = 600f),
                     label = "crystalLensScale",
                 )
+
                 Box(
-                    Modifier.fillMaxSize()
+                    Modifier
+                        .fillMaxSize()
+                        .pointerInput(tabWidthPx, tabCount) {
+                            detectHorizontalDragGestures(
+                                onDragStart = { offset ->
+                                    val slot = (offset.x / tabWidthPx).coerceIn(0f, (tabCount - 1).toFloat())
+                                    dragSlot = slot
+                                    val idx = slot.roundToInt().coerceIn(0, tabCount - 1)
+                                    lastHapticIdx = idx
+                                    runCatching { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                                },
+                                onHorizontalDrag = { change, _ ->
+                                    change.consume()
+                                    val slot = (change.position.x / tabWidthPx).coerceIn(0f, (tabCount - 1).toFloat())
+                                    dragSlot = slot
+                                    val targetIdx = slot.roundToInt().coerceIn(0, tabCount - 1)
+                                    if (targetIdx != lastHapticIdx) {
+                                        lastHapticIdx = targetIdx
+                                        runCatching { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                                    }
+                                },
+                                onDragEnd = {
+                                    val finalSlot = dragSlot ?: activeIdx.toFloat()
+                                    val finalIdx = finalSlot.roundToInt().coerceIn(0, tabCount - 1)
+                                    dragSlot = null
+                                    if (finalIdx != activeIdx) {
+                                        switchDockTab(dockTabs[finalIdx].first)
+                                    }
+                                },
+                                onDragCancel = {
+                                    dragSlot = null
+                                }
+                            )
+                        }
                 ) {
                     val dropletShape = CircleShape
                     Box(
@@ -2773,8 +2837,8 @@ private fun LibraryHome(
                             .width(tabWidth)
                             .fillMaxHeight()
                             .graphicsLayer {
-                                scaleX = lensScale
-                                scaleY = lensScale
+                                scaleX = lensScale * stretchX
+                                scaleY = lensScale * stretchY
                             }
                             .clip(dropletShape)
                             .background(
@@ -2782,25 +2846,25 @@ private fun LibraryHome(
                                     Brush.verticalGradient(
                                         listOf(
                                             Color.White.copy(alpha = 0.96f),
-                                            Color(0xFFBAE6FD).copy(alpha = 0.45f),
-                                            Color.White.copy(alpha = 0.85f),
+                                            Color(0xFFBAE6FD).copy(alpha = 0.48f),
+                                            Color.White.copy(alpha = 0.86f),
                                         )
                                     )
                                 } else {
                                     Brush.verticalGradient(
                                         listOf(
-                                            Color.White.copy(alpha = 0.28f),
-                                            GlassTheme.CrystalCobalt.copy(alpha = 0.32f),
-                                            Color(0xFF0A2444).copy(alpha = 0.42f),
+                                            Color.White.copy(alpha = 0.30f),
+                                            GlassTheme.CrystalCobalt.copy(alpha = 0.36f),
+                                            Color(0xFF0A2444).copy(alpha = 0.46f),
                                         )
                                     )
                                 },
                                 dropletShape,
                             )
                             .border(
-                                width = if (palette.isLight) 1.1.dp else 0.9.dp,
+                                width = if (palette.isLight) 1.2.dp else 1.0.dp,
                                 brush = liquidSpecularBrush(
-                                    accentGlow = if (palette.isLight) 0.35f else 0.6f,
+                                    accentGlow = if (palette.isLight) 0.38f else 0.62f,
                                     accentColor = if (palette.isLight) palette.accent else GlassTheme.CrystalCobalt,
                                     isLight = palette.isLight,
                                 ),
@@ -2812,14 +2876,21 @@ private fun LibraryHome(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         dockTabs.forEachIndexed { idx, (name, icon, label) ->
-                            val highlighted = (animatedSlot - idx).absoluteValue < 0.5f
+                            val distance = (animatedSlot - idx).absoluteValue
+                            val highlighted = distance < 0.5f
+                            val proximity = (1f - distance).coerceIn(0f, 1f)
+                            val iconScale by animateFloatAsState(
+                                targetValue = 1f + proximity * 0.12f,
+                                animationSpec = spring(dampingRatio = 0.78f, stiffness = 700f),
+                                label = "dockIconScale",
+                            )
                             val tabSrc = remember { MutableInteractionSource() }
                             val itemTint by animateColorAsState(
                                 targetValue = when {
                                     highlighted && palette.isLight -> palette.accent
                                     highlighted -> Color(0xFF5FB0FF)
                                     palette.isLight -> Color(0xFF475569)
-                                    else -> Color.White.copy(alpha = 0.84f)
+                                    else -> Color.White.copy(alpha = 0.85f)
                                 },
                                 animationSpec = spring(stiffness = Spring.StiffnessMedium),
                                 label = "dockTabTint",
@@ -2843,7 +2914,12 @@ private fun LibraryHome(
                                     icon,
                                     label,
                                     tint = itemTint,
-                                    modifier = Modifier.size(19.dp),
+                                    modifier = Modifier
+                                        .size(19.dp)
+                                        .graphicsLayer {
+                                            scaleX = iconScale
+                                            scaleY = iconScale
+                                        },
                                 )
                                 Text(
                                     label,
@@ -2851,6 +2927,9 @@ private fun LibraryHome(
                                     fontSize = 10.5.sp,
                                     fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
                                     maxLines = 1,
+                                    modifier = Modifier.graphicsLayer {
+                                        alpha = 0.72f + proximity * 0.28f
+                                    },
                                 )
                             }
                         }
