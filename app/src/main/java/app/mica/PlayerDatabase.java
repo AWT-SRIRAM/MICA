@@ -1,0 +1,4 @@
+package app.mica;
+import androidx.room.*;
+@Database(entities={SavedMedia.class,PlaylistEntry.class},version=2,exportSchema=false)
+public abstract class PlayerDatabase extends RoomDatabase { public abstract PlayerDao dao(); }

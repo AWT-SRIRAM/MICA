@@ -1,5 +1,5 @@
-<?xml version="1.0" encoding="utf-8"?>
-<app.msplayer.offline.CenteredSurfaceFrame xmlns:android="http://schemas.android.com/apk/res/android"
+﻿<?xml version="1.0" encoding="utf-8"?>
+<app.mica.CenteredSurfaceFrame xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/player_surface_frame"
     android:layout_width="match_parent"
@@ -31,4 +31,4 @@
         android:layout_gravity="center"
         android:inflatedId="@+id/texture_video"
         android:layout="@layout/texture_view" />
-</app.msplayer.offline.CenteredSurfaceFrame>
+</app.mica.CenteredSurfaceFrame>

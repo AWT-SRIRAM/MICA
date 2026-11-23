@@ -13,12 +13,16 @@ val localProps = Properties().apply {
 val isPublicRelease = project.findProperty("publicRelease")?.toString()?.toBoolean() == true
 fun localSecret(name: String): String {
     if (isPublicRelease) return ""
-    val raw = localProps.getProperty(name) ?: System.getenv(name) ?: ""
+    val raw = localProps.getProperty(name)
+        ?: localProps.getProperty(name.replace("MICA_", "MSPLAYER_"))
+        ?: System.getenv(name)
+        ?: System.getenv(name.replace("MICA_", "MSPLAYER_"))
+        ?: ""
     return raw.replace("\\", "\\\\").replace("\"", "\\\"")
 }
 
 android {
-    namespace = "app.msplayer.offline"
+    namespace = "app.mica"
     compileSdk = 36
     defaultConfig {
         applicationId = "app.mica"
@@ -27,32 +31,34 @@ android {
         versionCode = 31
         versionName = "0.8.3"
         ndk { abiFilters += (project.findProperty("testAbi")?.toString() ?: "arm64-v8a") }
-        testInstrumentationRunner = "app.msplayer.offline.SafeTestRunner"
+        testInstrumentationRunner = "app.mica.SafeTestRunner"
         manifestPlaceholders["appLabel"] = "MICA"
-        buildConfigField("String", "DEFAULT_GEMINI_KEY", "\"${localSecret("MSPLAYER_GEMINI_KEY")}\"")
-        buildConfigField("String", "DEFAULT_GROQ_KEY", "\"${localSecret("MSPLAYER_GROQ_KEY")}\"")
-        buildConfigField("String", "DEFAULT_DEEPGRAM_KEY", "\"${localSecret("MSPLAYER_DEEPGRAM_KEY")}\"")
-        buildConfigField("String", "DEFAULT_CLOUDFLARE_TOKEN", "\"${localSecret("MSPLAYER_CLOUDFLARE_TOKEN")}\"")
-        buildConfigField("String", "DEFAULT_OPENSUBTITLES_KEY", "\"${localSecret("MSPLAYER_OPENSUBTITLES_KEY")}\"")
-        buildConfigField("String", "DEFAULT_SUBDL_KEY", "\"${localSecret("MSPLAYER_SUBDL_KEY")}\"")
-        buildConfigField("String", "DEFAULT_SUBSOURCE_KEY", "\"${localSecret("MSPLAYER_SUBSOURCE_KEY")}\"")
-        buildConfigField("String", "DEFAULT_WYZIE_KEY", "\"${localSecret("MSPLAYER_WYZIE_KEY")}\"")
-        buildConfigField("String", "DEFAULT_TMDB_KEY", "\"${localSecret("MSPLAYER_TMDB_KEY")}\"")
+        buildConfigField("String", "DEFAULT_GEMINI_KEY", "\"${localSecret("MICA_GEMINI_KEY")}\"")
+        buildConfigField("String", "DEFAULT_GROQ_KEY", "\"${localSecret("MICA_GROQ_KEY")}\"")
+        buildConfigField("String", "DEFAULT_DEEPGRAM_KEY", "\"${localSecret("MICA_DEEPGRAM_KEY")}\"")
+        buildConfigField("String", "DEFAULT_CLOUDFLARE_TOKEN", "\"${localSecret("MICA_CLOUDFLARE_TOKEN")}\"")
+        buildConfigField("String", "DEFAULT_OPENSUBTITLES_KEY", "\"${localSecret("MICA_OPENSUBTITLES_KEY")}\"")
+        buildConfigField("String", "DEFAULT_SUBDL_KEY", "\"${localSecret("MICA_SUBDL_KEY")}\"")
+        buildConfigField("String", "DEFAULT_SUBSOURCE_KEY", "\"${localSecret("MICA_SUBSOURCE_KEY")}\"")
+        buildConfigField("String", "DEFAULT_WYZIE_KEY", "\"${localSecret("MICA_WYZIE_KEY")}\"")
+        buildConfigField("String", "DEFAULT_TMDB_KEY", "\"${localSecret("MICA_TMDB_KEY")}\"")
     }
     buildFeatures { compose = true; buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     packaging { jniLibs.useLegacyPackaging = false; resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     signingConfigs {
-        if(System.getenv("MSPLAYER_KEYSTORE") != null) create("localTest") {
-            storeFile=file(System.getenv("MSPLAYER_KEYSTORE"))
-            storePassword=System.getenv("MSPLAYER_STORE_PASSWORD")
-            keyAlias="msplayer"
-            keyPassword=System.getenv("MSPLAYER_STORE_PASSWORD")
+        val ks = System.getenv("MICA_KEYSTORE") ?: System.getenv("MSPLAYER_KEYSTORE")
+        val pass = System.getenv("MICA_STORE_PASSWORD") ?: System.getenv("MSPLAYER_STORE_PASSWORD")
+        if (ks != null && pass != null) create("localTest") {
+            storeFile = file(ks)
+            storePassword = pass
+            keyAlias = "mica"
+            keyPassword = pass
         }
     }
     buildTypes {
-        debug { applicationIdSuffix = ".debug"; manifestPlaceholders["appLabel"] = "MICA" }
+        debug { manifestPlaceholders["appLabel"] = "MICA" }
         release { isMinifyEnabled = false; if(signingConfigs.findByName("localTest") != null) signingConfig=signingConfigs.getByName("localTest") } }
     lint { abortOnError = true }
 }

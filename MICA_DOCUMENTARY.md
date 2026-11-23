@@ -2,7 +2,7 @@
 **Product Name**: MICA  
 **Tagline**: *One app. Every experience. — The Universe of Entertainment*  
 **Application ID**: `app.mica`  
-**Internal Namespace**: `app.msplayer.offline`  
+**Internal Namespace**: `app.mica`  
 **Repository**: [https://github.com/AWT-SRIRAM/MICA](https://github.com/AWT-SRIRAM/MICA)  
 **Authors**: **SRIRAM S & ANTIGRAVITY**  
 **Target Architecture**: Android (ARM64-v8a / Android 8.0+ API 26–36)  
